@@ -63,6 +63,7 @@ This checklist tracks findings from a source review. A checked item means the co
 
 - [x] **P1 — Implement framed reads on both server implementations.** Initial requests and heartbeat replies use bounded semicolon-delimited frame parsing with deadlines.
 - [x] **P1 — Implement send-all on both server implementations.** Server protocol writes use a complete-send loop, including Linux interrupted-call handling.
+- [x] **P1 — Violation report acknowledgement:** both server variants send explicit `OK;` for review-only reports or `KICK;` for banned HWIDs; the client reads a complete response frame and rejects unknown/missing responses.
 - [x] **P1 — Preserve pipelined frames.** Shared frame reader retains unread bytes; initial request path rejects unexpected extra client frames.
 - [x] **P1 — Fix heartbeat threshold semantics.** Both server variants use `max_consecutive_miss` for warning/flagging transitions. Exact threshold behavior still needs runtime tests.
 - [x] **P1 — Apply server heartbeat configuration.** Linux server passes validated heartbeat settings into sessions; Windows server sends its configured defaults to the client.
