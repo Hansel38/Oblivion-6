@@ -365,72 +365,39 @@ namespace Oblivion {
     }
 
     bool DigitalSignatureValidator::IsModuleTrusted(HMODULE hModule, std::wstring& moduleName) {
-        // Cek apakah DLL ada di daftar yang diizinkan meskipun tidak ditandatangani
         std::wstring moduleNameLower = moduleName;
-        std::transform(moduleNameLower.begin(), moduleNameLower.end(), moduleNameLower.begin(), ::towlower);
+        std::transform(moduleNameLower.begin(), moduleNameLower.end(), moduleNameLower.begin(),
+            [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
+
+        // Legacy game modules may be unsigned. Keep the explicit filename allowlist
+        // for compatibility, but track path/hash pinning as a required follow-up.
         for (const auto& allowedDll : m_allowedUnsignedDlls) {
-            std::wstring allowedDllLower = allowedDll;
-            std::transform(allowedDllLower.begin(), allowedDllLower.end(), allowedDllLower.begin(), ::towlower);
-            if (moduleNameLower == allowedDllLower) {
-                return true; // DLL diizinkan meskipun tidak ditandatangani
-            }
+            std::wstring allowedLower = allowedDll;
+            std::transform(allowedLower.begin(), allowedLower.end(), allowedLower.begin(),
+                [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
+            if (moduleNameLower == allowedLower) return true;
         }
 
-        WCHAR filePath[MAX_PATH];
-        if (GetModuleFileNameExW(GetCurrentProcess(), hModule, filePath, MAX_PATH) == 0) {
-            return false; // Tidak bisa dapatkan path, anggap tidak tepercaya
-        }
+        // Resolve the full module path dynamically so long paths are not truncated
+        // and accidentally passed to the signature verifier as a different file.
+        std::wstring filePath;
+        if (!GetModulePathDynamic(GetCurrentProcess(), hModule, filePath)) return false;
+        if (!VerifyFileSignature(filePath)) return false;
 
-        // Catatan: Pengecekan folder Windows system dan Program Files sudah dilakukan di PerformScan()
-        // Jadi fungsi ini hanya akan dipanggil untuk modul yang berasal dari folder game atau folder mencurigakan
-
-        // Struktur untuk WinVerifyTrust
-        WINTRUST_FILE_INFO fileInfo = { 0 };
-        fileInfo.cbStruct = sizeof(WINTRUST_FILE_INFO);
-        fileInfo.pcwszFilePath = filePath;
-        fileInfo.hFile = NULL;
-        fileInfo.pgKnownSubject = NULL;
-
-        WINTRUST_DATA winTrustData = { 0 };
-        winTrustData.cbStruct = sizeof(WINTRUST_DATA);
-        winTrustData.pPolicyCallbackData = NULL;
-        winTrustData.pSIPClientData = NULL;
-        winTrustData.dwUIChoice = WTD_UI_NONE;
-        winTrustData.fdwRevocationChecks = WTD_REVOKE_NONE;
-        winTrustData.dwUnionChoice = WTD_CHOICE_FILE;
-        winTrustData.dwStateAction = WTD_STATEACTION_VERIFY;
-        winTrustData.hWVTStateData = NULL;
-        winTrustData.pwszURLReference = NULL;
-        winTrustData.dwProvFlags = WTD_SAFER_FLAG;
-        winTrustData.dwUIContext = 0;
-        winTrustData.pFile = &fileInfo;
-
-        GUID policyGUID = WINTRUST_ACTION_GENERIC_VERIFY_V2;
-
-        // Verifikasi signature
-        LONG result = WinVerifyTrust(NULL, &policyGUID, &winTrustData);
-
-        bool isSignatureValid = (result == ERROR_SUCCESS);
-
-        // Cleanup state
-        winTrustData.dwStateAction = WTD_STATEACTION_CLOSE;
-        WinVerifyTrust(NULL, &policyGUID, &winTrustData);
-
-        if (!isSignatureValid) {
-            return false; // Signature tidak valid atau tidak ada
-        }
-
-        // Jika signature valid, periksa penerbitnya
         std::wstring publisherName;
-        if (GetCertificateSubjectName(hModule, publisherName)) {
-            for (const auto& trustedName : m_trustedPublishers) {
-                if (publisherName.find(trustedName) != std::wstring::npos) {
-                    return true; // Penerbit tepercaya
-                }
-            }
+        if (!GetFilePublisher(filePath, publisherName)) return false;
+
+        std::transform(publisherName.begin(), publisherName.end(), publisherName.begin(),
+            [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
+
+        for (const auto& trustedName : m_trustedPublishers) {
+            std::wstring trustedLower = trustedName;
+            std::transform(trustedLower.begin(), trustedLower.end(), trustedLower.begin(),
+                [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
+            if (publisherName.find(trustedLower) != std::wstring::npos) return true;
         }
 
-        return false; // Penerbit tidak ada di whitelist
+        return false;
     }
 
     bool DigitalSignatureValidator::GetCertificateSubjectName(HMODULE hModule, std::wstring& subjectName) {
