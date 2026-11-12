@@ -830,7 +830,7 @@ void HandleClient(SOCKET clientSocket) {
                 // 4. Kirim perintah KICK hanya jika sudah di-ban secara manual
                 if (isBanned) {
                     const char* kickCommand = "KICK;";
-                    send(clientSocket, kickCommand, (int)strlen(kickCommand), 0);
+                    OblivionNet::SendAll(clientSocket, kickCommand, strlen(kickCommand));
                     std::cout << "[INFO] Perintah KICK dikirim ke client (HWID: " << hwid << ") - sudah ada di ban list." << std::endl;
                 } else {
                     // Pelanggaran hanya dicatat ke log, tidak langsung di-ban atau di-kick
