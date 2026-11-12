@@ -107,7 +107,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [ ] **P2 — Avoid leaking hardware identifiers in console output.** Redact or pseudonymize HWID in operational logs.
 - [ ] **P2 — Add log rotation and access controls.** `violations.log` currently grows without bound and may contain sensitive process/path data.
 - [ ] **P2 — Synchronize ban-list writes.** `violations.log` writes are now serialized, but ban-list reads/writes still need an explicit synchronization and atomic update strategy.
-- [ ] **P2 — Fix whitespace trimming on empty ban-list lines.** Guard `find_first_not_of` / `find_last_not_of` results before arithmetic and substring operations.
+- [x] **P2 — Fix whitespace trimming on empty ban-list lines.** Skip empty/whitespace-only lines before trimming, avoiding `std::string::npos` arithmetic in both Windows and Linux ban-list parsers.
 - [ ] **P2 — Validate ban-list entries.** Reject malformed identifiers and prevent concurrent duplicate writes.
 
 ### P2 — Build, repository hygiene, and observability
