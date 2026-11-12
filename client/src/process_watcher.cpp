@@ -217,84 +217,75 @@ namespace Oblivion {
             return;
         }
 
-        BOOL hasNext = TRUE;
-        do {
-            std::wstring processName = pe32.szExeFile;
-            DWORD processId = pe32.th32ProcessID;
-            activeProcesses.insert(processId);
+        {
+            do {
+                std::wstring processName = pe32.szExeFile;
+                DWORD processId = pe32.th32ProcessID;
+                activeProcesses.insert(processId);
 
-            // Deteksi blacklist
-            if (IsProcessBlacklisted(processName)) {
-                std::wcout << L"[DETECTION] Blacklisted process detected: " << processName << std::endl;
-                m_isRunning = false;
-                std::string details_utf8;
-                int size_needed = WideCharToMultiByte(CP_UTF8, 0, processName.c_str(),
-                    static_cast<int>(processName.size()), NULL, 0, NULL, NULL);
-                if (size_needed > 0) {
-                    details_utf8.assign(size_needed, 0);
-                    WideCharToMultiByte(CP_UTF8, 0, processName.c_str(),
-                        static_cast<int>(processName.size()), &details_utf8[0], size_needed, NULL, NULL);
+                // Deteksi blacklist
+                if (IsProcessBlacklisted(processName)) {
+                    std::wcout << L"[DETECTION] Blacklisted process detected: " << processName << std::endl;
+                    m_isRunning = false;
+                    std::string details_utf8;
+                    int size_needed = WideCharToMultiByte(CP_UTF8, 0, &processName[0], (int)processName.size(), NULL, 0, NULL, NULL);
+                    if (size_needed > 0) {
+                        details_utf8.assign(size_needed, 0);
+                        WideCharToMultiByte(CP_UTF8, 0, &processName[0], (int)processName.size(), &details_utf8[0], size_needed, NULL, NULL);
+                    }
+                    std::cout << "[VIOLATION] Reporting to server: PROCESS_DETECTED - " << details_utf8 << std::endl;
+                    ReportViolationAndExit(L"", "PROCESS_DETECTED", details_utf8);
                 }
-                ReportViolationAndExit(L"", "PROCESS_DETECTED", details_utf8);
+
+                // Cek apakah proses sudah pernah di-scan
+                bool isNewProcess = m_scannedProcesses.find(processId) == m_scannedProcesses.end();
+                
+                if (isNewProcess) {
+                    // Tambahkan ke cache
+                    m_scannedProcesses.insert(processId);
+                    
+                    // Memory scan untuk proses non-whitelist
+                    if (Oblivion::ShouldPerformMemoryScan(processName)) {
+                        std::wcout << L"[SCAN] Memory scan scheduled for: " << processName << L" (PID: " << processId << L")" << std::endl;
+                    }
+
+                    // Heuristik perilaku
+                    if (Oblivion::IsSuspiciousBehavior(processId)) {
+                        Oblivion::LogSuspiciousProcess(processName, processId, "Suspicious module or injection detected");
+                        // Optional: langsung blokir
+                        std::string details_utf8;
+                        int size_needed = WideCharToMultiByte(CP_UTF8, 0, &processName[0], (int)processName.size(), NULL, 0, NULL, NULL);
+                        if (size_needed > 0) {
+                            details_utf8.assign(size_needed, 0);
+                            WideCharToMultiByte(CP_UTF8, 0, &processName[0], (int)processName.size(), &details_utf8[0], size_needed, NULL, NULL);
+                        }
+                        ReportViolationAndExit(L"", "SUSPICIOUS_BEHAVIOR", details_utf8);
+                    }
+                }
+
+            } while (Process32Next(hSnapshot, &pe32) && m_isRunning);
+
+            const DWORD enumerationError = GetLastError();
+            if (m_isRunning.load() && enumerationError != ERROR_NO_MORE_FILES) {
+                CloseHandle(hSnapshot);
+                ReportViolationAndExit(
+                    L"", "PROCESS_ENUMERATION_UNAVAILABLE",
+                    "Process32Next failed before enumeration completed; error=" +
+                        std::to_string(enumerationError));
                 return;
             }
 
-            // Cek apakah proses sudah pernah di-scan
-            const bool isNewProcess =
-                m_scannedProcesses.find(processId) == m_scannedProcesses.end();
-
-            if (isNewProcess) {
-                // Tambahkan ke cache
-                m_scannedProcesses.insert(processId);
-
-                if (Oblivion::ShouldPerformMemoryScan(processName)) {
-                    std::wcout << L"[SCAN] Memory scan scheduled for: "
-                               << processName << L" (PID: " << processId << L")" << std::endl;
-                }
-
-                if (Oblivion::IsSuspiciousBehavior(processId)) {
-                    Oblivion::LogSuspiciousProcess(
-                        processName, processId, "Suspicious module or injection detected");
-                    std::string details_utf8;
-                    const int size_needed = WideCharToMultiByte(
-                        CP_UTF8, 0, processName.c_str(),
-                        static_cast<int>(processName.size()), NULL, 0, NULL, NULL);
-                    if (size_needed > 0) {
-                        details_utf8.assign(static_cast<size_t>(size_needed), 0);
-                        WideCharToMultiByte(CP_UTF8, 0, processName.c_str(),
-                            static_cast<int>(processName.size()), &details_utf8[0],
-                            size_needed, NULL, NULL);
-                    }
-                    ReportViolationAndExit(L"", "SUSPICIOUS_BEHAVIOR", details_utf8);
-                    return;
+            // Forget PIDs that are no longer present so the cache stays bounded
+            // and a PID can be examined again after the process exits.
+            for (auto it = m_scannedProcesses.begin(); it != m_scannedProcesses.end();) {
+                if (activeProcesses.find(*it) == activeProcesses.end()) {
+                    it = m_scannedProcesses.erase(it);
+                } else {
+                    ++it;
                 }
             }
+        }
 
-            if (!m_isRunning.load()) {
-                break;
-            }
-            hasNext = Process32Next(hSnapshot, &pe32);
-        } while (hasNext);
-
-        const DWORD enumerationError = hasNext ? ERROR_SUCCESS : GetLastError();
         CloseHandle(hSnapshot);
-
-        if (m_isRunning.load() && !hasNext && enumerationError != ERROR_NO_MORE_FILES) {
-            ReportViolationAndExit(
-                L"", "PROCESS_ENUMERATION_UNAVAILABLE",
-                "Process32Next failed before enumeration completed; error=" +
-                    std::to_string(enumerationError));
-            return;
-        }
-
-        // Forget PIDs that are no longer present so the cache stays bounded
-        // and a PID can be examined again after the process exits.
-        for (auto it = m_scannedProcesses.begin(); it != m_scannedProcesses.end();) {
-            if (activeProcesses.find(*it) == activeProcesses.end()) {
-                it = m_scannedProcesses.erase(it);
-            } else {
-                ++it;
-            }
-        }
     }
 }
