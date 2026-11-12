@@ -22,9 +22,6 @@ namespace Oblivion {
         // Metode 3: Jebakan dengan software exception (INT 3)
         bool CheckInt3Trap();
 
-        // Metode 4: Deteksi hardware breakpoint via DR0–DR7
-        bool CheckHardwareBreakpoints();
-
         // Metode 5: Deteksi kernel-mode debugger via SystemKernelDebuggerInformation
         bool CheckKernelDebugger();
 
