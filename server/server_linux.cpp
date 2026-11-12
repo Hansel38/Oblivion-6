@@ -26,6 +26,7 @@
 #include <openssl/evp.h>
 #include "secret_obf.h"
 #include "include/heartbeat_protocol.h"
+#include "include/socket_framing.h"
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -60,6 +61,17 @@
 static std::string SERVER_SECRET = OblivionServer::GetServerSecret();
 #define BAN_LIST_FILE "bans.txt"
 #define VIOLATION_LOG_FILE "violations.log"
+
+static Oblivion::HeartbeatConfig GLOBAL_HB_CONFIG;
+
+bool ConstantTimeEquals(const std::string& left, const std::string& right) {
+    if (left.size() != right.size()) return false;
+    unsigned char difference = 0;
+    for (size_t i = 0; i < left.size(); ++i) {
+        difference |= static_cast<unsigned char>(left[i] ^ right[i]);
+    }
+    return difference == 0;
+}
 
 // Cross-platform helper functions
 std::string GetExecutableDirectory() {
@@ -632,16 +644,25 @@ ParsedReport ParseProtocol(const std::string& report) {
 }
 
 void HandleClient(SocketType clientSocket) {
-    char buffer[BUFFER_LEN] = {0};
-    ssize_t bytesReceived;
     std::string extractedHwid = "UNKNOWN";
+    std::string pendingNetworkData;
+    std::string report;
 
     try {
-        bytesReceived = recv(clientSocket, buffer, BUFFER_LEN - 1, 0);
+        if (!OblivionNet::ReceiveFrame(clientSocket, pendingNetworkData,
+                                       report, 5000, BUFFER_LEN - 1)) {
+            LogViolation("FRAME_READ_FAILED", "Timed out or received an oversized/incomplete request", extractedHwid);
+            closesocket_impl(clientSocket);
+            return;
+        }
+        // Only one initial request frame is valid before the server replies.
+        if (!pendingNetworkData.empty()) {
+            LogViolation("MALFORMED_REQUEST", "Unexpected bytes after initial request frame", extractedHwid);
+            closesocket_impl(clientSocket);
+            return;
+        }
+        const ssize_t bytesReceived = static_cast<ssize_t>(report.size());
         if (bytesReceived > 0) {
-            buffer[bytesReceived] = '\0';
-            
-            std::string report(buffer, bytesReceived);
             extractedHwid = ExtractHWIDFromRawData(report);
             
             std::cout << "[DEBUG] Received raw data (" << bytesReceived << " bytes) from HWID: " << extractedHwid << std::endl;
@@ -656,7 +677,7 @@ void HandleClient(SocketType clientSocket) {
                 LogViolation("MALFORMED_REQUEST", parsed.errorMessage + " | Data: " + truncatedReport, extractedHwid);
                 
                 const char* errorResponse = "ERROR:INVALID_FORMAT;";
-                send(clientSocket, errorResponse, strlen(errorResponse), 0);
+                OblivionNet::SendAll(clientSocket, errorResponse, strlen(errorResponse));
                 closesocket_impl(clientSocket);
                 return;
             }
@@ -675,7 +696,7 @@ void HandleClient(SocketType clientSocket) {
                 LogViolation("AUTH_FAILED", "Invalid secret key", hwid);
 
                 const char* kickCommand = "KICK;";
-                send(clientSocket, kickCommand, strlen(kickCommand), 0);
+                OblivionNet::SendAll(clientSocket, kickCommand, strlen(kickCommand));
                 std::cout << "[INFO] KICK dikirim (secret invalid). Review manual untuk ban jika diperlukan." << std::endl;
             }
             else if (type == "CHECKIN") {
@@ -689,12 +710,20 @@ void HandleClient(SocketType clientSocket) {
                     std::cout << "[BAN] HWID [" << hwid << "] terdeteksi di ban list. Perintah KICK dikirim." << std::endl;
                     std::cout << "[INFO] Untuk unban, hapus HWID dari bans.txt dan restart client." << std::endl;
                 } else {
-                    uint64_t sessionNonce = ((uint64_t)rand() << 32) ^ (uint64_t)rand();
+                    uint64_t sessionNonce = 0;
+                    if (!OblivionNet::GenerateSecureNonce(sessionNonce)) {
+                        LogViolation("RNG_FAILURE", "Unable to generate secure session nonce", hwid);
+                        closesocket_impl(clientSocket);
+                        return;
+                    }
                     std::string response = "OK;SESSION_NONCE:" + std::to_string(sessionNonce) + ";";
-                    send(clientSocket, response.c_str(), response.length(), 0);
+                    if (!OblivionNet::SendAll(clientSocket, response.data(), response.size())) {
+                        closesocket_impl(clientSocket);
+                        return;
+                    }
                     std::cout << "[OK] HWID [" << hwid << "] diizinkan. Memulai heartbeat ping." << std::endl;
 
-                    Oblivion::HeartbeatConfig cfg; 
+                    Oblivion::HeartbeatConfig cfg = GLOBAL_HB_CONFIG; 
                     uint32_t seq = 1;
                     uint32_t consecutiveMiss = 0;
                     uint64_t rttSum = 0; uint32_t rttCount = 0; 
@@ -708,100 +737,106 @@ void HandleClient(SocketType clientSocket) {
 
                     while (true) {
                         uint64_t ping_ts = GetTickCount64_impl();
-                        uint64_t ping_nonce = ((uint64_t)rand() << 32) ^ (uint64_t)rand();
+                        uint64_t ping_nonce = 0;
+                        if (!OblivionNet::GenerateSecureNonce(ping_nonce)) {
+                            LogViolation("RNG_FAILURE", "Unable to generate secure heartbeat nonce", hwid);
+                            break;
+                        }
                         std::string ping = "PING:" + std::to_string(seq) + ":" + std::to_string(ping_ts) + ":" + std::to_string(ping_nonce) + ";";
-                        ssize_t sres = send(clientSocket, ping.c_str(), ping.length(), 0);
-                        if (sres <= 0) { 
+                        if (!OblivionNet::SendAll(clientSocket, ping.data(), ping.size())) { 
                             std::cout << "[HEARTBEAT] Connection closed for HWID [" << hwid << "] - send failed" << std::endl; 
                             break; 
                         }
 
-                        fd_set fdset;
-                        FD_ZERO(&fdset);
-                        FD_SET(clientSocket, &fdset);
-                        struct timeval tv;
-                        tv.tv_sec = (cfg.timeout_ms / 1000);
-                        tv.tv_usec = (cfg.timeout_ms % 1000) * 1000;
-                        int sel = select(clientSocket + 1, &fdset, NULL, NULL, &tv);
-                        if (sel > 0) {
-                            char rbuf[512] = {0};
-                            ssize_t rcv = recv(clientSocket, rbuf, sizeof(rbuf) - 1, 0);
-                            if (rcv > 0) {
-                                std::string resp(rbuf, rcv);
-                                size_t sc = resp.find(';');
-                                if (sc != std::string::npos) resp = resp.substr(0, sc);
-                                if (resp.rfind("PONG:", 0) == 0) {
-                                    std::vector<size_t> col;
-                                    size_t pos = 0;
-                                    while ((pos = resp.find(':', pos)) != std::string::npos) {
-                                        col.push_back(pos);
-                                        pos++;
-                                    }
-                                    if (col.size() >= 6) {
-                                        try {
-                                            uint32_t pseq = std::stoul(resp.substr(col[0] + 1, col[1] - col[0] - 1));
-                                            // tclient is parsed but not used (kept for protocol compatibility)
-                                            (void)std::stoull(resp.substr(col[1] + 1, col[2] - col[1] - 1));
-                                            uint64_t pnonce = std::stoull(resp.substr(col[2] + 1, col[3] - col[2] - 1));
-                                            std::string status = resp.substr(col[3] + 1, col[4] - col[3] - 1);
-                                            std::string phwid = resp.substr(col[4] + 1, col[5] - col[4] - 1);
-                                            std::string hmac = resp.substr(col[5] + 1);
+                        std::string pongFrame;
+                        if (OblivionNet::ReceiveFrame(clientSocket, pendingNetworkData,
+                                                      pongFrame, cfg.timeout_ms, 512)) {
+                            if (pongFrame.rfind("PONG:", 0) == 0 && pongFrame.back() == ';') {
+                                const std::string resp = pongFrame.substr(0, pongFrame.size() - 1);
+                                std::vector<size_t> col;
+                                size_t pos = 0;
+                                while ((pos = resp.find(':', pos)) != std::string::npos) {
+                                    col.push_back(pos);
+                                    ++pos;
+                                }
 
-                                            if (pseq != seq || pnonce != ping_nonce) {
-                                                std::cout << "[HB] seq/nonce mismatch - Expected seq=" << seq << " nonce=" << ping_nonce 
-                                                          << " | Got seq=" << pseq << " nonce=" << pnonce << std::endl;
-                                                consecutiveMiss++;
-                                                totalMisses++;
+                                if (col.size() == 6) {
+                                    try {
+                                        const std::string seqText = resp.substr(col[0] + 1, col[1] - col[0] - 1);
+                                        const std::string clientTsText = resp.substr(col[1] + 1, col[2] - col[1] - 1);
+                                        const std::string nonceText = resp.substr(col[2] + 1, col[3] - col[2] - 1);
+                                        size_t parsedSeq = 0, parsedClientTs = 0, parsedNonce = 0;
+                                        const unsigned long long seqValue = std::stoull(seqText, &parsedSeq);
+                                        const uint64_t clientTs = std::stoull(clientTsText, &parsedClientTs);
+                                        const uint64_t pnonce = std::stoull(nonceText, &parsedNonce);
+                                        (void)clientTs;
+                                        if (parsedSeq != seqText.size() ||
+                                            parsedClientTs != clientTsText.size() ||
+                                            parsedNonce != nonceText.size() ||
+                                            seqValue > (std::numeric_limits<uint32_t>::max)()) {
+                                            throw std::invalid_argument("invalid numeric field");
+                                        }
+
+                                        const uint32_t pseq = static_cast<uint32_t>(seqValue);
+                                        const std::string status = resp.substr(col[3] + 1, col[4] - col[3] - 1);
+                                        const std::string phwid = resp.substr(col[4] + 1, col[5] - col[4] - 1);
+                                        const std::string hmac = resp.substr(col[5] + 1);
+
+                                        if (pseq != seq || pnonce != ping_nonce || phwid != hwid ||
+                                            status != "1|1") {
+                                            ++consecutiveMiss;
+                                            ++totalMisses;
+                                        } else {
+                                            const std::string data = std::to_string(pseq) + ":" +
+                                                std::to_string(ping_ts) + ":" +
+                                                std::to_string(pnonce) + ":" + phwid;
+                                            const std::string expected = hmacSha256(sessionKey, data);
+                                            if (!ConstantTimeEquals(expected, hmac)) {
+                                                ++consecutiveMiss;
+                                                ++totalMisses;
                                             } else {
-                                                std::string data = std::to_string(pseq) + ":" + std::to_string(ping_ts) + ":" + std::to_string(pnonce) + ":" + phwid;
-                                                std::string expect = hmacSha256(sessionKey, data);
-                                                if (expect != hmac) {
-                                                    std::cout << "[HB] hmac mismatch" << std::endl;
-                                                    consecutiveMiss++;
-                                                    totalMisses++;
-                                                } else {
-                                                    uint64_t rtt = GetTickCount64_impl() - ping_ts;
-                                                    rttSum += rtt; rttCount++;
-                                                    rttSumCumulative += rtt; rttCountCumulative++;
-                                                    consecutiveMiss = 0;
-                                                    if (rttCount >= 5) {
-                                                        uint64_t avg = rttSum / rttCount;
-                                                        if (avg > cfg.rtt_warn_ms) {
-                                                            if (state == HbState::Healthy) {
-                                                                state = HbState::Warning;
-                                                                std::cout << "[HB] state->WARNING (avg RTT=" << avg << ")" << std::endl;
-                                                                double avgCumSnap = rttCountCumulative ? (double)rttSumCumulative / (double)rttCountCumulative : 0.0;
-                                                                LogViolation("HB_WARNING", std::string("High average RTT ") + std::to_string(avg) +
-                                                                    "ms | avgCum=" + std::to_string((int)avgCumSnap) + "ms | missesTotal=" + std::to_string(totalMisses), hwid);
-                                                            }
-                                                        } else if (state != HbState::Healthy) {
-                                                            state = HbState::Healthy;
-                                                            std::cout << "[HB] state->HEALTHY (avg RTT=" << avg << ")" << std::endl;
-                                                        }
-                                                        rttSum = 0; rttCount = 0;
+                                                const uint64_t rtt = GetTickCount64_impl() - ping_ts;
+                                                rttSum += rtt;
+                                                ++rttCount;
+                                                rttSumCumulative += rtt;
+                                                ++rttCountCumulative;
+                                                consecutiveMiss = 0;
+
+                                                if (rttCount >= 5) {
+                                                    const uint64_t avg = rttSum / rttCount;
+                                                    if (avg > cfg.rtt_warn_ms && state == HbState::Healthy) {
+                                                        state = HbState::Warning;
+                                                        std::cout << "[HB] state->WARNING (avg RTT=" << avg << ")" << std::endl;
+                                                        const double avgCumSnap = rttCountCumulative
+                                                            ? static_cast<double>(rttSumCumulative) / rttCountCumulative : 0.0;
+                                                        LogViolation("HB_WARNING",
+                                                            "High average RTT " + std::to_string(avg) +
+                                                            "ms | avgCum=" + std::to_string(static_cast<int>(avgCumSnap)) +
+                                                            "ms | missesTotal=" + std::to_string(totalMisses), hwid);
+                                                    } else if (avg <= cfg.rtt_warn_ms && state != HbState::Healthy) {
+                                                        state = HbState::Healthy;
+                                                        std::cout << "[HB] state->HEALTHY (avg RTT=" << avg << ")" << std::endl;
                                                     }
+                                                    rttSum = 0;
+                                                    rttCount = 0;
                                                 }
                                             }
-                                        } catch (...) {
-                                            std::cout << "[HB] parse error" << std::endl;
-                                            consecutiveMiss++;
-                                            totalMisses++;
                                         }
-                                    } else {
-                                        consecutiveMiss++;
-                                        totalMisses++;
+                                    } catch (...) {
+                                        ++consecutiveMiss;
+                                        ++totalMisses;
                                     }
                                 } else {
-                                    consecutiveMiss++;
-                                    totalMisses++;
+                                    ++consecutiveMiss;
+                                    ++totalMisses;
                                 }
                             } else {
-                                consecutiveMiss++;
-                                totalMisses++;
+                                ++consecutiveMiss;
+                                ++totalMisses;
                             }
                         } else {
-                            consecutiveMiss++;
-                            totalMisses++;
+                            ++consecutiveMiss;
+                            ++totalMisses;
                         }
 
                         if (consecutiveMiss >= cfg.max_consecutive_miss) {
@@ -947,25 +982,46 @@ int main() {
     std::cout << "[INFO] Menunggu koneksi dari client..." << std::endl;
     std::cout << "==================================================" << std::endl;
 
-    auto readEnvUint = [](const char* name, uint32_t defVal) {
-        const char* envVal = getenv(name);
-        if (!envVal || !*envVal) return defVal;
-        try {
-            return (uint32_t)std::stoul(std::string(envVal));
-        } catch (...) {
-            return defVal;
+    auto readEnvUint = [](const char* name, uint32_t defaultValue) {
+        const char* envValue = std::getenv(name);
+        if (!envValue || !*envValue) return defaultValue;
+
+        errno = 0;
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(envValue, &end, 10);
+        if (errno != 0 || end == envValue || *end != '\\0' ||
+            parsed > (std::numeric_limits<uint32_t>::max)()) {
+            std::cerr << "[HB CFG] Invalid value for " << name << "; using default "
+                      << defaultValue << std::endl;
+            return defaultValue;
         }
+        return static_cast<uint32_t>(parsed);
     };
-    
-    Oblivion::HeartbeatConfig globalHbCfg;
-    globalHbCfg.interval_ms = readEnvUint("OBLV_HB_INTERVAL_MS", globalHbCfg.interval_ms);
-    globalHbCfg.jitter_ms = readEnvUint("OBLV_HB_JITTER_MS", globalHbCfg.jitter_ms);
-    globalHbCfg.timeout_ms = readEnvUint("OBLV_HB_TIMEOUT_MS", globalHbCfg.timeout_ms);
-    globalHbCfg.max_consecutive_miss = readEnvUint("OBLV_HB_MAX_MISS", globalHbCfg.max_consecutive_miss);
-    globalHbCfg.rtt_warn_ms = readEnvUint("OBLV_HB_RTT_WARN_MS", globalHbCfg.rtt_warn_ms);
-    std::cout << "[HB CFG] interval=" << globalHbCfg.interval_ms << "ms jitter=" << globalHbCfg.jitter_ms
-              << "ms timeout=" << globalHbCfg.timeout_ms << "ms maxMiss=" << globalHbCfg.max_consecutive_miss
-              << " rttWarn=" << globalHbCfg.rtt_warn_ms << "ms" << std::endl;
+
+    GLOBAL_HB_CONFIG.interval_ms = readEnvUint("OBLV_HB_INTERVAL_MS", GLOBAL_HB_CONFIG.interval_ms);
+    GLOBAL_HB_CONFIG.jitter_ms = readEnvUint("OBLV_HB_JITTER_MS", GLOBAL_HB_CONFIG.jitter_ms);
+    GLOBAL_HB_CONFIG.timeout_ms = readEnvUint("OBLV_HB_TIMEOUT_MS", GLOBAL_HB_CONFIG.timeout_ms);
+    GLOBAL_HB_CONFIG.max_consecutive_miss = readEnvUint("OBLV_HB_MAX_MISS", GLOBAL_HB_CONFIG.max_consecutive_miss);
+    GLOBAL_HB_CONFIG.rtt_warn_ms = readEnvUint("OBLV_HB_RTT_WARN_MS", GLOBAL_HB_CONFIG.rtt_warn_ms);
+
+    if (GLOBAL_HB_CONFIG.interval_ms < 100 || GLOBAL_HB_CONFIG.interval_ms > 60000 ||
+        GLOBAL_HB_CONFIG.jitter_ms > 10000 ||
+        GLOBAL_HB_CONFIG.timeout_ms < 250 || GLOBAL_HB_CONFIG.timeout_ms > 120000 ||
+        GLOBAL_HB_CONFIG.max_consecutive_miss < 1 || GLOBAL_HB_CONFIG.max_consecutive_miss > 10 ||
+        GLOBAL_HB_CONFIG.rtt_warn_ms > 60000) {
+        std::cerr << "[FATAL] Heartbeat configuration outside supported bounds." << std::endl;
+        closesocket_impl(ListenSocket);
+#ifdef _WIN32
+        WSACleanup();
+#endif
+        return 1;
+    }
+
+    std::cout << "[HB CFG] interval=" << GLOBAL_HB_CONFIG.interval_ms
+              << "ms jitter=" << GLOBAL_HB_CONFIG.jitter_ms
+              << "ms timeout=" << GLOBAL_HB_CONFIG.timeout_ms
+              << "ms maxMiss=" << GLOBAL_HB_CONFIG.max_consecutive_miss
+              << " rttWarn=" << GLOBAL_HB_CONFIG.rtt_warn_ms << "ms" << std::endl;
 
     while (true) {
         ClientSocket = accept(ListenSocket, NULL, NULL);
