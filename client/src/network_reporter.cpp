@@ -413,52 +413,32 @@ namespace Oblivion {
             ExitProcess(1);
         }
 
-        // Tunggu respons dari server dengan timeout
-        char recvbuf[512] = { 0 };
-        int recvbuflen = 512;
-        fd_set fdset;
-        struct timeval tv;
-        tv.tv_sec = 3; // Timeout 3 detik
-        tv.tv_usec = 0;
-        FD_ZERO(&fdset);
-        FD_SET(connectSocket, &fdset);
-
-            int selectResult = select(0, &fdset, NULL, NULL, &tv);
-            if (selectResult > 0) {
-                int bytesReceived = recv(connectSocket, recvbuf, recvbuflen, 0);
-                if (bytesReceived > 0) {
-                    // Parse response (hilangkan null terminator dan whitespace)
-                    std::string response(recvbuf, bytesReceived);
-                    // Trim whitespace dan null characters dari awal
-                    size_t start = response.find_first_not_of(" \t\n\r\0");
-                    if (start != std::string::npos) {
-                        response = response.substr(start);
-                    }
-                    // Trim dari akhir
-                    size_t end = response.find_last_not_of(" \t\n\r\0");
-                    if (end != std::string::npos) {
-                        response = response.substr(0, end + 1);
-                    }
-                    
-                    // Cleanup socket sebelum ExitProcess
-                    closesocket(connectSocket);
-                    
-                    // Cek apakah response adalah "KICK;" (case-sensitive sesuai server)
-                    if (response == "KICK;") {
-                        // Server mengirim perintah KICK - tampilkan message dan tutup
-                        MessageBoxW(NULL, L"Server mendeteksi pelanggaran.\n\nClient akan ditutup.", L"Oblivion Hack Shield - Violation", MB_OK | MB_ICONERROR | MB_TOPMOST);
-                        ExitProcess(0);
-                    }
-                }
-            }
-        else {
-            // Timeout atau error, juga dianggap pelanggaran (Fail-Closed)
+        // The server acknowledges every report with exactly one framed response.
+        std::string responsePending;
+        std::string responseFrame;
+        if (!ReceiveFrame(connectSocket, responsePending, responseFrame, 3000, 512)) {
             closesocket(connectSocket);
-            MessageBoxW(NULL, L"Timeout menunggu respons server.\n\nClient akan ditutup.", L"Oblivion Hack Shield - Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
+            MessageBoxW(NULL, L"Timeout atau respons server tidak lengkap saat mengirim laporan.",
+                        L"Oblivion Hack Shield - Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
             ExitProcess(0);
+            return;
         }
 
-        // Cleanup socket (jika masih terbuka)
+        if (responseFrame == "KICK;") {
+            closesocket(connectSocket);
+            MessageBoxW(NULL, L"Server mendeteksi pelanggaran.\\n\\nClient akan ditutup.",
+                        L"Oblivion Hack Shield - Violation", MB_OK | MB_ICONERROR | MB_TOPMOST);
+            ExitProcess(0);
+            return;
+        }
+        if (responseFrame != "OK;") {
+            closesocket(connectSocket);
+            MessageBoxW(NULL, L"Respons server tidak valid saat mengirim laporan.",
+                        L"Oblivion Hack Shield - Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
+            ExitProcess(0);
+            return;
+        }
+
         closesocket(connectSocket);
     }
 }
