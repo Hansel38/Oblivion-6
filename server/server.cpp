@@ -748,6 +748,10 @@ void HandleClient(SOCKET clientSocket) {
                                                 rttSumCumulative += rtt;
                                                 ++rttCountCumulative;
                                                 consecutiveMiss = 0;
+                                                if (state == HbState::Warning) {
+                                                    state = HbState::Healthy;
+                                                    std::cout << "[HEARTBEAT] Recovery: state->HEALTHY" << std::endl;
+                                                }
 
                                                 if (rttCount >= 5) {
                                                     const uint64_t avg = rttSum / rttCount;
@@ -787,23 +791,30 @@ void HandleClient(SOCKET clientSocket) {
                         }
 
                         // Check consecutive miss threshold
+                        const uint32_t warningThreshold =
+                            cfg.max_consecutive_miss > 1 ? cfg.max_consecutive_miss - 1 : cfg.max_consecutive_miss;
                         if (consecutiveMiss >= cfg.max_consecutive_miss) {
-                            if (consecutiveMiss == 3) {
-                                state = HbState::Warning;
-                                double avgCumSnap = rttCountCumulative ? (double)rttSumCumulative / (double)rttCountCumulative : 0.0;
-                                std::cout << "[HEARTBEAT] WARNING for HWID [" << hwid << "] - 3 consecutive misses | avgRTT=" << (int)avgCumSnap << "ms" << std::endl;
-                                LogViolation("HB_WARNING", std::string("3 consecutive heartbeat misses | avgCum=") + std::to_string((int)avgCumSnap) +
-                                    "ms | missesTotal=" + std::to_string(totalMisses), hwid);
-                            } else if (consecutiveMiss >= 5) {
-                                state = HbState::Flagged;
-                                double avgCumSnap = rttCountCumulative ? (double)rttSumCumulative / (double)rttCountCumulative : 0.0;
-                                std::cout << "[HEARTBEAT] FLAGGED for HWID [" << hwid << "] - Connection terminated (5+ misses) | avgRTT=" << (int)avgCumSnap << "ms" << std::endl;
-                                LogViolation("HB_FLAGGED", std::string("5+ consecutive heartbeat misses | avgCum=") + std::to_string((int)avgCumSnap) +
-                                    "ms | missesTotal=" + std::to_string(totalMisses), hwid);
-                                break;
-                            }
+                            state = HbState::Flagged;
+                            const double avgCumSnap = rttCountCumulative
+                                ? static_cast<double>(rttSumCumulative) / rttCountCumulative : 0.0;
+                            std::cout << "[HEARTBEAT] FLAGGED for HWID [" << hwid << "] - "
+                                      << consecutiveMiss << " consecutive misses" << std::endl;
+                            LogViolation("HB_FLAGGED",
+                                std::to_string(consecutiveMiss) + " consecutive heartbeat misses | avgCum=" +
+                                std::to_string(static_cast<int>(avgCumSnap)) + "ms | missesTotal=" +
+                                std::to_string(totalMisses), hwid);
+                            break;
+                        } else if (consecutiveMiss >= warningThreshold && state == HbState::Healthy) {
+                            state = HbState::Warning;
+                            const double avgCumSnap = rttCountCumulative
+                                ? static_cast<double>(rttSumCumulative) / rttCountCumulative : 0.0;
+                            std::cout << "[HEARTBEAT] WARNING for HWID [" << hwid << "] - "
+                                      << consecutiveMiss << " consecutive misses" << std::endl;
+                            LogViolation("HB_WARNING",
+                                std::to_string(consecutiveMiss) + " consecutive heartbeat misses | avgCum=" +
+                                std::to_string(static_cast<int>(avgCumSnap)) + "ms | missesTotal=" +
+                                std::to_string(totalMisses), hwid);
                         }
-
                         seq++;
                         Sleep(cfg.interval_ms);
                     }
