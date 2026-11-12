@@ -25,14 +25,14 @@ namespace Oblivion {
     ProcessWatcher::ProcessWatcher() : m_isRunning(false) {
         std::cout << "[ProcessWatcher] Initializing components..." << std::endl;
         try {
-            m_pAntiDebug = new AntiDebug();
-            m_pInjectionScanner = new InjectionScanner();
-            m_pAntiSuspend = new AntiSuspend();
-            m_pOverlayScanner = new OverlayScanner();
-            m_pMemoryScanner = new MemoryScanner();
-            m_pDigitalSignatureValidator = new DigitalSignatureValidator();
-            m_pIATHookScanner = new IATHookScanner();
-            m_pAdvancedHeuristics = new AdvancedProcessHeuristics();
+            m_pAntiDebug = std::make_unique<AntiDebug>();
+            m_pInjectionScanner = std::make_unique<InjectionScanner>();
+            m_pAntiSuspend = std::make_unique<AntiSuspend>();
+            m_pOverlayScanner = std::make_unique<OverlayScanner>();
+            m_pMemoryScanner = std::make_unique<MemoryScanner>();
+            m_pDigitalSignatureValidator = std::make_unique<DigitalSignatureValidator>();
+            m_pIATHookScanner = std::make_unique<IATHookScanner>();
+            m_pAdvancedHeuristics = std::make_unique<AdvancedProcessHeuristics>();
             
             // Set heartbeat callback untuk AdvancedHeuristics
             m_pAdvancedHeuristics->SetHeartbeatCallback([this]() {
@@ -49,55 +49,58 @@ namespace Oblivion {
     }
 
     ProcessWatcher::~ProcessWatcher() {
-        std::cout << "[ProcessWatcher] Destructor called, stopping..." << std::endl;
+        // Stop worker threads before unique_ptr members are destroyed.
         Stop();
-        
-        // Delete all components safely
-        if (m_pAntiDebug) { delete m_pAntiDebug; m_pAntiDebug = nullptr; }
-        if (m_pInjectionScanner) { delete m_pInjectionScanner; m_pInjectionScanner = nullptr; }
-        if (m_pAntiSuspend) { delete m_pAntiSuspend; m_pAntiSuspend = nullptr; }
-        if (m_pOverlayScanner) { delete m_pOverlayScanner; m_pOverlayScanner = nullptr; }
-        if (m_pMemoryScanner) { delete m_pMemoryScanner; m_pMemoryScanner = nullptr; }
-        if (m_pDigitalSignatureValidator) { delete m_pDigitalSignatureValidator; m_pDigitalSignatureValidator = nullptr; }
-        if (m_pIATHookScanner) { delete m_pIATHookScanner; m_pIATHookScanner = nullptr; }
-        if (m_pAdvancedHeuristics) { delete m_pAdvancedHeuristics; m_pAdvancedHeuristics = nullptr; }
-        
-        std::cout << "[ProcessWatcher] Destructor complete" << std::endl;
     }
 
     void ProcessWatcher::Start() {
-        if (m_isRunning) {
+        if (m_isRunning.load()) {
             std::cout << "[ProcessWatcher] Already running, ignoring Start() call" << std::endl;
             return;
         }
-        
+
+        // A previous worker may have ended without Stop() being called.
+        if (m_watcherThread.joinable()) {
+            if (m_watcherThread.get_id() == std::this_thread::get_id()) {
+                throw std::logic_error("ProcessWatcher cannot restart from its own worker thread");
+            }
+            m_watcherThread.join();
+        }
+
+        bool expected = false;
+        if (!m_isRunning.compare_exchange_strong(expected, true)) return;
+
         std::cout << "[ProcessWatcher] Starting monitoring system..." << std::endl;
-        m_isRunning = true;
-        
-        // Mulai thread pengawas terlebih dahulu
-        m_pAntiSuspend->Start();
-        
-        // Lalu mulai thread pemantauan utama
-        m_watcherThread = std::thread(&ProcessWatcher::WatcherLoop, this);
-        std::cout << "[ProcessWatcher] Monitoring thread started" << std::endl;
+        try {
+            m_pAntiSuspend->Start();
+            m_watcherThread = std::thread(&ProcessWatcher::WatcherLoop, this);
+            std::cout << "[ProcessWatcher] Monitoring thread started" << std::endl;
+        } catch (...) {
+            // Roll back both lifecycle states if either thread fails to start.
+            m_isRunning.store(false);
+            m_pAntiSuspend->Stop();
+            throw;
+        }
     }
 
     void ProcessWatcher::Stop() {
-        if (!m_isRunning) {
-            return;
+        const bool wasRunning = m_isRunning.exchange(false);
+        if (wasRunning) {
+            std::cout << "[ProcessWatcher] Stopping monitoring system..." << std::endl;
         }
-        
-        std::cout << "[ProcessWatcher] Stopping monitoring system..." << std::endl;
-        m_isRunning = false;
-        
-        // Wait for watcher thread to finish
-        if (m_watcherThread.joinable()) {
+
+        if (m_watcherThread.joinable() &&
+            m_watcherThread.get_id() != std::this_thread::get_id()) {
             m_watcherThread.join();
         }
-        
-        // Hentikan thread pengawas setelah thread utama berhenti
-        m_pAntiSuspend->Stop();
-        std::cout << "[ProcessWatcher] Stopped successfully" << std::endl;
+
+        if (m_pAntiSuspend) {
+            m_pAntiSuspend->Stop();
+        }
+
+        if (wasRunning) {
+            std::cout << "[ProcessWatcher] Stopped successfully" << std::endl;
+        }
     }
 
     void ProcessWatcher::WatcherLoop() {
