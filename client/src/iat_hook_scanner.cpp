@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <string>
 
 namespace {
@@ -41,24 +42,47 @@ namespace {
         return rva <= imageSize && length <= imageSize - rva;
     }
 
-    bool IsNullTerminatedInsideImage(const char* value, const BYTE* base,
-                                     size_t imageSize, size_t rva) {
+    bool IsNullTerminatedInsideImage(const char* value, size_t imageSize, size_t rva) {
         if (rva >= imageSize) return false;
-        const size_t remaining = imageSize - rva;
-        if (!IsReadableRange(value, remaining)) return false;
-        return std::memchr(value, '\\0', remaining) != nullptr;
+
+        uintptr_t cursor = reinterpret_cast<uintptr_t>(value);
+        size_t remaining = imageSize - rva;
+        while (remaining > 0) {
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (VirtualQuery(reinterpret_cast<const void*>(cursor), &mbi, sizeof(mbi)) == 0 ||
+                mbi.State != MEM_COMMIT ||
+                (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0 ||
+                (mbi.Protect & 0xFF) == PAGE_EXECUTE) {
+                return false;
+            }
+
+            const uintptr_t regionBase = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+            if (regionBase > cursor || mbi.RegionSize >
+                (std::numeric_limits<uintptr_t>::max)() - regionBase) return false;
+            const uintptr_t regionEnd = regionBase + mbi.RegionSize;
+            if (regionEnd <= cursor) return false;
+
+            const size_t available = static_cast<size_t>(regionEnd - cursor);
+            const size_t chunkSize = (std::min)(remaining, available);
+            if (std::memchr(reinterpret_cast<const void*>(cursor), '\\0', chunkSize) != nullptr)
+                return true;
+
+            cursor += chunkSize;
+            remaining -= chunkSize;
+        }
+        return false;
     }
 
     void ReportIatMismatch(const char* functionName, const char* dllName) {
-        std::wstring message = L"IAT Hook terdeteksi!\\n\\nFungsi: ";
+        std::wstring message = L"IAT Hook terdeteksi!\n\nFungsi: ";
         if (functionName) {
             while (*functionName) message.push_back(static_cast<unsigned char>(*functionName++));
         }
-        message += L"\\nDLL: ";
+        message += L"\nDLL: ";
         if (dllName) {
             while (*dllName) message.push_back(static_cast<unsigned char>(*dllName++));
         }
-        message += L"\\n\\nClient akan ditutup.";
+        message += L"\n\nClient akan ditutup.";
         MessageBoxW(NULL, message.c_str(), L"Oblivion Hack Shield - Violation",
                     MB_OK | MB_ICONERROR | MB_TOPMOST);
         ExitProcess(0);
@@ -132,7 +156,7 @@ namespace Oblivion {
             const size_t dllNameRva = static_cast<size_t>(descriptor.Name);
             if (!HasImageRange(imageSize, dllNameRva, 1)) return;
             const char* dllName = reinterpret_cast<const char*>(base + dllNameRva);
-            if (!IsNullTerminatedInsideImage(dllName, base, imageSize, dllNameRva)) return;
+            if (!IsNullTerminatedInsideImage(dllName, imageSize, dllNameRva)) return;
 
             HMODULE importedModule = GetModuleHandleA(dllName);
             if (!importedModule) continue;
@@ -183,7 +207,7 @@ namespace Oblivion {
                 const size_t importNameRva = static_cast<size_t>(importNameValue);
                 const char* functionName = reinterpret_cast<const char*>(
                     base + importNameRva + sizeof(WORD));
-                if (!IsNullTerminatedInsideImage(functionName, base, imageSize,
+                if (!IsNullTerminatedInsideImage(functionName, imageSize,
                                                  importNameRva + sizeof(WORD))) {
                     return;
                 }
