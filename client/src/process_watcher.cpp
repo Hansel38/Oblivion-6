@@ -310,7 +310,7 @@ namespace Oblivion {
             // Forget PIDs that are no longer present so the cache stays bounded
             // and a PID can be examined again after the process exits.
             for (auto it = m_scannedProcesses.begin(); it != m_scannedProcesses.end();) {
-                if (activeProcesses.find(*it) == activeProcesses.end()) {
+                if (activeProcesses.find(it->first) == activeProcesses.end()) {
                     it = m_scannedProcesses.erase(it);
                 } else {
                     ++it;
