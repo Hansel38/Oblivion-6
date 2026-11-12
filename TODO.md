@@ -25,6 +25,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [x] **P0 — Server startup configuration:** Windows and Linux server refuse to start when the secret is missing or is the development placeholder.
 - [x] **P0 — Secret disclosure:** remove logging of expected and received authentication secrets from both server implementations.
 - [x] **P1 — Windows environment secret length:** avoid including the `_dupenv_s` terminating NUL byte in the server authentication key.
+- [x] **P1 — Linux secret file location:** resolve `secret.dat` next to `/proc/self/exe` rather than the service manager's current working directory; cap file size and reject incomplete/error reads.
 
 - [x] **P1 — ProcessWatcher ownership:** use `std::unique_ptr` for scanner components; startup now rolls back cleanly if thread creation fails.
 - [x] **P1 — AntiSuspend lifecycle:** make start/stop idempotent and join worker threads rather than leaving them detached.
