@@ -169,7 +169,11 @@ std::string hmacSha256(const std::string& key, const std::string& data) {
     if (st != 0) return std::string();
     
     DWORD objLen = 0, dlen = 0;
-    (void)BCryptGetProperty(hAlg, BCRYPT_OBJECT_LENGTH, (PUCHAR)&objLen, sizeof(DWORD), &dlen, 0);
+    st = BCryptGetProperty(hAlg, BCRYPT_OBJECT_LENGTH, (PUCHAR)&objLen, sizeof(DWORD), &dlen, 0);
+    if (st != 0 || objLen == 0) {
+        BCryptCloseAlgorithmProvider(hAlg, 0);
+        return std::string();
+    }
     std::vector<UCHAR> obj(objLen);
     st = BCryptCreateHash(hAlg, &hHash, obj.data(), objLen, (PUCHAR)key.data(), (ULONG)key.size(), 0);
     if (st != 0) {
@@ -197,12 +201,13 @@ std::string hmacSha256(const std::string& key, const std::string& data) {
     }
     return out;
 #else
-    unsigned char digest[32];
-    unsigned int digest_len;
-    HMAC(EVP_sha256(), key.data(), key.size(),
-         (unsigned char*)data.data(), data.size(), digest, &digest_len);
-    
-    if (digest_len != 32) return std::string();
+    unsigned char digest[32]{};
+    unsigned int digest_len = 0;
+    if (!HMAC(EVP_sha256(), key.data(), static_cast<int>(key.size()),
+              reinterpret_cast<const unsigned char*>(data.data()), data.size(),
+              digest, &digest_len) || digest_len != sizeof(digest)) {
+        return std::string();
+    }
     
     static const char* hex = "0123456789abcdef";
     std::string out;
