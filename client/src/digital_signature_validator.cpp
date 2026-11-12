@@ -328,12 +328,11 @@ namespace Oblivion {
                     (haveProgramFiles && IsWithinDirectory(normalizedModulePath, programFiles)) ||
                     (haveProgramFilesX86 && IsWithinDirectory(normalizedModulePath, programFilesX86));
 
-                if ((isWindowsModule || isProgramFilesModule) && VerifyFileSignature(modulePath)) {
-                    continue;
-                }
-
                 std::wstring moduleName(moduleEntry.szModule);
-                if (!IsModuleTrusted(moduleEntry.hModule, moduleName)) {
+                const bool isTrusted = (isWindowsModule || isProgramFilesModule)
+                    ? VerifyFileSignature(modulePath)
+                    : IsModuleTrusted(moduleEntry.hModule, moduleName);
+                if (!isTrusted) {
                     std::wstring message =
                         L"Modul tidak tepercaya (tidak ditandatangani atau penerbit tidak dikenal) terdeteksi: ";
                     message += moduleEntry.szModule;
