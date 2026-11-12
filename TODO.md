@@ -24,6 +24,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [x] **P0 — Public development secret fallback:** client and server no longer silently use `DEV_SECRET_NOT_SET` in non-debug builds.
 - [x] **P0 — Server startup configuration:** Windows and Linux server refuse to start when the secret is missing or is the development placeholder.
 - [x] **P0 — Secret disclosure:** remove logging of expected and received authentication secrets from both server implementations.
+- [x] **P1 — Windows environment secret length:** avoid including the `_dupenv_s` terminating NUL byte in the server authentication key.
 
 ## Open findings — prioritize next
 
