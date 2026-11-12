@@ -213,18 +213,20 @@ namespace Oblivion {
             return false;
         }
 
-        m_running = true;
-        m_worker = std::thread(&SelfIntegrityGuard::MonitoringLoop, this);
+        m_running.store(true);
+        try {
+            m_worker = std::thread(&SelfIntegrityGuard::MonitoringLoop, this);
+        } catch (...) {
+            m_running.store(false);
+            return false;
+        }
         return true;
     }
 
     void SelfIntegrityGuard::Stop() {
-        if (!m_running.load()) {
-            return;
-        }
-
-        m_running = false;
-        if (m_worker.joinable()) {
+        m_running.store(false);
+        if (m_worker.joinable() &&
+            m_worker.get_id() != std::this_thread::get_id()) {
             m_worker.join();
         }
     }
