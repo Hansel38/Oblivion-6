@@ -98,7 +98,8 @@ This checklist tracks findings from a source review. A checked item means the co
 - [ ] **P1 — Review disk-vs-memory section comparison.** PE sections are mapped differently from raw file sections; validate alignment, zero-filled virtual tails, relocations, imports, hotpatches, and legitimate runtime modifications before comparison.
 - [x] **P1 — Remove invalid current-thread debug-register check.** Remove the `GetThreadContext(GetCurrentThread())` hardware-breakpoint heuristic because Windows explicitly returns an invalid context for a running current thread; the unsupported signal is no longer used for debugger decisions.
 - [ ] **P1 — Avoid fail-open on inaccessible process data.** Process/module/signature queries often return false/empty on access denial. Distinguish inaccessible, unsupported, and clean states; do not silently treat all errors as safe.
-- [ ] **P1 — Review heuristic false positives.** Generic window classes (for example `TForm1`) and broad handle/module heuristics can flag legitimate software. Build a signed allowlist and telemetry-based tuning process.
+- [x] **P1 — Narrow API-hook prologue detection.** Treat `0xFF` as a branch only when its ModRM operation encodes indirect CALL/JMP, and use `VirtualQuery` allocation-base checks instead of dereferencing module PE headers.
+- [ ] **P1 — Review remaining heuristic false positives.** Generic window classes (for example `TForm1`) and broad handle/module heuristics can still flag legitimate software; review these separately.
 - [x] **P1 — Bound ProcessWatcher PID cache.** Remove PIDs absent from the current process snapshot and clear the cache on watcher restart. Signature cache limits and PID-creation-time identity remain open.
 - [ ] **P1 — Verify process identity against PID reuse.** Cache keys based only on PID can incorrectly reuse decisions after process exit and PID recycling.
 

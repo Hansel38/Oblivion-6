@@ -265,12 +265,38 @@ namespace Oblivion {
 
     static bool IsAddressInModule(HMODULE mod, void* addr) {
         if (!mod || !addr) return false;
-        auto dos = (PIMAGE_DOS_HEADER)mod;
-        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
-        auto nt = (PIMAGE_NT_HEADERS)((BYTE*)mod + dos->e_lfanew);
-        if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
-        SIZE_T size = nt->OptionalHeader.SizeOfImage;
-        return (addr >= (void*)mod) && ((BYTE*)addr < ((BYTE*)mod + size));
+
+        MEMORY_BASIC_INFORMATION memoryInfo{};
+        if (VirtualQuery(addr, &memoryInfo, sizeof(memoryInfo)) != sizeof(memoryInfo)) {
+            return false;
+        }
+
+        return memoryInfo.State == MEM_COMMIT &&
+               memoryInfo.AllocationBase == mod;
+    }
+
+    static bool IsSuspiciousBranchPrologue(const BYTE* code) {
+        if (!code) return false;
+
+        __try {
+            if (code[0] == 0xE9 || code[0] == 0xEA) {
+                return true;
+            }
+
+            // 0xFF is an opcode group; only /2, /3, /4 and /5 encode
+            // indirect CALL/JMP. Other 0xFF instructions are not hooks by themselves.
+            if (code[0] != 0xFF) {
+                return false;
+            }
+
+            const BYTE operation = static_cast<BYTE>((code[1] >> 3) & 0x07);
+            return operation == 2 || operation == 3 ||
+                   operation == 4 || operation == 5;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            // An unreadable prologue is not sufficient evidence of a hook.
+            return false;
+        }
     }
 
     bool AntiDebug::CheckApiHookIntegrity() {
@@ -287,9 +313,9 @@ namespace Oblivion {
         bool isDbgHooked = !IsAddressInModule(hKernel32, (void*)pIsDbg);
         bool ntqipHooked = !IsAddressInModule(hNtdll, (void*)pNtQIP);
 
-        // Tambahan: cek prolog untuk lompatan tidak biasa (heuristik sederhana)
-        auto bytes = (BYTE*)pNtQIP;
-        bool suspiciousJmp = (bytes[0] == 0xE9) || (bytes[0] == 0xEA) || (bytes[0] == 0xFF); // jmp/call absolute/indirect
+        // Tambahan: cek prolog branch yang umum dipakai sebagai trampoline.
+        const auto bytes = reinterpret_cast<const BYTE*>(pNtQIP);
+        bool suspiciousJmp = IsSuspiciousBranchPrologue(bytes);
 
         // Whitelist suppression
         if (isDbgHooked) {
