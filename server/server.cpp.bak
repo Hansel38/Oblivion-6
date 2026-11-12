@@ -1,0 +1,509 @@
+#include <iostream>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <string>
+#include <thread>
+#include <vector>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
+#include <ctime>
+#include <algorithm>
+#include <windows.h>
+#include "include/secret_obf.h"
+
+#pragma comment(lib, "Ws2_32.lib")
+
+#define DEFAULT_PORT "54321"
+#define BUFFER_LEN 4096
+#define MAX_TYPE_LEN 64
+#define MAX_DETAILS_LEN 2048
+#define MAX_HWID_LEN 128
+#define MAX_SECRET_LEN 128
+// Ambil secret yang di-obfuscate agar tidak muncul sebagai literal.
+static std::string SERVER_SECRET = OblivionServer::GetServerSecret();
+#define BAN_LIST_FILE "bans.txt"
+#define VIOLATION_LOG_FILE "violations.log"
+
+// Fungsi untuk mendapatkan path folder tempat executable berada
+std::string GetExecutableDirectory() {
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    std::string path(exePath);
+    size_t lastSlash = path.find_last_of("\\/");
+    if (lastSlash != std::string::npos) {
+        return path.substr(0, lastSlash + 1);
+    }
+    return "";
+}
+
+// Fungsi untuk mendapatkan path lengkap file (relatif terhadap executable)
+std::string GetFilePath(const std::string& filename) {
+    std::string exeDir = GetExecutableDirectory();
+    return exeDir + filename;
+}
+
+// Fungsi helper untuk mendapatkan timestamp saat ini
+std::string GetCurrentTimestamp() {
+    auto now = std::time(nullptr);
+    struct tm tm;
+    localtime_s(&tm, &now);
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
+    return oss.str();
+}
+
+// Fungsi untuk mengecek apakah HWID sudah di-ban
+// PENTING: File bans.txt dibaca fresh setiap kali fungsi ini dipanggil (tidak ada caching)
+// Untuk unban HWID, cukup hapus baris HWID dari bans.txt dan restart client
+bool IsHWIDBanned(const std::string& hwid) {
+    std::string banFilePath = GetFilePath(BAN_LIST_FILE);
+    std::ifstream banFile(banFilePath);
+    if (!banFile.is_open()) {
+        return false; // File tidak ada, berarti belum ada yang di-ban
+    }
+    
+    std::string line;
+    while (std::getline(banFile, line)) {
+        // Hapus whitespace dari awal dan akhir
+        line.erase(0, line.find_first_not_of(" \t\n\r"));
+        line.erase(line.find_last_not_of(" \t\n\r") + 1);
+        
+        // Jika line kosong atau komentar (dimulai dengan #), skip
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        
+        // Bandingkan HWID (case-insensitive)
+        if (_stricmp(line.c_str(), hwid.c_str()) == 0) {
+            banFile.close();
+            return true;
+        }
+    }
+    
+    banFile.close();
+    return false;
+}
+
+// Fungsi untuk menambahkan HWID ke ban list
+void AddToBanList(const std::string& hwid) {
+    // Cek dulu apakah sudah di-ban
+    if (IsHWIDBanned(hwid)) {
+        return; // Sudah di-ban, tidak perlu ditambahkan lagi
+    }
+    
+    std::string banFilePath = GetFilePath(BAN_LIST_FILE);
+    std::ofstream banFile(banFilePath, std::ios::app);
+    if (banFile.is_open()) {
+        banFile << hwid << std::endl;
+        banFile.close();
+        std::cout << "[BAN] HWID [" << hwid << "] ditambahkan ke ban list." << std::endl;
+    } else {
+        std::cerr << "[ERROR] Gagal membuka file ban list untuk menulis." << std::endl;
+    }
+}
+
+// Fungsi untuk mencatat pelanggaran ke log file
+void LogViolation(const std::string& type, const std::string& details, const std::string& hwid) {
+    std::string logFilePath = GetFilePath(VIOLATION_LOG_FILE);
+    std::ofstream logFile(logFilePath, std::ios::app);
+    if (logFile.is_open()) {
+        logFile << "[" << GetCurrentTimestamp() << "] TYPE: " << type 
+                << " | HWID: " << hwid 
+                << " | DETAILS: " << details << std::endl;
+        logFile.close();
+    } else {
+        std::cerr << "[ERROR] Gagal membuka file log untuk menulis." << std::endl;
+    }
+}
+
+// Fungsi untuk menentukan apakah pelanggaran serius dan perlu di-ban
+bool IsSeriousViolation(const std::string& type) {
+    // Daftar tipe pelanggaran yang dianggap serius dan langsung di-ban
+    std::vector<std::string> seriousViolations = {
+        "MEMORY_VIOLATION",
+        "INJECTION_DETECTED",
+        "FILE_MODIFIED",
+        "FILE_INTEGRITY_FAILED",
+        "SIGNATURE_SPOOFING",      // Spoofing process name dengan fake signature
+        "ADV_HEURISTIC_DETECTED",  // Advanced heuristics detection (CE, WPE, dll)
+        "PROCESS_DETECTED"         // Blacklisted process detected
+    };
+    
+    for (const auto& serious : seriousViolations) {
+        if (_stricmp(type.c_str(), serious.c_str()) == 0) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+// Fungsi untuk menangani setiap client yang terhubung
+void HandleClient(SOCKET clientSocket) {
+    char buffer[BUFFER_LEN] = {0};
+    int bytesReceived;
+
+    try {
+        bytesReceived = recv(clientSocket, buffer, BUFFER_LEN - 1, 0);
+        if (bytesReceived > 0) {
+            // Null-terminate untuk keamanan
+            buffer[bytesReceived] = '\0';
+            
+            std::string report(buffer, bytesReceived);
+            
+            std::cout << "[DEBUG] Received raw data (" << bytesReceived << " bytes)" << std::endl;
+            
+            // --- PARSING DENGAN VALIDASI ROBUST ---
+            ParsedReport parsed = ParseProtocol(report);
+            
+            if (!parsed.valid) {
+                std::cout << "[ERROR] Invalid protocol format: " << parsed.errorMessage << std::endl;
+                std::cout << "[DEBUG] Expected format: TYPE:DETAILS:HWID:SECRET;" << std::endl;
+                
+                // Log attempt dengan data mentah (truncated untuk keamanan)
+                std::string truncatedReport = report.length() > 100 ? report.substr(0, 100) + "..." : report;
+                LogViolation("MALFORMED_REQUEST", parsed.errorMessage + " | Data: " + truncatedReport, "UNKNOWN");
+                
+                // Kirim error response dan tutup koneksi
+                const char* errorResponse = "ERROR:INVALID_FORMAT;";
+                send(clientSocket, errorResponse, (int)strlen(errorResponse), 0);
+                closesocket(clientSocket);
+                return;
+            }
+            
+            std::string type = parsed.type;
+            std::string details = parsed.details;
+            std::string hwid = parsed.hwid;
+            std::string secret = parsed.secret;
+            
+            std::cout << "[PARSE] TYPE: " << type << " | HWID: " << hwid << " | DETAILS_LEN: " << details.length() << std::endl;
+    std::string secret;
+    std::string errorMessage;
+};
+
+ParsedReport ParseProtocol(const std::string& report) {
+    ParsedReport result;
+    result.valid = false;
+    
+    // Validasi panjang minimum
+    if (report.length() < 10) { // Minimal TYPE::HWID:SECRET;
+        result.errorMessage = "Report too short (minimum 10 characters required)";
+        return result;
+    }
+    
+    // Validasi panjang maksimum
+    if (report.length() > BUFFER_LEN - 1) {
+        result.errorMessage = "Report exceeds maximum length";
+        return result;
+    }
+    
+    // Validasi format: harus diakhiri dengan semicolon
+    if (report.back() != ';') {
+        result.errorMessage = "Report must end with semicolon";
+        return result;
+    }
+    
+    // Hitung jumlah delimiter
+    size_t colonCount = std::count(report.begin(), report.end(), ':');
+    if (colonCount != 3) {
+        result.errorMessage = "Invalid format: expected 3 colons, found " + std::to_string(colonCount);
+        return result;
+    }
+    
+    // Parse dengan validasi posisi
+    size_t pos1 = report.find(':');
+    if (pos1 == std::string::npos || pos1 == 0) {
+        result.errorMessage = "Invalid TYPE field position";
+        return result;
+    }
+    
+    size_t pos2 = report.find(':', pos1 + 1);
+    if (pos2 == std::string::npos || pos2 == pos1 + 1) {
+        result.errorMessage = "Invalid DETAILS field position";
+        return result;
+    }
+    
+    size_t pos3 = report.find(':', pos2 + 1);
+    if (pos3 == std::string::npos) {
+        result.errorMessage = "Invalid HWID field position";
+        return result;
+    }
+            }
+        } else if (bytesReceived == 0) {
+            std::cout << "[INFO] Client closed connection gracefully" << std::endl;
+        } else {
+            int errorCode = WSAGetLastError();
+            std::cout << "[ERROR] recv() failed with error code: " << errorCode << std::endl;
+            LogViolation("RECV_ERROR", "Error code: " + std::to_string(errorCode), "UNKNOWN");
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[EXCEPTION] Error handling client: " << e.what() << std::endl;
+        LogViolation("EXCEPTION", std::string("Exception: ") + e.what(), "UNKNOWN");
+    } catch (...) {
+        std::cerr << "[EXCEPTION] Unknown error handling client" << std::endl;
+        LogViolation("EXCEPTION", "Unknown exception occurred", "UNKNOWN");
+    }
+
+    closesocket(clientSocket);
+}    // Validasi panjang setiap field
+    if (result.type.length() > MAX_TYPE_LEN) {
+        result.errorMessage = "TYPE field exceeds maximum length (" + std::to_string(MAX_TYPE_LEN) + ")";
+        return result;
+    }
+    
+    if (result.details.length() > MAX_DETAILS_LEN) {
+        result.errorMessage = "DETAILS field exceeds maximum length (" + std::to_string(MAX_DETAILS_LEN) + ")";
+        return result;
+    }
+    
+    if (result.hwid.length() > MAX_HWID_LEN) {
+        result.errorMessage = "HWID field exceeds maximum length (" + std::to_string(MAX_HWID_LEN) + ")";
+        return result;
+    }
+    
+    if (result.secret.length() > MAX_SECRET_LEN) {
+        result.errorMessage = "SECRET field exceeds maximum length (" + std::to_string(MAX_SECRET_LEN) + ")";
+        return result;
+    }
+    
+    // Validasi TYPE tidak kosong dan hanya berisi karakter alphanumeric + underscore
+    if (result.type.empty()) {
+        result.errorMessage = "TYPE field cannot be empty";
+        return result;
+    }
+    
+    for (char c : result.type) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') {
+            result.errorMessage = "TYPE field contains invalid characters";
+            return result;
+        }
+    }
+    
+    // Validasi HWID tidak kosong dan hanya berisi karakter hexadecimal + dash
+    if (result.hwid.empty()) {
+        result.errorMessage = "HWID field cannot be empty";
+        return result;
+    }
+    
+    for (char c : result.hwid) {
+        if (!std::isxdigit(static_cast<unsigned char>(c)) && c != '-') {
+            result.errorMessage = "HWID field contains invalid characters (expected hex + dash)";
+            return result;
+        }
+    }
+    
+    // Validasi SECRET tidak kosong
+    if (result.secret.empty()) {
+        result.errorMessage = "SECRET field cannot be empty";
+        return result;
+    }
+    
+    // Sanitasi DETAILS (bisa kosong untuk CHECKIN)
+    result.details = SanitizeInput(result.details, MAX_DETAILS_LEN);
+    
+    result.valid = true;
+    return result;
+}
+
+// Fungsi untuk menangani setiap client yang terhubung
+void HandleClient(SOCKET clientSocket) {
+    char buffer[BUFFER_LEN] = {0};
+    int bytesReceived;
+
+    try {
+        bytesReceived = recv(clientSocket, buffer, BUFFER_LEN, 0);
+        if (bytesReceived > 0) {
+            std::string report(buffer, bytesReceived);
+            
+            std::cout << "[DEBUG] Received raw data (" << bytesReceived << " bytes): " << report << std::endl;
+            
+            // --- PARSING FORMAT BARU: TYPE:DETAILS:HWID:SECRET; --- (DETAILS bisa kosong untuk CHECKIN)
+            size_t pos1 = report.find(':');
+            size_t pos2 = report.find(':', pos1 == std::string::npos ? std::string::npos : pos1 + 1);
+            size_t pos3 = report.find(':', pos2 == std::string::npos ? std::string::npos : pos2 + 1);
+            size_t pos4 = report.find(';', pos3 == std::string::npos ? std::string::npos : pos3 + 1);
+
+            if (pos1 != std::string::npos && pos2 != std::string::npos && pos3 != std::string::npos && pos4 != std::string::npos) {
+                std::string type = report.substr(0, pos1);
+                std::string details = report.substr(pos1 + 1, pos2 - pos1 - 1); // bisa kosong
+                std::string hwid = report.substr(pos2 + 1, pos3 - pos2 - 1);
+                std::string secret = report.substr(pos3 + 1, pos4 - pos3 - 1);
+
+                std::cout << "[PARSE] TYPE: " << type << " | DETAILS: " << details << " | HWID: " << hwid << std::endl;
+
+            // --- CEK SECRET KEY TERLEBIH DAHULU ---
+            if (secret != SERVER_SECRET) {
+                std::cout << "[AUTH] Secret key tidak valid dari HWID [" << hwid << "]" << std::endl;
+                std::cout << "[AUTH] Expected: " << SERVER_SECRET << " | Received: " << secret << std::endl;
+
+                // Log pelanggaran autentikasi (tanpa auto-ban)
+                LogViolation("AUTH_FAILED", "Invalid secret key", hwid);
+
+                // Kirim KICK saja; keputusan ban tetap manual via bans.txt
+                const char* kickCommand = "KICK;";
+                send(clientSocket, kickCommand, (int)strlen(kickCommand), 0);
+                std::cout << "[INFO] KICK dikirim (secret invalid). Review manual untuk ban jika diperlukan." << std::endl;
+            }
+            else if (type == "CHECKIN") {
+                // Ini adalah check-in dari client saat pertama kali start
+                std::cout << "[CHECKIN] Client check-in dari HWID [" << hwid << "]" << std::endl;
+                
+                // Cek apakah HWID sudah di-ban (file dibaca fresh setiap kali, tidak ada cache)
+                bool isBanned = IsHWIDBanned(hwid);
+                
+                if (isBanned) {
+                    // HWID di-ban, kirim KICK
+                    const char* kickCommand = "KICK;";
+                    send(clientSocket, kickCommand, (int)strlen(kickCommand), 0);
+                    std::cout << "[BAN] HWID [" << hwid << "] terdeteksi di ban list. Perintah KICK dikirim." << std::endl;
+                    std::cout << "[INFO] Untuk unban, hapus HWID dari bans.txt dan restart client." << std::endl;
+                } else {
+                    // HWID tidak di-ban, kirim OK
+                    const char* okCommand = "OK;";
+                    send(clientSocket, okCommand, (int)strlen(okCommand), 0);
+                    std::cout << "[OK] HWID [" << hwid << "] diizinkan untuk melanjutkan (tidak ada di ban list)." << std::endl;
+                }
+            } else {
+                // Ini adalah laporan pelanggaran
+                std::cout << "[INFO] Laporan diterima dari HWID [" << hwid << "]: " << type << " - " << details << std::endl;
+                
+                // --- LOGIKA SERVER: CEK BAN LIST DAN LOG PELANGGARAN ---
+                
+                // 1. Catat semua pelanggaran ke log file
+                LogViolation(type, details, hwid);
+                
+                // 2. Cek apakah HWID sudah di-ban (hanya cek, tidak auto-ban)
+                bool isBanned = IsHWIDBanned(hwid);
+                
+                // 3. AUTO-BAN DISABLED - Admin melakukan ban manual via bans.txt
+                // bool isSerious = IsSeriousViolation(type);
+                // if (isSerious && !isBanned) {
+                //     AddToBanList(hwid);
+                //     isBanned = true;
+                //     std::cout << "[BAN] Pelanggaran serius terdeteksi! HWID [" << hwid << "] di-ban otomatis." << std::endl;
+                // }
+                
+                // 4. Kirim perintah KICK hanya jika sudah di-ban secara manual
+                if (isBanned) {
+                    const char* kickCommand = "KICK;";
+                    send(clientSocket, kickCommand, (int)strlen(kickCommand), 0);
+                    std::cout << "[INFO] Perintah KICK dikirim ke client (HWID: " << hwid << ") - sudah ada di ban list." << std::endl;
+                } else {
+                    // Pelanggaran hanya dicatat ke log, tidak langsung di-ban atau di-kick
+                    std::cout << "[WARNING] Pelanggaran terdeteksi dari HWID [" << hwid << "], dicatat ke log (menunggu review manual)." << std::endl;
+                    // Tidak kirim KICK - client tetap berjalan sampai admin memutuskan ban manual
+                }
+            }
+
+        } else {
+            std::cout << "[ERROR] Laporan tidak valid diterima (malformed format): " << report << std::endl;
+            std::cout << "[DEBUG] Expected format: TYPE:DETAILS:HWID:SECRET;" << std::endl;
+        }
+    } else if (bytesReceived == 0) {
+        std::cout << "[INFO] Client closed connection gracefully" << std::endl;
+    } else {
+        std::cout << "[ERROR] recv() failed with error code: " << WSAGetLastError() << std::endl;
+    }
+    } catch (const std::exception& e) {
+        std::cerr << "[EXCEPTION] Error handling client: " << e.what() << std::endl;
+    } catch (...) {
+        std::cerr << "[EXCEPTION] Unknown error handling client" << std::endl;
+    }
+
+    closesocket(clientSocket);
+}
+
+int main() {
+    WSADATA wsaData;
+    int iResult;
+
+    SOCKET ListenSocket = INVALID_SOCKET;
+    SOCKET ClientSocket = INVALID_SOCKET;
+
+    struct addrinfo* result = NULL;
+    struct addrinfo hints;
+
+    // Inisialisasi Winsock
+    iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (iResult != 0) {
+        std::cerr << "WSAStartup gagal dengan error: " << iResult << std::endl;
+        return 1;
+    }
+
+    ZeroMemory(&hints, sizeof(hints));
+    hints.ai_family = AF_INET; // IPv4
+    hints.ai_socktype = SOCK_STREAM; // TCP
+    hints.ai_protocol = IPPROTO_TCP;
+    hints.ai_flags = AI_PASSIVE; // Untuk bind()
+
+    // Resolve alamat server dan port
+    iResult = getaddrinfo(NULL, DEFAULT_PORT, &hints, &result);
+    if (iResult != 0) {
+        std::cerr << "getaddrinfo gagal dengan error: " << iResult << std::endl;
+        WSACleanup();
+        return 1;
+    }
+
+    // Buat socket untuk mendengarkan koneksi client
+    ListenSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+    if (ListenSocket == INVALID_SOCKET) {
+        std::cerr << "Socket gagal dibuat dengan error: " << WSAGetLastError() << std::endl;
+        freeaddrinfo(result);
+        WSACleanup();
+        return 1;
+    }
+
+    // Bind socket ke alamat dan port
+    iResult = bind(ListenSocket, result->ai_addr, (int)result->ai_addrlen);
+    if (iResult == SOCKET_ERROR) {
+        std::cerr << "Bind gagal dengan error: " << WSAGetLastError() << std::endl;
+        freeaddrinfo(result);
+        closesocket(ListenSocket);
+        WSACleanup();
+        return 1;
+    }
+
+    freeaddrinfo(result);
+
+    // Mulai mendengarkan koneksi
+    iResult = listen(ListenSocket, SOMAXCONN);
+    if (iResult == SOCKET_ERROR) {
+        std::cerr << "Listen gagal dengan error: " << WSAGetLastError() << std::endl;
+        closesocket(ListenSocket);
+        WSACleanup();
+        return 1;
+    }
+
+    std::cout << "==================================================" << std::endl;
+    std::cout << "  OBLIVION HACK SHIELD - Server Component" << std::endl;
+    std::cout << "  Version 1.0 - Ragnarok Online Protection" << std::endl;
+    std::cout << "==================================================" << std::endl;
+    std::cout << "[INFO] Server berjalan dan mendengarkan di port " << DEFAULT_PORT << std::endl;
+    std::cout << "[INFO] Ban list file: " << GetFilePath(BAN_LIST_FILE) << std::endl;
+    std::cout << "[INFO] Violation log file: " << GetFilePath(VIOLATION_LOG_FILE) << std::endl;
+    std::cout << "[INFO] Menunggu koneksi dari client..." << std::endl;
+    std::cout << "==================================================" << std::endl;
+
+    // Loop utama untuk menerima koneksi
+    while (true) {
+        // Terima koneksi dari client
+        ClientSocket = accept(ListenSocket, NULL, NULL);
+        if (ClientSocket == INVALID_SOCKET) {
+            std::cerr << "[ERROR] Accept gagal dengan error: " << WSAGetLastError() << std::endl;
+            continue; // Jangan shutdown server, coba accept lagi
+        }
+
+        std::cout << "\n[CONNECTION] New client connected" << std::endl;
+        
+        // Buat thread baru untuk menangani client agar server bisa menerima client lain
+        std::thread clientThread(HandleClient, ClientSocket);
+        clientThread.detach(); // Lepaskan thread agar bisa berjalan mandiri
+    }
+
+    // Cleanup (tidak akan pernah tercapai dalam loop tak terbatas ini)
+    closesocket(ListenSocket);
+    WSACleanup();
+
+    return 0;
+}

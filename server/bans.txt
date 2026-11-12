@@ -1,0 +1,9 @@
+# Oblivion Hack Shield - Ban List
+# Format: Satu HWID per baris
+# Baris yang dimulai dengan # adalah komentar dan akan diabaikan
+# Case-insensitive (huruf besar/kecil tidak berpengaruh)
+#
+# Contoh:
+# abc123xyz456
+# def789ghi012
+

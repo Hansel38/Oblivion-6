@@ -1,0 +1,132 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="Resource Files">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+    <Filter Include="Include">
+      <UniqueIdentifier>{85d3c3c2-8c90-4769-bd84-95dc28c57cd8}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Src">
+      <UniqueIdentifier>{37a71732-299b-4233-b0b0-b541efd2775a}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="framework.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="pch.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\blacklist.h">
+      <Filter>Include</Filter>
+    </ClInclude>
+    <ClInclude Include="include\process_watcher.h">
+      <Filter>Include</Filter>
+    </ClInclude>
+    <ClInclude Include="include\AntiDebug.h">
+      <Filter>Include</Filter>
+    </ClInclude>
+    <ClInclude Include="include\injection_scanner.h">
+      <Filter>Include</Filter>
+    </ClInclude>
+    <ClInclude Include="include\anti_suspend.h">
+      <Filter>Include</Filter>
+    </ClInclude>
+    <ClInclude Include="include\overlay_scanner.h">
+      <Filter>Include</Filter>
+    </ClInclude>
+    <ClInclude Include="include\memory_scanner.h">
+      <Filter>Include</Filter>
+    </ClInclude>
+    <ClInclude Include="include\file_integrity_check.h">
+      <Filter>Include</Filter>
+    </ClInclude>
+    <ClInclude Include="include\network_reporter.h">
+      <Filter>Include</Filter>
+    </ClInclude>
+    <ClInclude Include="include\hwid_generator.h">
+      <Filter>Include</Filter>
+    </ClInclude>
+    <ClInclude Include="include\digital_signature_validator.h">
+      <Filter>Include</Filter>
+    </ClInclude>
+    <ClInclude Include="include\iat_hook_scanner.h">
+      <Filter>Include</Filter>
+    </ClInclude>
+    <ClInclude Include="include\advanced_process_heuristics.h">
+      <Filter>Include</Filter>
+    </ClInclude>
+    <ClInclude Include="include\self_integrity_guard.h">
+      <Filter>Include</Filter>
+    </ClInclude>
+    <ClInclude Include="include\secret_obf.h">
+      <Filter>Include</Filter>
+    </ClInclude>
+    <ClInclude Include="include\heartbeat_protocol.h">
+      <Filter>Include</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="dllmain.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="pch.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\blacklist.cpp">
+      <Filter>Src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\process_watcher.cpp">
+      <Filter>Src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\AntiDebug.cpp">
+      <Filter>Src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\injection_scanner.cpp">
+      <Filter>Src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\anti_suspend.cpp">
+      <Filter>Src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\overlay_scanner.cpp">
+      <Filter>Src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\memory_scanner.cpp">
+      <Filter>Src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\file_integrity_check.cpp">
+      <Filter>Src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\network_reporter.cpp">
+      <Filter>Src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\hwid_generator.cpp">
+      <Filter>Src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\digital_signature_validator.cpp">
+      <Filter>Src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\iat_hook_scanner.cpp">
+      <Filter>Src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\advanced_process_heuristics.cpp">
+      <Filter>Src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\self_integrity_guard.cpp">
+      <Filter>Src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\secret_obf.cpp">
+      <Filter>Src</Filter>
+    </ClCompile>
+  </ItemGroup>
+</Project>
