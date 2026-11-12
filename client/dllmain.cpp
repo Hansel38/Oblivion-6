@@ -8,6 +8,8 @@
 #include <thread>
 #include <iostream>
 #include <string>
+#include <vector>
+#include <algorithm>
 #include <objidl.h>
 #include <gdiplus.h>
 #pragma comment(lib, "gdiplus.lib")
@@ -74,11 +76,41 @@ void InitializeSecuritySystem() {
             return; // Jika GDI+ gagal, lanjut tanpa splash
         }
 
-        wchar_t modulePath[MAX_PATH];
-        GetModuleFileNameW(g_hSelfModule ? g_hSelfModule : GetModuleHandleW(nullptr), modulePath, MAX_PATH);
-        wchar_t *lastSlash = wcsrchr(modulePath, L'\\');
-        if (lastSlash) *lastSlash = L'\0';
-        std::wstring imagePath = std::wstring(modulePath) + L"\\logo\\OblivionHS.png";
+        const HMODULE module = g_hSelfModule ? g_hSelfModule : GetModuleHandleW(nullptr);
+        constexpr size_t kInitialPathCapacity = MAX_PATH;
+        constexpr size_t kMaximumPathCapacity = 32768;
+        std::vector<wchar_t> modulePath(kInitialPathCapacity);
+        DWORD modulePathLength = 0;
+
+        while (modulePath.size() <= kMaximumPathCapacity) {
+            const DWORD capacity = static_cast<DWORD>(modulePath.size());
+            const DWORD length = GetModuleFileNameW(module, modulePath.data(), capacity);
+            if (length == 0) {
+                break;
+            }
+            if (length < capacity) {
+                modulePathLength = length;
+                break;
+            }
+            if (modulePath.size() == kMaximumPathCapacity) {
+                break;
+            }
+            modulePath.resize((std::min)(modulePath.size() * 2, kMaximumPathCapacity));
+        }
+
+        if (modulePathLength == 0) {
+            GdiplusShutdown(gdiplusToken);
+            return;
+        }
+
+        std::wstring modulePathString(modulePath.data(), modulePathLength);
+        const size_t lastSlash = modulePathString.find_last_of(L"\\/");
+        if (lastSlash == std::wstring::npos) {
+            GdiplusShutdown(gdiplusToken);
+            return;
+        }
+        modulePathString.resize(lastSlash);
+        const std::wstring imagePath = modulePathString + L"\\logo\\OblivionHS.png";
 
         HWND hwndSplash = nullptr;
         HBITMAP hBmp = nullptr;
