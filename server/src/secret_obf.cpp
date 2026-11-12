@@ -20,7 +20,9 @@ namespace OblivionServer {
     #if defined(_WIN32)
         char* envSecret = nullptr; size_t envLen = 0;
         if (_dupenv_s(&envSecret, &envLen, "OBLIVION_SECRET") == 0 && envSecret && envLen > 0) {
-            cached = std::string(envSecret, envLen);
+            // _dupenv_s reports the buffer size including the terminating NUL.
+            // Construct from the C string so the terminator is not part of the key.
+            cached = std::string(envSecret);
             free(envSecret);
             return cached;
         }
@@ -86,7 +88,8 @@ namespace OblivionServer {
         }
 #endif
 
-        // 3) Fallback development value jika tidak ada konfigurasi
+        // Release builds must fail closed when no production secret is configured.
+#if defined(_DEBUG)
         const char* devDefault = "DEV_SECRET_NOT_SET";
         size_t len = strlen(devDefault);
         std::vector<unsigned char> encoded(len);
@@ -102,5 +105,8 @@ namespace OblivionServer {
 
         cached = secret;
         return cached;
+#else
+        return {};
+#endif
     }
 }

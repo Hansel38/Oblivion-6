@@ -670,7 +670,7 @@ void HandleClient(SocketType clientSocket) {
 
             if (secret != SERVER_SECRET) {
                 std::cout << "[AUTH] Secret key tidak valid dari HWID [" << hwid << "]" << std::endl;
-                std::cout << "[AUTH] Expected: " << SERVER_SECRET << " | Received: " << secret << std::endl;
+                // Never write authentication secrets to logs.
 
                 LogViolation("AUTH_FAILED", "Invalid secret key", hwid);
 
@@ -863,6 +863,11 @@ void HandleClient(SocketType clientSocket) {
 }
 
 int main() {
+    if (SERVER_SECRET.empty() || SERVER_SECRET == "DEV_SECRET_NOT_SET") {
+        std::cerr << "[FATAL] OBLIVION_SECRET is not configured; refusing to start." << std::endl;
+        return 1;
+    }
+
 #ifdef _WIN32
     WSADATA wsaData;
     int iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);

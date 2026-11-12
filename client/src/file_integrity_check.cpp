@@ -149,27 +149,26 @@ namespace Oblivion {
         // Baca file dan hashkan kontennya menggunakan ReadFile
         BYTE buffer[BUFFER_SIZE];
         DWORD bytesRead = 0;
-        while (ReadFile(hFile, buffer, BUFFER_SIZE, &bytesRead, NULL) && bytesRead > 0) {
-            status = BCryptHashData(hHash, buffer, bytesRead, 0);
-            if (!BCRYPT_SUCCESS(status)) { 
+        for (;;) {
+            bytesRead = 0;
+            if (!ReadFile(hFile, buffer, BUFFER_SIZE, &bytesRead, NULL)) {
                 BCryptDestroyHash(hHash);
                 HeapFree(GetProcessHeap(), 0, pbHashObject);
                 HeapFree(GetProcessHeap(), 0, pbHash);
                 BCryptCloseAlgorithmProvider(hAlg, 0);
                 CloseHandle(hFile);
-                return ""; 
+                return "";
             }
-        }
-        
-        // Periksa error dari ReadFile (bukan EOF)
-        DWORD lastError = GetLastError();
-        if (lastError != ERROR_SUCCESS && lastError != ERROR_HANDLE_EOF) {
-            BCryptDestroyHash(hHash);
-            HeapFree(GetProcessHeap(), 0, pbHashObject);
-            HeapFree(GetProcessHeap(), 0, pbHash);
-            BCryptCloseAlgorithmProvider(hAlg, 0);
-            CloseHandle(hFile);
-            return "";
+            if (bytesRead == 0) break; // Successful EOF: GetLastError is undefined.
+            status = BCryptHashData(hHash, buffer, bytesRead, 0);
+            if (!BCRYPT_SUCCESS(status)) {
+                BCryptDestroyHash(hHash);
+                HeapFree(GetProcessHeap(), 0, pbHashObject);
+                HeapFree(GetProcessHeap(), 0, pbHash);
+                BCryptCloseAlgorithmProvider(hAlg, 0);
+                CloseHandle(hFile);
+                return "";
+            }
         }
 
         // Selesaikan perhitungan hash

@@ -58,8 +58,8 @@ namespace Oblivion {
             CloseHandle(hFile);
         }
 
-        // 3) Fallback development: gunakan nilai dummy agar terlihat jelas di log
-        //    Disarankan untuk produksi set via ENV atau file secret.dat
+        // Release builds must not fall back to a public, known development secret.
+#if defined(_DEBUG)
         const char* devDefault = "DEV_SECRET_NOT_SET";
         size_t len = strlen(devDefault);
         std::vector<unsigned char> encoded(len);
@@ -76,5 +76,8 @@ namespace Oblivion {
 
         cached = secret;
         return cached;
+#else
+        return {};
+#endif
     }
 }
