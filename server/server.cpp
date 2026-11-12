@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <ctime>
 #include <algorithm>
+#include <atomic>
 #include <limits>
 #include <mutex>
 #include <windows.h>
@@ -37,6 +38,14 @@ static std::string SERVER_SECRET = OblivionServer::GetServerSecret();
 #define VIOLATION_LOG_FILE "violations.log"
 
 static std::mutex g_violationLogMutex;
+
+static std::atomic<uint32_t> g_activeClientCount{ 0 };
+static constexpr uint32_t kMaxConcurrentClients = 256;
+
+struct ActiveClientGuard {
+    std::atomic<uint32_t>& counter;
+    ~ActiveClientGuard() { counter.fetch_sub(1, std::memory_order_relaxed); }
+};
 
 bool ConstantTimeEquals(const std::string& left, const std::string& right) {
     if (left.size() != right.size()) return false;
@@ -557,6 +566,15 @@ ParsedReport ParseProtocol(const std::string& report) {
 
 // Fungsi untuk menangani setiap client yang terhubung
 void HandleClient(SOCKET clientSocket) {
+    const uint32_t activeBefore = g_activeClientCount.fetch_add(1, std::memory_order_relaxed);
+    if (activeBefore >= kMaxConcurrentClients) {
+        g_activeClientCount.fetch_sub(1, std::memory_order_relaxed);
+        const char* busyResponse = "BUSY;";
+        OblivionNet::SendAll(clientSocket, busyResponse, strlen(busyResponse));
+        closesocket(clientSocket);
+        return;
+    }
+    ActiveClientGuard activeGuard{ g_activeClientCount };
     int bytesReceived = 0;
     std::string extractedHwid = "UNKNOWN"; // Untuk logging jika parsing gagal
     std::string pendingNetworkData;
@@ -977,8 +995,13 @@ int main() {
         
         // Buat thread baru untuk menangani client agar server bisa menerima client lain
         // Pass socket to handler; handler will use defaults; environment already logged
-        std::thread clientThread(HandleClient, ClientSocket);
-        clientThread.detach(); // Lepaskan thread agar bisa berjalan mandiri
+        try {
+            std::thread clientThread(HandleClient, ClientSocket);
+            clientThread.detach();
+        } catch (const std::exception& e) {
+            std::cerr << "[ERROR] Failed to start client handler thread: " << e.what() << std::endl;
+            closesocket(ClientSocket);
+        } // Lepaskan thread agar bisa berjalan mandiri
     }
 
     // Cleanup (tidak akan pernah tercapai dalam loop tak terbatas ini)
