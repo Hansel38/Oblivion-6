@@ -631,15 +631,17 @@ void HandleClient(SOCKET clientSocket) {
                     std::cout << "[BAN] HWID [" << hwid << "] terdeteksi di ban list. Perintah KICK dikirim." << std::endl;
                     std::cout << "[INFO] Untuk unban, hapus HWID dari bans.txt dan restart client." << std::endl;
                 } else {
-                    // HWID tidak di-ban, kirim OK dan mulai heartbeat ping
-                    // HWID tidak di-ban, kirim OK dan session nonce dalam satu pesan
+                    // Negotiate the exact heartbeat timing used by this server session.
+                    Oblivion::HeartbeatConfig cfg;
                     uint64_t sessionNonce = 0;
                     if (!OblivionNet::GenerateSecureNonce(sessionNonce)) {
                         LogViolation("RNG_FAILURE", "Unable to generate secure session nonce", hwid);
                         closesocket(clientSocket);
                         return;
                     }
-                    std::string response = "OK;SESSION_NONCE:" + std::to_string(sessionNonce) + ";";
+                    std::string response = "OK;SESSION_NONCE:" + std::to_string(sessionNonce) +
+                                           ";HB_CONFIG:" + std::to_string(cfg.interval_ms) +
+                                           ":" + std::to_string(cfg.timeout_ms) + ";";
                     if (!OblivionNet::SendAll(clientSocket, response.data(), response.size())) {
                         closesocket(clientSocket);
                         return;
@@ -647,7 +649,6 @@ void HandleClient(SOCKET clientSocket) {
                     std::cout << "[OK] HWID [" << hwid << "] diizinkan. Memulai heartbeat ping." << std::endl;
 
                     // Basic ping scheduler over the same socket (line-based)
-                    Oblivion::HeartbeatConfig cfg; 
                     uint32_t seq = 1;
                     uint32_t consecutiveMiss = 0;
                     uint64_t rttSum = 0; uint32_t rttCount = 0; 
