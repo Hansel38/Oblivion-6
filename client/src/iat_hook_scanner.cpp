@@ -196,7 +196,11 @@ namespace Oblivion {
                     break;
                 }
 
-                if ((lookupThunk->u1.Ordinal & IMAGE_ORDINAL_FLAG) != 0) continue;
+#if defined(_WIN64)
+                if ((lookupThunk->u1.Ordinal & IMAGE_ORDINAL_FLAG64) != 0) continue;
+#else
+                if ((lookupThunk->u1.Ordinal & IMAGE_ORDINAL_FLAG32) != 0) continue;
+#endif
 
                 const uint64_t importNameValue =
                     static_cast<uint64_t>(lookupThunk->u1.AddressOfData);
