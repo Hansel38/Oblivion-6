@@ -20,7 +20,8 @@ namespace {
                 return false;
             if (mbi.State != MEM_COMMIT ||
                 (mbi.Protect & PAGE_NOACCESS) != 0 ||
-                (mbi.Protect & PAGE_GUARD) != 0) {
+                (mbi.Protect & PAGE_GUARD) != 0 ||
+                (mbi.Protect & 0xFF) == PAGE_EXECUTE) {
                 return false;
             }
 
@@ -161,10 +162,11 @@ namespace Oblivion {
             HMODULE importedModule = GetModuleHandleA(dllName);
             if (!importedModule) continue;
 
-            // OriginalFirstThunk can be zero in valid images; use FirstThunk as fallback.
-            const size_t lookupRva = descriptor.OriginalFirstThunk != 0
-                ? static_cast<size_t>(descriptor.OriginalFirstThunk)
-                : static_cast<size_t>(descriptor.FirstThunk);
+            // Without OriginalFirstThunk, the loaded FirstThunk may already contain resolved
+            // function addresses rather than name RVAs. Skip this descriptor instead of
+            // interpreting runtime addresses as offsets into the image.
+            if (descriptor.OriginalFirstThunk == 0) continue;
+            const size_t lookupRva = static_cast<size_t>(descriptor.OriginalFirstThunk);
             const size_t iatRva = static_cast<size_t>(descriptor.FirstThunk);
             if (lookupRva == 0 || iatRva == 0 ||
                 !HasImageRange(imageSize, lookupRva, sizeof(IMAGE_THUNK_DATA)) ||
