@@ -362,15 +362,6 @@ namespace Oblivion {
             return 0;
 
         return CalculateCRC32(fileData.data() + rawOffset, rawSize);
-    }                                                         const PESectionInfo& section) {
-        if (section.rawDataOffset + section.rawDataSize > fileData.size()) {
-            return 0;
-        }
-
-        return CalculateCRC32(
-            fileData.data() + section.rawDataOffset,
-            section.rawDataSize
-        );
     }
 
     void MemoryScanner::CreateBaselineFromDisk(const std::wstring& filePath) {
