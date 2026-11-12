@@ -120,7 +120,7 @@ namespace Oblivion {
             return false;
         }
 
-        std::wstring wideHost(static_cast<size_t>(hostLength), L'\\0');
+        std::wstring wideHost(static_cast<size_t>(hostLength), L'\0');
         if (MultiByteToWideChar(
                 CP_ACP, 0, serverName.c_str(), -1, wideHost.data(), hostLength) == 0) {
             return false;
