@@ -190,8 +190,8 @@ namespace Oblivion {
         return true;
     }
 
-    bool AntiDebug::CheckHardwareBreakpoints() {
-        /ry SystemKernelDebuggerInformation untuk melihat apakah kernel debugger aktif
+    bool AntiDebug::CheckKernelDebugger() {
+        // Query SystemKernelDebuggerInformation untuk melihat apakah kernel debugger aktif
         typedef NTSTATUS (NTAPI* pNtQuerySystemInformation)(
             ULONG SystemInformationClass,
             PVOID SystemInformation,
