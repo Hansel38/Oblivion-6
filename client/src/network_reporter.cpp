@@ -426,7 +426,7 @@ namespace Oblivion {
 
         if (responseFrame == "KICK;") {
             closesocket(connectSocket);
-            MessageBoxW(NULL, L"Server mendeteksi pelanggaran.\\n\\nClient akan ditutup.",
+            MessageBoxW(NULL, L"Server mendeteksi pelanggaran.\n\nClient akan ditutup.",
                         L"Oblivion Hack Shield - Violation", MB_OK | MB_ICONERROR | MB_TOPMOST);
             ExitProcess(0);
             return;
