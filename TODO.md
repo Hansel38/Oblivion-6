@@ -84,7 +84,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [ ] **P1 — Remove heavy cleanup from `DllMain`.** `DLL_PROCESS_DETACH` stops and joins workers, deletes objects, and logs while under the loader lock. Introduce an explicit exported shutdown API and require the host to call it before unloading; keep `DllMain` minimal.
 - [ ] **P1 — Synchronize initialization and shutdown.** The initialization thread is detached while global raw pointers are read/written by worker and detach paths. Add a lifecycle state machine, owned initialization thread, cancellation, and synchronization.
 - [x] **P1 — Fix partial-construction leaks in `ProcessWatcher`.** Scanner ownership now uses `std::unique_ptr` and constructor unwinding cleans up completed components.
-- [ ] **P1 — Make watcher stop interruptible.** `Sleep(500..3000)` delays shutdown; use a condition variable/event and interruptible wait.
+- [x] **P1 — Make watcher stop interruptible.** Replace the 500–3000 ms sleep with a condition-variable wait that is notified by `Stop()`, preserving the normal scan interval while allowing prompt shutdown.
 - [ ] **P1 — Avoid blocking joins during loader-lock detach.** Validate shutdown order with a host that loads/unloads the DLL repeatedly.
 - [x] **P1 — SelfIntegrityGuard module path length.** Resolve the module path with a dynamically sized buffer and fail explicitly if the Windows path cannot be retrieved within the supported buffer limit.
 - [x] **P1 — DllMain splash-image module path length.** Resolve the module path with a dynamically sized buffer, detect API failure/truncation, and skip splash loading safely when the path cannot be resolved.
