@@ -152,7 +152,10 @@ namespace {
         imageSize = static_cast<size_t>(nt->OptionalHeader.SizeOfImage);
         if (imageSize < sizeof(IMAGE_DOS_HEADER) ||
             ntOffset > imageSize ||
-            sizeof(IMAGE_NT_HEADERS) > imageSize - ntOffset ||
+            sizeof(IMAGE_NT_HEADERS) > imageSize - ntOffset) {
+            return false;
+        }
+
         const size_t prefix = offsetof(IMAGE_NT_HEADERS, OptionalHeader);
         if (ntOffset > imageSize || prefix > imageSize - ntOffset)
             return false;
@@ -324,6 +327,8 @@ namespace Oblivion {
         size_t imageSize = 0;
         if (!GetMappedPeHeaders(moduleBase, memoryNt, memorySections, imageSize))
             return false;
+        (void)memoryNt;
+        (void)memorySections;
 
         size_t sectionSize = static_cast<size_t>(section.SizeOfRawData);
         const size_t virtualSize = static_cast<size_t>(section.Misc.VirtualSize);
