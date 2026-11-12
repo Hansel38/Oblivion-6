@@ -5,6 +5,7 @@
 #include <chrono>
 #include <fstream>
 #include <limits>
+#include <vector>
 #include <cstddef>
 
 // Forward declaration
@@ -12,6 +13,35 @@ extern void ReportViolationAndExit(const std::wstring& message, const std::strin
 
 namespace {
     constexpr auto kVerificationInterval = std::chrono::seconds(5);
+
+    bool GetModulePath(HMODULE module, std::wstring& path) {
+        if (!module) return false;
+
+        constexpr size_t kInitialCapacity = MAX_PATH;
+        constexpr size_t kMaximumCapacity = 32768;
+        std::vector<wchar_t> buffer(kInitialCapacity);
+
+        while (buffer.size() <= kMaximumCapacity) {
+            const DWORD capacity = static_cast<DWORD>(buffer.size());
+            const DWORD length = GetModuleFileNameW(module, buffer.data(), capacity);
+            if (length == 0) {
+                return false;
+            }
+
+            // A return value equal to nSize indicates that the path may be truncated.
+            if (length < capacity) {
+                path.assign(buffer.data(), static_cast<size_t>(length));
+                return !path.empty();
+            }
+
+            if (buffer.size() == kMaximumCapacity) {
+                return false;
+            }
+            buffer.resize((std::min)(buffer.size() * 2, kMaximumCapacity));
+        }
+
+        return false;
+    }
 
     bool IsCodeSection(const IMAGE_SECTION_HEADER& section) {
         const auto characteristics = section.Characteristics;
@@ -184,12 +214,7 @@ namespace Oblivion {
     SelfIntegrityGuard::SelfIntegrityGuard(HMODULE moduleHandle)
         : m_module(moduleHandle),
           m_running(false) {
-        if (m_module) {
-            wchar_t pathBuffer[MAX_PATH] = { 0 };
-            if (GetModuleFileNameW(m_module, pathBuffer, MAX_PATH) != 0) {
-                m_modulePath.assign(pathBuffer);
-            }
-        }
+        GetModulePath(m_module, m_modulePath);
     }
 
     SelfIntegrityGuard::~SelfIntegrityGuard() {
