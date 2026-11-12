@@ -105,7 +105,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [x] **P1 — Narrow API-hook prologue detection.** Treat `0xFF` as a branch only when its ModRM operation encodes indirect CALL/JMP, and use `VirtualQuery` allocation-base checks instead of dereferencing module PE headers.
 - [ ] **P1 — Review remaining heuristic false positives.** Generic window classes (for example `TForm1`) and broad handle/module heuristics can still flag legitimate software; review these separately.
 - [x] **P1 — Bound ProcessWatcher PID cache.** Remove PIDs absent from the current process snapshot and clear the cache on watcher restart. Signature cache limits and PID-creation-time identity remain open.
-- [ ] **P1 — Verify process identity against PID reuse.** Cache keys based only on PID can incorrectly reuse decisions after process exit and PID recycling.
+- [x] **P1 — Verify process identity against PID reuse.** Key ProcessWatcher cache entries by PID plus `GetProcessTimes()` creation time; discard the prior entry when the current process identity cannot be queried, so stale scan decisions are not reused.
 
 ### P2 — Data handling and privacy
 

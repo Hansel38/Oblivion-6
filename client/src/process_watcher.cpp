@@ -22,6 +22,26 @@
 // Forward declaration
 extern void ReportViolationAndExit(const std::wstring& message, const std::string& type, const std::string& details);
 
+    static bool GetProcessCreationTime(DWORD processId, ULONGLONG& creationTime) {
+        creationTime = 0;
+        HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+        if (!process) {
+            return false;
+        }
+
+        FILETIME creation{}, exitTime{}, kernelTime{}, userTime{};
+        const BOOL succeeded = GetProcessTimes(
+            process, &creation, &exitTime, &kernelTime, &userTime);
+        CloseHandle(process);
+        if (!succeeded) {
+            return false;
+        }
+
+        creationTime = (static_cast<ULONGLONG>(creation.dwHighDateTime) << 32) |
+                       static_cast<ULONGLONG>(creation.dwLowDateTime);
+        return true;
+    }
+
 namespace Oblivion {
     ProcessWatcher::ProcessWatcher() : m_isRunning(false) {
         std::cout << "[ProcessWatcher] Initializing components..." << std::endl;
@@ -236,12 +256,25 @@ namespace Oblivion {
                     ReportViolationAndExit(L"", "PROCESS_DETECTED", details_utf8);
                 }
 
-                // Cek apakah proses sudah pernah di-scan
-                bool isNewProcess = m_scannedProcesses.find(processId) == m_scannedProcesses.end();
-                
+                // Match cached scan state to the process creation time, not PID alone.
+                ULONGLONG creationTime = 0;
+                const bool haveProcessIdentity =
+                    GetProcessCreationTime(processId, creationTime);
+                auto cachedProcess = m_scannedProcesses.find(processId);
+                const bool isNewProcess =
+                    !haveProcessIdentity || cachedProcess == m_scannedProcesses.end() ||
+                    cachedProcess->second != creationTime;
+
+                if (!haveProcessIdentity) {
+                    // Never reuse a prior process decision when its current identity is unknown.
+                    m_scannedProcesses.erase(processId);
+                }
+
                 if (isNewProcess) {
-                    // Tambahkan ke cache
-                    m_scannedProcesses.insert(processId);
+                    // Cache only a verified PID + creation-time identity.
+                    if (haveProcessIdentity) {
+                        m_scannedProcesses[processId] = creationTime;
+                    }
                     
                     // Memory scan untuk proses non-whitelist
                     if (Oblivion::ShouldPerformMemoryScan(processName)) {
@@ -277,7 +310,7 @@ namespace Oblivion {
             // Forget PIDs that are no longer present so the cache stays bounded
             // and a PID can be examined again after the process exits.
             for (auto it = m_scannedProcesses.begin(); it != m_scannedProcesses.end();) {
-                if (activeProcesses.find(*it) == activeProcesses.end()) {
+                if (activeProcesses.find(it->first) == activeProcesses.end()) {
                     it = m_scannedProcesses.erase(it);
                 } else {
                     ++it;
