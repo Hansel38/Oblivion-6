@@ -87,7 +87,7 @@ This checklist tracks findings from a source review. A checked item means the co
 
 - [ ] **P1 — Replace placeholder/example file hashes.** `RRO.exe`, `Republic.grf`, and `DATA.ini` hashes must be generated from an approved clean release and signed in a trusted manifest. The repository currently labels some values as examples.
 - [ ] **P1 — Protect the integrity manifest.** A hash list stored only in the client binary is not a trust anchor if the binary and comparison logic can both be patched. Verify a signed manifest using a pinned public key.
-- [ ] **P1 — Fix self-integrity PE bounds validation.** Validate DOS/NT header offsets, section table bounds, image size, raw file ranges, relocation blocks, and integer overflow before dereferencing disk or mapped-image data.
+- [x] **P1 — Fix self-integrity PE bounds validation.** Validate DOS/NT header offsets, section table bounds, mapped-image readable ranges, raw file ranges, relocation blocks, section metadata consistency, and integer overflow before dereferencing disk or mapped-image data.
 - [ ] **P1 — Review disk-vs-memory section comparison.** PE sections are mapped differently from raw file sections; validate alignment, zero-filled virtual tails, relocations, imports, hotpatches, and legitimate runtime modifications before comparison.
 - [ ] **P1 — Correct current-thread debug-register check.** `GetThreadContext(GetCurrentThread())` is not a reliable way to inspect the current thread context. Use a supported, documented method or remove this heuristic.
 - [ ] **P1 — Avoid fail-open on inaccessible process data.** Process/module/signature queries often return false/empty on access denial. Distinguish inaccessible, unsupported, and clean states; do not silently treat all errors as safe.
