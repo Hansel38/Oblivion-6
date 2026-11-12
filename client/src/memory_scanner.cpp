@@ -8,8 +8,55 @@
 #include <algorithm>
 #include <wincrypt.h>
 #include <sstream>
+#include <limits>
+#include <cstring>
 
 #pragma comment(lib, "crypt32.lib")
+
+namespace {
+    bool IsReadableMemoryRange(const void* address, size_t length) {
+        if (length == 0) return true;
+        uintptr_t cursor = reinterpret_cast<uintptr_t>(address);
+        if (cursor == 0 || cursor > (std::numeric_limits<uintptr_t>::max)() - length)
+            return false;
+
+        size_t remaining = length;
+        while (remaining > 0) {
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (VirtualQuery(reinterpret_cast<const void*>(cursor), &mbi, sizeof(mbi)) == 0 ||
+                mbi.State != MEM_COMMIT ||
+                (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+                return false;
+            }
+
+            const DWORD protection = mbi.Protect & 0xFF;
+            const bool readable =
+                protection == PAGE_READONLY ||
+                protection == PAGE_READWRITE ||
+                protection == PAGE_WRITECOPY ||
+                protection == PAGE_EXECUTE_READ ||
+                protection == PAGE_EXECUTE_READWRITE ||
+                protection == PAGE_EXECUTE_WRITECOPY;
+            if (!readable) return false;
+
+            const uintptr_t regionBase = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+            if (regionBase > cursor ||
+                mbi.RegionSize > (std::numeric_limits<uintptr_t>::max)() - regionBase) {
+                return false;
+            }
+            const uintptr_t regionEnd = regionBase + mbi.RegionSize;
+            if (regionEnd <= cursor) return false;
+
+            const size_t step = (std::min)(remaining,
+                static_cast<size_t>(regionEnd - cursor));
+            cursor += step;
+            remaining -= step;
+        }
+        return true;
+    }
+}
+
+
 
 // Forward declaration
 extern void ReportViolationAndExit(const std::wstring& message, const std::string& type, const std::string& details);
@@ -100,6 +147,11 @@ namespace Oblivion {
         DWORD hashLen = 32;
         uint64_t result = 0;
 
+        if ((!data && size != 0) ||
+            size > static_cast<size_t>((std::numeric_limits<DWORD>::max)())) {
+            return 0;
+        }
+
         if (!CryptAcquireContextW(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
             return 0;
         }
@@ -121,8 +173,8 @@ namespace Oblivion {
             return 0;
         }
 
-        // Ambil 64-bit pertama dari SHA256
-        result = *reinterpret_cast<uint64_t*>(hash);
+        // Copy bytes instead of dereferencing a potentially unaligned uint64_t pointer.
+        std::memcpy(&result, hash, sizeof(result));
 
         CryptDestroyHash(hHash);
         CryptReleaseContext(hProv, 0);
@@ -132,16 +184,31 @@ namespace Oblivion {
 
     // === LAYER 1: PE Structure Validation ===\n    
     bool MemoryScanner::ReadExecutableFile(const std::wstring& filePath, std::vector<uint8_t>& fileData) {
+        fileData.clear();
         std::ifstream file(filePath, std::ios::binary | std::ios::ate);
-        if (!file.is_open()) {
+        if (!file.is_open()) return false;
+
+        const std::streamoff fileSize = static_cast<std::streamoff>(file.tellg());
+        // This reader is for the anti-cheat/game executable image, not arbitrary archives.
+        constexpr std::streamoff kMaxExecutableImageSize = 512LL * 1024LL * 1024LL;
+        if (fileSize <= 0 || fileSize > kMaxExecutableImageSize ||
+            static_cast<uint64_t>(fileSize) >
+                static_cast<uint64_t>((std::numeric_limits<size_t>::max)())) {
             return false;
         }
 
-        std::streamsize size = file.tellg();
-        file.seekg(0, std::ios::beg);
+        if (!file.seekg(0, std::ios::beg)) return false;
+        try {
+            fileData.resize(static_cast<size_t>(fileSize));
+        } catch (...) {
+            fileData.clear();
+            return false;
+        }
 
-        fileData.resize(static_cast<size_t>(size));
-        if (!file.read(reinterpret_cast<char*>(fileData.data()), size)) {
+        if (!file.read(reinterpret_cast<char*>(fileData.data()),
+                       static_cast<std::streamsize>(fileSize)) ||
+            file.gcount() != static_cast<std::streamsize>(fileSize)) {
+            fileData.clear();
             return false;
         }
 
@@ -218,112 +285,143 @@ namespace Oblivion {
     bool MemoryScanner::ValidateImageHeaders(const std::vector<uint8_t>& fileData,
                                              IMAGE_DOS_HEADER& dosHeader,
                                              IMAGE_NT_HEADERS& ntHeaders) {
-        if (fileData.size() < sizeof(IMAGE_DOS_HEADER)) {
+        if (fileData.size() < sizeof(IMAGE_DOS_HEADER)) return false;
+
+        std::memcpy(&dosHeader, fileData.data(), sizeof(dosHeader));
+        if (dosHeader.e_magic != IMAGE_DOS_SIGNATURE ||
+            dosHeader.e_lfanew < static_cast<LONG>(sizeof(IMAGE_DOS_HEADER))) {
             return false;
         }
 
-        // Validate DOS header
-        dosHeader = *reinterpret_cast<const IMAGE_DOS_HEADER*>(fileData.data());
-        if (dosHeader.e_magic != IMAGE_DOS_SIGNATURE) {
+        const size_t ntOffset = static_cast<size_t>(dosHeader.e_lfanew);
+        if (ntOffset > fileData.size() ||
+            sizeof(IMAGE_NT_HEADERS) > fileData.size() - ntOffset) {
             return false;
         }
 
-        // Validate NT headers offset
-        if (static_cast<size_t>(dosHeader.e_lfanew) >= fileData.size() - sizeof(IMAGE_NT_HEADERS)) {
+        std::memcpy(&ntHeaders, fileData.data() + ntOffset, sizeof(ntHeaders));
+        if (ntHeaders.Signature != IMAGE_NT_SIGNATURE ||
+            ntHeaders.FileHeader.NumberOfSections == 0 ||
+            ntHeaders.FileHeader.NumberOfSections > 96 ||
+            ntHeaders.FileHeader.SizeOfOptionalHeader < sizeof(IMAGE_OPTIONAL_HEADER)) {
             return false;
         }
 
-        // Validate NT headers
-        ntHeaders = *reinterpret_cast<const IMAGE_NT_HEADERS*>(fileData.data() + dosHeader.e_lfanew);
-        if (ntHeaders.Signature != IMAGE_NT_SIGNATURE) {
+#if defined(_WIN64)
+        if (ntHeaders.FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
+            ntHeaders.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+            return false;
+        }
+#else
+        if (ntHeaders.FileHeader.Machine != IMAGE_FILE_MACHINE_I386 ||
+            ntHeaders.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
+            return false;
+        }
+#endif
+
+        const size_t optionalOffset = ntOffset + offsetof(IMAGE_NT_HEADERS, OptionalHeader);
+        if (optionalOffset > fileData.size() ||
+            ntHeaders.FileHeader.SizeOfOptionalHeader > fileData.size() - optionalOffset) {
             return false;
         }
 
-        // Validate machine type (x86 or x64)
-        if (ntHeaders.FileHeader.Machine != IMAGE_FILE_MACHINE_I386 &&
-            ntHeaders.FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64) {
+        const size_t sectionOffset = optionalOffset + ntHeaders.FileHeader.SizeOfOptionalHeader;
+        const size_t sectionBytes =
+            static_cast<size_t>(ntHeaders.FileHeader.NumberOfSections) * sizeof(IMAGE_SECTION_HEADER);
+        if (sectionOffset > fileData.size() || sectionBytes > fileData.size() - sectionOffset)
             return false;
+
+        const size_t imageSize = static_cast<size_t>(ntHeaders.OptionalHeader.SizeOfImage);
+        if (imageSize == 0 || ntHeaders.OptionalHeader.SizeOfHeaders > fileData.size())
+            return false;
+
+        for (WORD i = 0; i < ntHeaders.FileHeader.NumberOfSections; ++i) {
+            IMAGE_SECTION_HEADER section{};
+            std::memcpy(&section,
+                        fileData.data() + sectionOffset + static_cast<size_t>(i) * sizeof(section),
+                        sizeof(section));
+
+            const size_t virtualAddress = static_cast<size_t>(section.VirtualAddress);
+            const size_t mappedSize = (std::max)(
+                static_cast<size_t>(section.Misc.VirtualSize),
+                static_cast<size_t>(section.SizeOfRawData));
+            if (virtualAddress > imageSize || mappedSize > imageSize - virtualAddress)
+                return false;
+
+            const size_t rawOffset = static_cast<size_t>(section.PointerToRawData);
+            const size_t rawSize = static_cast<size_t>(section.SizeOfRawData);
+            if (rawOffset > fileData.size() || rawSize > fileData.size() - rawOffset)
+                return false;
         }
 
         return true;
     }
 
-    bool MemoryScanner::ParsePEHeaders(const std::vector<uint8_t>& fileData, 
+    bool MemoryScanner::ParsePEHeaders(const std::vector<uint8_t>& fileData,
                                        std::vector<PESectionInfo>& sections) {
-        IMAGE_DOS_HEADER dosHeader;
-        IMAGE_NT_HEADERS ntHeaders;
+        sections.clear();
+        m_sectionMap.clear();
 
-        if (!ValidateImageHeaders(fileData, dosHeader, ntHeaders)) {
-            return false;
-        }
+        IMAGE_DOS_HEADER dosHeader{};
+        IMAGE_NT_HEADERS ntHeaders{};
+        if (!ValidateImageHeaders(fileData, dosHeader, ntHeaders)) return false;
 
-        // Parse section headers
-        DWORD sectionOffset = dosHeader.e_lfanew + sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) + 
-                             ntHeaders.FileHeader.SizeOfOptionalHeader;
+        const size_t ntOffset = static_cast<size_t>(dosHeader.e_lfanew);
+        const size_t sectionOffset = ntOffset +
+            offsetof(IMAGE_NT_HEADERS, OptionalHeader) +
+            ntHeaders.FileHeader.SizeOfOptionalHeader;
+        const WORD sectionCount = ntHeaders.FileHeader.NumberOfSections;
 
-        for (WORD i = 0; i < ntHeaders.FileHeader.NumberOfSections; i++) {
-            if (sectionOffset + sizeof(IMAGE_SECTION_HEADER) > fileData.size()) {
-                break;
-            }
+        sections.reserve(sectionCount);
+        for (WORD i = 0; i < sectionCount; ++i) {
+            IMAGE_SECTION_HEADER sectionHeader{};
+            const size_t currentOffset =
+                sectionOffset + static_cast<size_t>(i) * sizeof(IMAGE_SECTION_HEADER);
+            std::memcpy(&sectionHeader, fileData.data() + currentOffset, sizeof(sectionHeader));
 
-            const IMAGE_SECTION_HEADER* sectionHeader = 
-                reinterpret_cast<const IMAGE_SECTION_HEADER*>(fileData.data() + sectionOffset);
+            size_t nameLength = 0;
+            while (nameLength < IMAGE_SIZEOF_SHORT_NAME && sectionHeader.Name[nameLength] != 0)
+                ++nameLength;
 
             PESectionInfo section;
-            section.name = std::string(reinterpret_cast<const char*>(sectionHeader->Name), 
-                                      strnlen(reinterpret_cast<const char*>(sectionHeader->Name), 8));
-            section.virtualAddress = sectionHeader->VirtualAddress;
-            section.virtualSize = sectionHeader->Misc.VirtualSize;
-            section.rawDataOffset = sectionHeader->PointerToRawData;
-            section.rawDataSize = sectionHeader->SizeOfRawData;
-            section.characteristics = sectionHeader->Characteristics;
+            section.name.assign(reinterpret_cast<const char*>(sectionHeader.Name), nameLength);
+            section.virtualAddress = sectionHeader.VirtualAddress;
+            section.virtualSize = sectionHeader.Misc.VirtualSize;
+            section.rawDataOffset = sectionHeader.PointerToRawData;
+            section.rawDataSize = sectionHeader.SizeOfRawData;
+            section.characteristics = sectionHeader.Characteristics;
 
-            sections.push_back(section);
-            m_sectionMap[section.virtualAddress] = section;
-
-            sectionOffset += sizeof(IMAGE_SECTION_HEADER);
+            if (!m_sectionMap.emplace(section.virtualAddress, section).second)
+                return false;
+            sections.push_back(std::move(section));
         }
 
-        return !sections.empty();
+        return sections.size() == sectionCount;
     }
 
     bool MemoryScanner::ValidatePEStructure(const std::vector<uint8_t>& fileData) {
         std::vector<PESectionInfo> sections;
-        
         if (!ParsePEHeaders(fileData, sections)) {
-            std::string details = "PE structure validation failed: Invalid headers or corrupted file";
-            ReportViolationAndExit(L"", "PE_VALIDATION_FAILED", details);
+            ReportViolationAndExit(L"", "PE_VALIDATION_FAILED",
+                                   "PE structure validation failed: invalid headers or section table");
             return false;
         }
 
-        // Verify critical sections exist
-        bool hasTextSection = false;
-        bool hasDataSection = false;
-
-        for (const auto& section : sections) {
-            if (section.name.find(".text") != std::string::npos) {
-                hasTextSection = true;
-            }
-            if (section.name.find(".data") != std::string::npos || 
-                section.name.find(".rdata") != std::string::npos) {
-                hasDataSection = true;
-            }
-        }
-
+        const bool hasTextSection = std::any_of(sections.begin(), sections.end(),
+            [](const PESectionInfo& section) {
+                return section.name == ".text" ||
+                       section.name.rfind(".text$", 0) == 0;
+            });
         if (!hasTextSection) {
-            std::string details = "PE validation failed: Missing .text section";
-            ReportViolationAndExit(L"", "MISSING_TEXT_SECTION", details);
+            ReportViolationAndExit(L"", "MISSING_TEXT_SECTION",
+                                   "PE validation failed: missing executable .text section");
             return false;
         }
-
         return true;
     }
 
-    // === LAYER 2 & 3: Embedded Signature + Disk-Based Baseline ===
-
     uint32_t MemoryScanner::CalculateSignatureChecksum(const EmbeddedSignature& sig) {
-        // Calculate checksum dari semua field kecuali checksum itu sendiri
-        uint32_t data[] = {
+        const uint32_t data[] = {
             sig.magicNumber,
             sig.textSectionHash,
             sig.rdataSectionHash,
@@ -335,38 +433,35 @@ namespace Oblivion {
 
     bool MemoryScanner::ExtractEmbeddedSignature(const std::vector<uint8_t>& fileData,
                                                  EmbeddedSignature& signature) {
-        // CATATAN: Dalam implementasi real, signature harus di-embed saat build-time
-        // oleh build system (post-build script) di section khusus seperti .rsrc atau .oblivion
-        // Untuk sekarang, kita cari di akhir .rdata section atau section khusus
-        
         std::vector<PESectionInfo> sections;
-        if (!ParsePEHeaders(fileData, sections)) {
-            return false;
-        }
+        if (!ParsePEHeaders(fileData, sections)) return false;
 
-        // Cari section .oblivion atau .rdata
         for (const auto& section : sections) {
-            if (section.name == ".oblivion" || section.name == ".rdata") {
-                size_t searchStart = section.rawDataOffset + section.rawDataSize - sizeof(EmbeddedSignature) - 256;
-                size_t searchEnd = section.rawDataOffset + section.rawDataSize;
+            if (section.name != ".oblivion" && section.name != ".rdata") continue;
 
-                if (searchStart >= fileData.size()) continue;
+            const size_t rawOffset = static_cast<size_t>(section.rawDataOffset);
+            const size_t rawSize = static_cast<size_t>(section.rawDataSize);
+            if (rawOffset > fileData.size() ||
+                rawSize > fileData.size() - rawOffset ||
+                rawSize < sizeof(EmbeddedSignature)) {
+                continue;
+            }
 
-                // Cari magic number
-                for (size_t i = searchStart; i < searchEnd - sizeof(EmbeddedSignature); i++) {
-                    const EmbeddedSignature* potential = 
-                        reinterpret_cast<const EmbeddedSignature*>(fileData.data() + i);
+            const size_t windowSize = (std::min)(
+                rawSize, sizeof(EmbeddedSignature) + static_cast<size_t>(256));
+            const size_t searchStart = rawOffset + rawSize - windowSize;
+            const size_t searchEnd = rawOffset + rawSize - sizeof(EmbeddedSignature);
 
-                    // Magic number untuk Oblivion: 0x4F424C56 ('OBLV')
-                    if (potential->magicNumber == 0x4F424C56) {
-                        // Verify checksum
-                        uint32_t calculatedChecksum = CalculateSignatureChecksum(*potential);
-                        if (calculatedChecksum == potential->checksum) {
-                            signature = *potential;
-                            return true;
-                        }
-                    }
-                }
+            for (size_t offset = searchStart; offset <= searchEnd; ++offset) {
+                EmbeddedSignature candidate{};
+                std::memcpy(&candidate, fileData.data() + offset, sizeof(candidate));
+
+                // 'OBLV'
+                if (candidate.magicNumber != 0x4F424C56) continue;
+                if (CalculateSignatureChecksum(candidate) != candidate.checksum) continue;
+
+                signature = candidate;
+                return true;
             }
         }
 
@@ -374,65 +469,55 @@ namespace Oblivion {
     }
 
     bool MemoryScanner::VerifyEmbeddedSignature(const std::vector<uint8_t>& fileData) {
-        EmbeddedSignature signature;
-        
+        EmbeddedSignature signature{};
         if (!ExtractEmbeddedSignature(fileData, signature)) {
-            // Signature tidak ditemukan - mungkin belum di-embed saat build
-            // Untuk development, kita skip verifikasi ini
-            // Untuk production, ini harus CRITICAL ERROR
-            #ifdef OBLIVION_RELEASE
-            std::string details = "Embedded signature not found or invalid - possible tampering";
-            ReportViolationAndExit(L"", "SIGNATURE_MISSING", details);
+#ifdef OBLIVION_RELEASE
+            ReportViolationAndExit(L"", "SIGNATURE_MISSING",
+                                   "Embedded signature not found or invalid");
             return false;
-            #else
-            return true; // Skip untuk debug builds
-            #endif
+#else
+            return true; // Development builds may not embed the release manifest.
+#endif
         }
 
         m_embeddedSig = signature;
-
-        // Verify signature data matches actual file
         std::vector<PESectionInfo> sections;
-        if (!ParsePEHeaders(fileData, sections)) {
-            return false;
-        }
+        if (!ParsePEHeaders(fileData, sections)) return false;
 
-        // Find .text section dan verify hash
         for (const auto& section : sections) {
-            if (section.name.find(".text") != std::string::npos) {
-                if (section.rawDataOffset + section.rawDataSize > fileData.size()) {
-                    continue;
-                }
+            if (section.name != ".text" && section.name.rfind(".text$", 0) != 0)
+                continue;
 
-                uint64_t textHash = CalculateSHA256_32bit(
-                    fileData.data() + section.rawDataOffset,
-                    section.rawDataSize
-                );
-
-                // Compare dengan embedded signature (gunakan 32-bit pertama)
-                if (static_cast<uint32_t>(textHash) != signature.textSectionHash) {
-                    std::string details = "Text section hash mismatch - file has been modified";
-                    ReportViolationAndExit(L"", "SIGNATURE_MISMATCH", details);
-                    return false;
-                }
-
-                break;
+            const size_t rawOffset = static_cast<size_t>(section.rawDataOffset);
+            const size_t rawSize = static_cast<size_t>(section.rawDataSize);
+            if (rawOffset > fileData.size() ||
+                rawSize > fileData.size() - rawOffset) {
+                return false;
             }
+
+            const uint64_t textHash = CalculateSHA256_32bit(
+                fileData.data() + rawOffset, rawSize);
+            if (static_cast<uint32_t>(textHash) != signature.textSectionHash) {
+                ReportViolationAndExit(L"", "SIGNATURE_MISMATCH",
+                                       "Text section hash does not match embedded signature");
+                return false;
+            }
+            return true;
         }
 
-        return true;
+        ReportViolationAndExit(L"", "SIGNATURE_TEXT_SECTION_MISSING",
+                               "No .text section found for embedded signature verification");
+        return false;
     }
 
     uint32_t MemoryScanner::CalculateSectionHashFromDisk(const std::vector<uint8_t>& fileData,
                                                          const PESectionInfo& section) {
-        if (section.rawDataOffset + section.rawDataSize > fileData.size()) {
+        const size_t rawOffset = static_cast<size_t>(section.rawDataOffset);
+        const size_t rawSize = static_cast<size_t>(section.rawDataSize);
+        if (rawOffset > fileData.size() || rawSize > fileData.size() - rawOffset)
             return 0;
-        }
 
-        return CalculateCRC32(
-            fileData.data() + section.rawDataOffset,
-            section.rawDataSize
-        );
+        return CalculateCRC32(fileData.data() + rawOffset, rawSize);
     }
 
     void MemoryScanner::CreateBaselineFromDisk(const std::wstring& filePath) {
@@ -514,25 +599,30 @@ namespace Oblivion {
 
             ExecutableRegion baseline;
             baseline.rva = section.virtualAddress;
-            baseline.size = section.virtualSize;
+            baseline.size = section.virtualSize != 0 ? section.virtualSize : section.rawDataSize;
             baseline.isCodeSection = (section.name.find(".text") != std::string::npos);
 
             // CRITICAL: Hash dari DISK (trusted source)
             baseline.diskCRC32 = CalculateSectionHashFromDisk(fileData, section);
 
             // Cross-check: Hash dari memory (untuk detect early injection)
-            uint8_t* memoryAddr = reinterpret_cast<uint8_t*>(m_moduleBaseAddress + section.virtualAddress);
-            
-            MEMORY_BASIC_INFORMATION mbi;
-            if (VirtualQuery(memoryAddr, &mbi, sizeof(mbi)) > 0 && mbi.State == MEM_COMMIT) {
-                // Gunakan ukuran yang sama dengan baseline.size untuk konsistensi
-                // baseline.size = section.virtualSize, jadi gunakan ukuran minimum antara
-                // virtualSize dan regionSize yang tersedia
-                size_t sizeToHash = (section.virtualSize < static_cast<uint32_t>(mbi.RegionSize)) ? section.virtualSize : static_cast<size_t>(mbi.RegionSize);
-                // Pastikan sizeToHash tidak melebihi baseline.size
-                if (sizeToHash > baseline.size) {
-                    sizeToHash = baseline.size;
-                }
+            if (section.virtualAddress >
+                (std::numeric_limits<uintptr_t>::max)() - m_moduleBaseAddress) {
+                ReportViolationAndExit(L"", "MEMORY_RANGE_OVERFLOW", "Executable section address overflow");
+                return;
+            }
+            uint8_t* memoryAddr = reinterpret_cast<uint8_t*>(
+                m_moduleBaseAddress + static_cast<uintptr_t>(section.virtualAddress));
+
+            if (baseline.size == 0 ||
+                !IsReadableMemoryRange(memoryAddr, baseline.size)) {
+                ReportViolationAndExit(L"", "MEMORY_SECTION_UNREADABLE",
+                                       "Executable section is not fully readable during baseline creation");
+                return;
+            }
+
+            {
+                const size_t sizeToHash = baseline.size;
                 baseline.memoryCRC32 = CalculateCRC32(memoryAddr, sizeToHash);
                 
                 // CRITICAL CHECK: Jika memory sudah berbeda dari disk saat baseline creation,
@@ -543,7 +633,8 @@ namespace Oblivion {
                     // Hitung perbedaan byte-byte untuk membedakan relocations dari injection
                     // Relocations biasanya hanya mengubah beberapa bytes (< 0.1% dari section)
                     size_t rawDataSize = section.rawDataSize;
-                    if (rawDataSize > 0 && rawDataSize <= fileData.size() - section.rawDataOffset) {
+                    if (rawDataSize > 0 && section.rawDataOffset <= fileData.size() &&
+                        rawDataSize <= fileData.size() - section.rawDataOffset) {
                         const uint8_t* diskData = fileData.data() + section.rawDataOffset;
                         size_t differentBytes = 0;
                         size_t bytesToCompare = (sizeToHash < rawDataSize) ? sizeToHash : rawDataSize;
@@ -593,8 +684,6 @@ namespace Oblivion {
                         //           << differentBytes << " bytes (" << diffPercentage << "%)" << std::endl;
                     }
                 }
-            } else {
-                baseline.memoryCRC32 = 0;
             }
 
             m_diskBaseline.push_back(baseline);
@@ -617,11 +706,18 @@ namespace Oblivion {
         m_verifiedSections.clear();
 
         for (const auto& baseline : m_diskBaseline) {
-            uint8_t* memoryAddr = reinterpret_cast<uint8_t*>(m_moduleBaseAddress + baseline.rva);
-            
-            MEMORY_BASIC_INFORMATION mbi;
-            if (VirtualQuery(memoryAddr, &mbi, sizeof(mbi)) == 0 || mbi.State != MEM_COMMIT) {
-                continue;
+            if (baseline.rva >
+                (std::numeric_limits<uintptr_t>::max)() - m_moduleBaseAddress) {
+                ReportViolationAndExit(L"", "MEMORY_RANGE_OVERFLOW", "Executable section address overflow");
+                return false;
+            }
+            uint8_t* memoryAddr = reinterpret_cast<uint8_t*>(
+                m_moduleBaseAddress + baseline.rva);
+            if (baseline.size == 0 ||
+                !IsReadableMemoryRange(memoryAddr, baseline.size)) {
+                ReportViolationAndExit(L"", "MEMORY_SECTION_UNREADABLE",
+                                       "Executable section is not fully readable during verification");
+                return false;
             }
 
             // Skip non-code sections atau sections yang legitimate berubah
@@ -646,7 +742,7 @@ namespace Oblivion {
                 }
             }
 
-            size_t sizeToCheck = (baseline.size < static_cast<size_t>(mbi.RegionSize)) ? baseline.size : static_cast<size_t>(mbi.RegionSize);
+            const size_t sizeToCheck = baseline.size;
             uint32_t currentMemoryCRC32 = CalculateCRC32(memoryAddr, sizeToCheck);
 
             // CRITICAL: Bandingkan dengan memory baseline (bukan disk baseline)
@@ -666,7 +762,8 @@ namespace Oblivion {
                     auto it_section_info = m_sectionMap.find(baseline.rva);
                     if (it_section_info != m_sectionMap.end() && !fileData.empty()) {
                         const auto& section = it_section_info->second;
-                        if (section.rawDataOffset + section.rawDataSize <= fileData.size()) {
+                        if (section.rawDataOffset <= fileData.size() &&
+                            section.rawDataSize <= fileData.size() - section.rawDataOffset) {
                             const uint8_t* diskData = fileData.data() + section.rawDataOffset;
                             size_t differentBytes = 0;
                             size_t bytesToCompare = (sizeToCheck < section.rawDataSize) ? sizeToCheck : section.rawDataSize;
@@ -726,7 +823,8 @@ namespace Oblivion {
             auto it_disk_check = m_sectionMap.find(baseline.rva);
             if (it_disk_check != m_sectionMap.end() && !fileData.empty()) {
                 const auto& section = it_disk_check->second;
-                if (section.rawDataOffset + section.rawDataSize <= fileData.size()) {
+                if (section.rawDataOffset <= fileData.size() &&
+                    section.rawDataSize <= fileData.size() - section.rawDataOffset) {
                     uint32_t currentDiskCRC32 = CalculateSectionHashFromDisk(fileData, section);
                     if (currentDiskCRC32 != baseline.diskCRC32) {
                         // File disk telah diubah!
@@ -765,18 +863,17 @@ namespace Oblivion {
     bool MemoryScanner::CompareCodeSections(const std::vector<uint8_t>& diskData,
                                            const uint8_t* memoryBase,
                                            const PESectionInfo& section) {
-        if (section.rawDataOffset + section.rawDataSize > diskData.size()) {
+        const size_t rawOffset = static_cast<size_t>(section.rawDataOffset);
+        const size_t rawSize = static_cast<size_t>(section.rawDataSize);
+        const size_t memorySize = static_cast<size_t>(section.virtualSize);
+        if (rawOffset > diskData.size() || rawSize > diskData.size() - rawOffset ||
+            memorySize == 0 || !IsReadableMemoryRange(memoryBase, memorySize)) {
             return false;
         }
 
-        uint32_t diskHash = CalculateCRC32(
-            diskData.data() + section.rawDataOffset,
-            section.rawDataSize
-        );
-
-        uint32_t memoryHash = CalculateCRC32(memoryBase, section.virtualSize);
-
-        return (diskHash == memoryHash);
+        const uint32_t diskHash = CalculateCRC32(diskData.data() + rawOffset, rawSize);
+        const uint32_t memoryHash = CalculateCRC32(memoryBase, memorySize);
+        return diskHash == memoryHash;
     }
 
     // === LAYER 5: Runtime Integrity Verification ===
@@ -883,7 +980,8 @@ namespace Oblivion {
                                 // Baca disk data untuk perbandingan
                                 std::vector<uint8_t> fileData;
                                 if (ReadExecutableFile(m_executablePath, fileData) && 
-                                    section.rawDataOffset + section.rawDataSize <= fileData.size()) {
+                                    section.rawDataOffset <= fileData.size() &&
+                                    section.rawDataSize <= fileData.size() - section.rawDataOffset) {
                                     const uint8_t* diskData = fileData.data() + section.rawDataOffset;
                                     size_t differentBytes = 0;
                                     size_t bytesToCompare = (sizeToCheck < section.rawDataSize) ? sizeToCheck : section.rawDataSize;

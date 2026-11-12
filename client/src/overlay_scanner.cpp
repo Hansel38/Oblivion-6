@@ -6,13 +6,29 @@
 // Forward declaration
 extern void ReportViolationAndExit(const std::wstring& message, const std::string& type, const std::string& details);
 
+namespace {
+    std::string WideToUtf8(const wchar_t* value) {
+        if (!value) return {};
+        const int required = WideCharToMultiByte(CP_UTF8, 0, value, -1, nullptr, 0, nullptr, nullptr);
+        if (required <= 0) return {};
+
+        // Allocate the terminator too; remove it only after conversion succeeds.
+        std::string converted(static_cast<size_t>(required), '\0');
+        const int written = WideCharToMultiByte(CP_UTF8, 0, value, -1,
+                                                &converted[0], required, nullptr, nullptr);
+        if (written != required) return {};
+        converted.pop_back();
+        return converted;
+    }
+}
+
 namespace Oblivion {
     OverlayScanner::OverlayScanner() : m_gameWindow(NULL), m_gameRect{0, 0, 0, 0} {
         // Coba cari handle jendela game. "RagWindow" adalah class name default untuk Ragnarok.
         // Jika client Anda menggunakan class name berbeda, sesuaikan di sini.
         m_gameWindow = FindWindowW(L"RagWindow", NULL);
-        if (m_gameWindow) {
-            GetWindowRect(m_gameWindow, &m_gameRect);
+        if (m_gameWindow && !GetWindowRect(m_gameWindow, &m_gameRect)) {
+            m_gameWindow = NULL;
         }
     }
 
@@ -21,18 +37,18 @@ namespace Oblivion {
     void OverlayScanner::PerformScan() {
         // Jika jendela game belum ditemukan (misalnya saat DLL pertama kali dimuat),
         // coba cari lagi di setiap scan.
+        if (m_gameWindow && !IsWindow(m_gameWindow)) {
+            m_gameWindow = NULL;
+        }
         if (!m_gameWindow) {
             m_gameWindow = FindWindowW(L"RagWindow", NULL);
-            if (m_gameWindow) {
-                GetWindowRect(m_gameWindow, &m_gameRect);
-            }
         }
-
-        // Jika masih tidak ditemukan, tidak ada yang bisa dipindai.
-        if (!m_gameWindow) {
+        if (!m_gameWindow || !GetWindowRect(m_gameWindow, &m_gameRect)) {
+            m_gameWindow = NULL;
             return;
         }
 
+        // Refresh the game rectangle on every pass (window movement/resizing).
         // Enumerasi semua jendela tingkat atas dan jalankan callback untuk masing-masing jendela
         EnumWindows(EnumWindowsCallback, (LPARAM)this);
     }
@@ -40,6 +56,7 @@ namespace Oblivion {
     BOOL CALLBACK OverlayScanner::EnumWindowsCallback(HWND hwnd, LPARAM lParam) {
         // Dapatkan instance OverlayScanner dari lParam
         OverlayScanner* pThis = reinterpret_cast<OverlayScanner*>(lParam);
+        if (!pThis || !IsWindow(hwnd)) return TRUE;
 
         // Abaikan jendela kita sendiri
         if (hwnd == pThis->m_gameWindow) {
@@ -52,8 +69,8 @@ namespace Oblivion {
         }
 
         // 2. Periksa apakah jendela berpotongan dengan jendela game
-        RECT overlayRect;
-        GetWindowRect(hwnd, &overlayRect);
+        RECT overlayRect{};
+        if (!GetWindowRect(hwnd, &overlayRect)) return TRUE;
         RECT intersectionRect;
         if (!IntersectRect(&intersectionRect, &pThis->m_gameRect, &overlayRect)) {
             return TRUE; // Tidak berpotongan, lanjut
@@ -66,8 +83,10 @@ namespace Oblivion {
         }
 
         // 4. Periksa apakah jendela ada di whitelist
-        wchar_t className[256];
-        GetClassNameW(hwnd, className, 256);
+        wchar_t className[256] = {};
+        if (GetClassNameW(hwnd, className, 256) == 0) {
+            return TRUE;
+        }
         if (pThis->IsWhitelisted(className)) {
             return TRUE; // Ada di whitelist, aman. Lanjut.
         }
@@ -79,13 +98,7 @@ namespace Oblivion {
         // - Tidak ada di whitelist
         // Ini adalah overlay ilegal!
 
-        // Konversi className ke UTF-8 untuk details
-        std::string details_utf8;
-        int size_needed = WideCharToMultiByte(CP_UTF8, 0, className, -1, NULL, 0, NULL, NULL);
-        if (size_needed > 0) {
-            details_utf8.assign(size_needed - 1, 0); // -1 untuk menghilangkan null terminator
-            WideCharToMultiByte(CP_UTF8, 0, className, -1, &details_utf8[0], size_needed, NULL, NULL);
-        }
+        const std::string details_utf8 = WideToUtf8(className);
         
         // Panggil fungsi pelaporan global
         ReportViolationAndExit(L"", "OVERLAY_DETECTED", details_utf8);

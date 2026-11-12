@@ -1,0 +1,46 @@
+name: C++ build
+
+on:
+  push:
+    branches:
+      - main
+      - hardening/anti-cheat-bugfixes
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  linux-server:
+    name: Linux server (GCC)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Install OpenSSL headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev
+      - name: Build Linux server
+        run: |
+          make -C server clean
+          make -C server
+
+  windows-solution:
+    name: Windows solution (${{ matrix.platform }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [x86, x64]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+      - name: Build Release configuration
+        shell: pwsh
+        run: |
+          msbuild Oblivion.sln /m /p:Configuration=Release /p:Platform=${{ matrix.platform }} /verbosity:minimal

@@ -17,19 +17,27 @@ namespace Oblivion {
     }
 
     void AntiSuspend::Start() {
-        if (m_isRunning) {
-            return;
+        if (m_guardianThread.joinable()) {
+            if (m_guardianThread.get_id() == std::this_thread::get_id()) return;
+            m_guardianThread.join();
         }
-        m_isRunning = true;
-        m_guardianThread = std::thread(&AntiSuspend::GuardianLoop, this);
+
+        bool expected = false;
+        if (!m_isRunning.compare_exchange_strong(expected, true)) return;
+
+        m_lastHeartbeat.store(std::chrono::steady_clock::now());
+        try {
+            m_guardianThread = std::thread(&AntiSuspend::GuardianLoop, this);
+        } catch (...) {
+            m_isRunning.store(false);
+            throw;
+        }
     }
 
     void AntiSuspend::Stop() {
-        if (!m_isRunning) {
-            return;
-        }
-        m_isRunning = false;
-        if (m_guardianThread.joinable()) {
+        m_isRunning.store(false);
+        if (m_guardianThread.joinable() &&
+            m_guardianThread.get_id() != std::this_thread::get_id()) {
             m_guardianThread.join();
         }
     }

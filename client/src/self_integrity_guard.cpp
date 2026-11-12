@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <chrono>
 #include <fstream>
+#include <limits>
+#include <cstddef>
 
 // Forward declaration
 extern void ReportViolationAndExit(const std::wstring& message, const std::string& type, const std::string& details);
@@ -15,6 +17,166 @@ namespace {
         const auto characteristics = section.Characteristics;
         return (characteristics & IMAGE_SCN_CNT_CODE) != 0 &&
                (characteristics & IMAGE_SCN_MEM_EXECUTE) != 0;
+    }
+
+    bool IsReadableRange(const void* address, size_t length) {
+        if (length == 0) return true;
+        uintptr_t cursor = reinterpret_cast<uintptr_t>(address);
+        if (cursor > (std::numeric_limits<uintptr_t>::max)() - length) return false;
+        size_t remaining = length;
+
+        while (remaining > 0) {
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (VirtualQuery(reinterpret_cast<const void*>(cursor), &mbi, sizeof(mbi)) == 0 ||
+                mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+                return false;
+            }
+
+            const DWORD protection = mbi.Protect & 0xFF;
+            const bool readable =
+                protection == PAGE_READONLY ||
+                protection == PAGE_READWRITE ||
+                protection == PAGE_WRITECOPY ||
+                protection == PAGE_EXECUTE_READ ||
+                protection == PAGE_EXECUTE_READWRITE ||
+                protection == PAGE_EXECUTE_WRITECOPY;
+            if (!readable) return false;
+
+            const uintptr_t regionBase = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+            if (regionBase > cursor ||
+                mbi.RegionSize > (std::numeric_limits<uintptr_t>::max)() - regionBase) {
+                return false;
+            }
+            const uintptr_t regionEnd = regionBase + mbi.RegionSize;
+            if (regionEnd <= cursor) return false;
+
+            const size_t available = static_cast<size_t>(regionEnd - cursor);
+            const size_t step = (std::min)(remaining, available);
+            cursor += step;
+            remaining -= step;
+        }
+        return true;
+    }
+
+    bool GetDiskPeHeaders(const std::vector<uint8_t>& image,
+                          const IMAGE_NT_HEADERS*& ntHeaders,
+                          const IMAGE_SECTION_HEADER*& sectionHeaders,
+                          size_t& sectionTableOffset) {
+        ntHeaders = nullptr;
+        sectionHeaders = nullptr;
+        sectionTableOffset = 0;
+
+        if (image.size() < sizeof(IMAGE_DOS_HEADER)) return false;
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(image.data());
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE ||
+            dos->e_lfanew < static_cast<LONG>(sizeof(IMAGE_DOS_HEADER))) {
+            return false;
+        }
+
+        const size_t ntOffset = static_cast<size_t>(dos->e_lfanew);
+        if (ntOffset > image.size() || sizeof(IMAGE_NT_HEADERS) > image.size() - ntOffset)
+            return false;
+
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(image.data() + ntOffset);
+        if (nt->Signature != IMAGE_NT_SIGNATURE ||
+            nt->FileHeader.NumberOfSections == 0 ||
+            nt->FileHeader.NumberOfSections > 96 ||
+            nt->FileHeader.SizeOfOptionalHeader < sizeof(IMAGE_OPTIONAL_HEADER) ||
+#if defined(_WIN64)
+            nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC
+#else
+            nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC
+#endif
+            ) {
+            return false;
+        }
+
+        const size_t prefix = offsetof(IMAGE_NT_HEADERS, OptionalHeader);
+        if (ntOffset > image.size() || prefix > image.size() - ntOffset)
+            return false;
+        const size_t optionalOffset = ntOffset + prefix;
+        if (nt->FileHeader.SizeOfOptionalHeader > image.size() - optionalOffset)
+            return false;
+
+        sectionTableOffset = optionalOffset + nt->FileHeader.SizeOfOptionalHeader;
+        const size_t sectionBytes =
+            static_cast<size_t>(nt->FileHeader.NumberOfSections) * sizeof(IMAGE_SECTION_HEADER);
+        if (sectionTableOffset > image.size() ||
+            sectionBytes > image.size() - sectionTableOffset) {
+            return false;
+        }
+
+        ntHeaders = nt;
+        sectionHeaders = reinterpret_cast<const IMAGE_SECTION_HEADER*>(
+            image.data() + sectionTableOffset);
+        return true;
+    }
+
+    bool GetMappedPeHeaders(const uint8_t* base,
+                            const IMAGE_NT_HEADERS*& ntHeaders,
+                            const IMAGE_SECTION_HEADER*& sectionHeaders,
+                            size_t& imageSize) {
+        ntHeaders = nullptr;
+        sectionHeaders = nullptr;
+        imageSize = 0;
+        if (!base || !IsReadableRange(base, sizeof(IMAGE_DOS_HEADER))) return false;
+
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE ||
+            dos->e_lfanew < static_cast<LONG>(sizeof(IMAGE_DOS_HEADER)) ||
+            dos->e_lfanew > 1024 * 1024) {
+            return false;
+        }
+
+        const size_t ntOffset = static_cast<size_t>(dos->e_lfanew);
+        const uintptr_t baseAddress = reinterpret_cast<uintptr_t>(base);
+        if (baseAddress > (std::numeric_limits<uintptr_t>::max)() - ntOffset)
+            return false;
+        const auto* ntAddress = reinterpret_cast<const uint8_t*>(baseAddress + ntOffset);
+        if (!IsReadableRange(ntAddress, sizeof(IMAGE_NT_HEADERS))) return false;
+
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(ntAddress);
+        if (nt->Signature != IMAGE_NT_SIGNATURE ||
+            nt->FileHeader.NumberOfSections == 0 ||
+            nt->FileHeader.NumberOfSections > 96 ||
+            nt->FileHeader.SizeOfOptionalHeader < sizeof(IMAGE_OPTIONAL_HEADER) ||
+#if defined(_WIN64)
+            nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC
+#else
+            nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC
+#endif
+            ) {
+            return false;
+        }
+
+        imageSize = static_cast<size_t>(nt->OptionalHeader.SizeOfImage);
+        if (imageSize < sizeof(IMAGE_DOS_HEADER) ||
+            ntOffset > imageSize ||
+            sizeof(IMAGE_NT_HEADERS) > imageSize - ntOffset) {
+            return false;
+        }
+
+        const size_t prefix = offsetof(IMAGE_NT_HEADERS, OptionalHeader);
+        if (ntOffset > imageSize || prefix > imageSize - ntOffset)
+            return false;
+        const size_t optionalOffset = ntOffset + prefix;
+        if (nt->FileHeader.SizeOfOptionalHeader > imageSize - optionalOffset)
+            return false;
+        const size_t sectionOffset = optionalOffset + nt->FileHeader.SizeOfOptionalHeader;
+        const size_t sectionBytes =
+            static_cast<size_t>(nt->FileHeader.NumberOfSections) * sizeof(IMAGE_SECTION_HEADER);
+        if (sectionOffset > imageSize || sectionBytes > imageSize - sectionOffset)
+            return false;
+        if (baseAddress > (std::numeric_limits<uintptr_t>::max)() - sectionOffset)
+            return false;
+
+        const auto* sections = reinterpret_cast<const IMAGE_SECTION_HEADER*>(
+            base + sectionOffset);
+        if (!IsReadableRange(sections, sectionBytes)) return false;
+
+        ntHeaders = nt;
+        sectionHeaders = sections;
+        return true;
     }
 }
 
@@ -51,18 +213,20 @@ namespace Oblivion {
             return false;
         }
 
-        m_running = true;
-        m_worker = std::thread(&SelfIntegrityGuard::MonitoringLoop, this);
+        m_running.store(true);
+        try {
+            m_worker = std::thread(&SelfIntegrityGuard::MonitoringLoop, this);
+        } catch (...) {
+            m_running.store(false);
+            return false;
+        }
         return true;
     }
 
     void SelfIntegrityGuard::Stop() {
-        if (!m_running.load()) {
-            return;
-        }
-
-        m_running = false;
-        if (m_worker.joinable()) {
+        m_running.store(false);
+        if (m_worker.joinable() &&
+            m_worker.get_id() != std::this_thread::get_id()) {
             m_worker.join();
         }
     }
@@ -105,42 +269,52 @@ namespace Oblivion {
     }
 
     bool SelfIntegrityGuard::VerifySectionsOnce() const {
-        auto* moduleBase = reinterpret_cast<const uint8_t*>(m_module);
-        const auto* dosHeader = reinterpret_cast<const IMAGE_DOS_HEADER*>(moduleBase);
-        if (!dosHeader || dosHeader->e_magic != IMAGE_DOS_SIGNATURE) {
+        const auto* moduleBase = reinterpret_cast<const uint8_t*>(m_module);
+        const IMAGE_NT_HEADERS* memoryNt = nullptr;
+        const IMAGE_SECTION_HEADER* memorySections = nullptr;
+        size_t imageSize = 0;
+        if (!GetMappedPeHeaders(moduleBase, memoryNt, memorySections, imageSize)) {
             return false;
         }
 
-        const auto* ntHeaders = reinterpret_cast<const IMAGE_NT_HEADERS*>(moduleBase + dosHeader->e_lfanew);
-        if (!ntHeaders || ntHeaders->Signature != IMAGE_NT_SIGNATURE) {
+        const IMAGE_NT_HEADERS* diskNt = nullptr;
+        const IMAGE_SECTION_HEADER* diskSections = nullptr;
+        size_t diskSectionOffset = 0;
+        if (!GetDiskPeHeaders(m_diskImage, diskNt, diskSections, diskSectionOffset)) {
             return false;
         }
 
-        const auto* fileDosHeader = reinterpret_cast<const IMAGE_DOS_HEADER*>(m_diskImage.data());
-        if (!fileDosHeader || fileDosHeader->e_magic != IMAGE_DOS_SIGNATURE) {
+        if (memoryNt->FileHeader.NumberOfSections != diskNt->FileHeader.NumberOfSections ||
+            memoryNt->FileHeader.Machine != diskNt->FileHeader.Machine ||
+            memoryNt->OptionalHeader.SizeOfImage != diskNt->OptionalHeader.SizeOfImage) {
+            ReportTamper("PE_HEADERS");
             return false;
         }
 
-        const auto* fileNtHeaders = reinterpret_cast<const IMAGE_NT_HEADERS*>(m_diskImage.data() + fileDosHeader->e_lfanew);
-        if (!fileNtHeaders || fileNtHeaders->Signature != IMAGE_NT_SIGNATURE) {
-            return false;
-        }
+        const WORD sectionCount = diskNt->FileHeader.NumberOfSections;
+        for (WORD i = 0; i < sectionCount; ++i) {
+            const IMAGE_SECTION_HEADER& memorySection = memorySections[i];
+            const IMAGE_SECTION_HEADER& diskSection = diskSections[i];
 
-        const auto sectionCount = ntHeaders->FileHeader.NumberOfSections;
-        auto* currentSection = IMAGE_FIRST_SECTION(ntHeaders);
-
-        for (WORD i = 0; i < sectionCount; ++i, ++currentSection) {
-            if (!IsCodeSection(*currentSection)) {
-                continue;
+            if (std::memcmp(memorySection.Name, diskSection.Name, IMAGE_SIZEOF_SHORT_NAME) != 0 ||
+                memorySection.VirtualAddress != diskSection.VirtualAddress ||
+                memorySection.Misc.VirtualSize != diskSection.Misc.VirtualSize ||
+                memorySection.SizeOfRawData != diskSection.SizeOfRawData ||
+                memorySection.PointerToRawData != diskSection.PointerToRawData ||
+                memorySection.Characteristics != diskSection.Characteristics) {
+                size_t nameLength = 0;
+                while (nameLength < IMAGE_SIZEOF_SHORT_NAME && diskSection.Name[nameLength] != 0)
+                    ++nameLength;
+                ReportTamper(std::string(reinterpret_cast<const char*>(diskSection.Name), nameLength));
+                return false;
             }
 
-            if (!CompareSection(*currentSection)) {
-                size_t length = 0;
-                while (length < IMAGE_SIZEOF_SHORT_NAME && currentSection->Name[length] != '\0') {
-                    ++length;
-                }
-                const std::string sectionName(reinterpret_cast<const char*>(currentSection->Name), length);
-                ReportTamper(sectionName);
+            if (!IsCodeSection(diskSection)) continue;
+            if (!CompareSection(diskSection)) {
+                size_t nameLength = 0;
+                while (nameLength < IMAGE_SIZEOF_SHORT_NAME && diskSection.Name[nameLength] != 0)
+                    ++nameLength;
+                ReportTamper(std::string(reinterpret_cast<const char*>(diskSection.Name), nameLength));
                 return false;
             }
         }
@@ -149,55 +323,59 @@ namespace Oblivion {
     }
 
     bool SelfIntegrityGuard::CompareSection(const IMAGE_SECTION_HEADER& section) const {
-        auto* moduleBase = reinterpret_cast<const uint8_t*>(m_module);
-        const auto* sectionMemory = moduleBase + section.VirtualAddress;
+        const auto* moduleBase = reinterpret_cast<const uint8_t*>(m_module);
+        const IMAGE_NT_HEADERS* memoryNt = nullptr;
+        const IMAGE_SECTION_HEADER* memorySections = nullptr;
+        size_t imageSize = 0;
+        if (!GetMappedPeHeaders(moduleBase, memoryNt, memorySections, imageSize))
+            return false;
+        (void)memoryNt;
+        (void)memorySections;
 
         size_t sectionSize = static_cast<size_t>(section.SizeOfRawData);
         const size_t virtualSize = static_cast<size_t>(section.Misc.VirtualSize);
-        if (virtualSize > 0 && virtualSize < sectionSize) {
-            sectionSize = virtualSize;
-        }
+        if (virtualSize > 0 && virtualSize < sectionSize) sectionSize = virtualSize;
+        if (sectionSize == 0) return true;
 
-        if (sectionSize == 0) {
-            return true;
-        }
+        const size_t sectionRva = static_cast<size_t>(section.VirtualAddress);
+        if (sectionRva > imageSize || sectionSize > imageSize - sectionRva)
+            return false;
 
-        if (section.PointerToRawData + sectionSize > m_diskImage.size()) {
+        const size_t rawOffset = static_cast<size_t>(section.PointerToRawData);
+        if (rawOffset > m_diskImage.size() ||
+            sectionSize > m_diskImage.size() - rawOffset) {
             return false;
         }
 
-        const auto* sectionOnDisk = m_diskImage.data() + section.PointerToRawData;
+        const auto* sectionMemory = moduleBase + sectionRva;
+        if (!IsReadableRange(sectionMemory, sectionSize)) return false;
+        const auto* sectionOnDisk = m_diskImage.data() + rawOffset;
 
-        std::vector<std::pair<size_t, size_t>> skipIntervals;
+        if (sectionRva > (std::numeric_limits<DWORD>::max)() - sectionSize)
+            return false;
         const DWORD sectionStartRva = section.VirtualAddress;
         const DWORD sectionEndRva = sectionStartRva + static_cast<DWORD>(sectionSize);
-        BuildSkipIntervals(sectionStartRva, sectionEndRva, skipIntervals);
 
-        if (skipIntervals.empty()) {
-            return memcmp(sectionMemory, sectionOnDisk, sectionSize) == 0;
-        }
+        std::vector<std::pair<size_t, size_t>> skipIntervals;
+        BuildSkipIntervals(sectionStartRva, sectionEndRva, skipIntervals);
 
         size_t currentOffset = 0;
         for (const auto& interval : skipIntervals) {
             const size_t start = interval.first;
             const size_t end = interval.second;
-            if (currentOffset < start) {
-                const size_t length = start - currentOffset;
-                if (memcmp(sectionMemory + currentOffset, sectionOnDisk + currentOffset, length) != 0) {
-                    return false;
-                }
-            }
-            currentOffset = std::max(currentOffset, end);
-        }
-
-        if (currentOffset < sectionSize) {
-            const size_t length = sectionSize - currentOffset;
-            if (memcmp(sectionMemory + currentOffset, sectionOnDisk + currentOffset, length) != 0) {
+            if (start > sectionSize || end > sectionSize || start > end)
+                return false;
+            if (currentOffset < start &&
+                std::memcmp(sectionMemory + currentOffset, sectionOnDisk + currentOffset,
+                            start - currentOffset) != 0) {
                 return false;
             }
+            currentOffset = (std::max)(currentOffset, end);
         }
 
-        return true;
+        return currentOffset >= sectionSize ||
+            std::memcmp(sectionMemory + currentOffset, sectionOnDisk + currentOffset,
+                        sectionSize - currentOffset) == 0;
     }
 
     void SelfIntegrityGuard::ReportTamper(const std::string& sectionName) const {
@@ -212,44 +390,44 @@ namespace Oblivion {
     bool SelfIntegrityGuard::ParseRelocations() {
         m_relocationSpans.clear();
 
-        if (m_diskImage.empty()) {
+        const IMAGE_NT_HEADERS* ntHeaders = nullptr;
+        const IMAGE_SECTION_HEADER* sectionHeaders = nullptr;
+        size_t sectionTableOffset = 0;
+        if (!GetDiskPeHeaders(m_diskImage, ntHeaders, sectionHeaders, sectionTableOffset))
             return false;
-        }
 
-        const auto* dosHeader = reinterpret_cast<const IMAGE_DOS_HEADER*>(m_diskImage.data());
-        if (!dosHeader || dosHeader->e_magic != IMAGE_DOS_SIGNATURE) {
-            return false;
-        }
-
-        const auto* ntHeaders = reinterpret_cast<const IMAGE_NT_HEADERS*>(m_diskImage.data() + dosHeader->e_lfanew);
-        if (!ntHeaders || ntHeaders->Signature != IMAGE_NT_SIGNATURE) {
-            return false;
-        }
-
-        const auto& relocDirectory = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
-        if (relocDirectory.VirtualAddress == 0 || relocDirectory.Size == 0) {
+        if (ntHeaders->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_BASERELOC)
             return true;
-        }
+
+        const auto& relocDirectory =
+            ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+        if (relocDirectory.VirtualAddress == 0 && relocDirectory.Size == 0) return true;
+        if (relocDirectory.VirtualAddress == 0 || relocDirectory.Size == 0) return false;
 
         DWORD relocFileOffset = 0;
-        if (!RvaToFileRange(relocDirectory.VirtualAddress, relocDirectory.Size, relocFileOffset)) {
+        if (!RvaToFileRange(relocDirectory.VirtualAddress, relocDirectory.Size, relocFileOffset))
             return false;
-        }
 
         size_t remaining = relocDirectory.Size;
         const uint8_t* cursor = m_diskImage.data() + relocFileOffset;
+        const DWORD imageSize = ntHeaders->OptionalHeader.SizeOfImage;
 
-        while (remaining >= sizeof(IMAGE_BASE_RELOCATION)) {
+        while (remaining > 0) {
+            if (remaining < sizeof(IMAGE_BASE_RELOCATION)) return false;
             const auto* block = reinterpret_cast<const IMAGE_BASE_RELOCATION*>(cursor);
-            if (block->SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION) || block->SizeOfBlock > remaining) {
-                break;
+            if (block->SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION) ||
+                block->SizeOfBlock > remaining ||
+                ((block->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) % sizeof(WORD)) != 0) {
+                return false;
             }
 
-            const size_t entryCount = (block->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
-            const auto* entry = reinterpret_cast<const WORD*>(cursor + sizeof(IMAGE_BASE_RELOCATION));
+            const size_t entryCount =
+                (block->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
+            const auto* entries =
+                reinterpret_cast<const WORD*>(cursor + sizeof(IMAGE_BASE_RELOCATION));
 
             for (size_t i = 0; i < entryCount; ++i) {
-                const WORD typeOffset = entry[i];
+                const WORD typeOffset = entries[i];
                 const WORD type = typeOffset >> 12;
                 const WORD offset = typeOffset & 0x0FFF;
 
@@ -267,7 +445,10 @@ namespace Oblivion {
                     continue;
                 }
 
+                if (block->VirtualAddress > imageSize ||
+                    offset > imageSize - block->VirtualAddress) return false;
                 const DWORD rva = block->VirtualAddress + offset;
+                if (rva > imageSize || spanSize > imageSize - rva) return false;
                 m_relocationSpans.push_back({ rva, spanSize });
             }
 
@@ -275,107 +456,107 @@ namespace Oblivion {
             remaining -= block->SizeOfBlock;
         }
 
-        std::sort(m_relocationSpans.begin(), m_relocationSpans.end(), [](const RelocationSpan& a, const RelocationSpan& b) {
-            return a.rva < b.rva;
-            });
-
+        std::sort(m_relocationSpans.begin(), m_relocationSpans.end(),
+            [](const RelocationSpan& a, const RelocationSpan& b) { return a.rva < b.rva; });
         return true;
     }
 
     bool SelfIntegrityGuard::RvaToFileRange(DWORD rva, DWORD size, DWORD& fileOffset) const {
-        if (m_diskImage.empty()) {
+        fileOffset = 0;
+        if (size == 0) return false;
+
+        const IMAGE_NT_HEADERS* ntHeaders = nullptr;
+        const IMAGE_SECTION_HEADER* sectionHeaders = nullptr;
+        size_t sectionTableOffset = 0;
+        if (!GetDiskPeHeaders(m_diskImage, ntHeaders, sectionHeaders, sectionTableOffset))
+            return false;
+
+        const size_t imageSize = ntHeaders->OptionalHeader.SizeOfImage;
+        if (static_cast<size_t>(rva) > imageSize ||
+            static_cast<size_t>(size) > imageSize - static_cast<size_t>(rva)) {
             return false;
         }
 
-        const auto* dosHeader = reinterpret_cast<const IMAGE_DOS_HEADER*>(m_diskImage.data());
-        if (!dosHeader || dosHeader->e_magic != IMAGE_DOS_SIGNATURE) {
-            return false;
-        }
-
-        const auto* ntHeaders = reinterpret_cast<const IMAGE_NT_HEADERS*>(m_diskImage.data() + dosHeader->e_lfanew);
-        if (!ntHeaders || ntHeaders->Signature != IMAGE_NT_SIGNATURE) {
-            return false;
-        }
-
-        const DWORD imageSize = ntHeaders->OptionalHeader.SizeOfImage;
-        if (size == 0 || rva >= imageSize) {
-            return false;
-        }
-
-        const auto* section = IMAGE_FIRST_SECTION(ntHeaders);
-        for (WORD i = 0; i < ntHeaders->FileHeader.NumberOfSections; ++i, ++section) {
-            const DWORD sectionStart = section->VirtualAddress;
-            const DWORD sectionSize = std::max(section->Misc.VirtualSize, section->SizeOfRawData);
-            const DWORD sectionEnd = sectionStart + sectionSize;
-
-            if (rva >= sectionStart && rva < sectionEnd) {
-                const DWORD offsetWithinSection = rva - sectionStart;
-                if (offsetWithinSection + size > sectionSize) {
-                    return false;
-                }
-
-                fileOffset = section->PointerToRawData + offsetWithinSection;
-                if (fileOffset + size > m_diskImage.size()) {
-                    return false;
-                }
-                return true;
-            }
-        }
-
-        // RVA within headers
-        if (rva < ntHeaders->OptionalHeader.SizeOfHeaders) {
-            fileOffset = rva;
-            if (fileOffset + size > m_diskImage.size()) {
+        for (WORD i = 0; i < ntHeaders->FileHeader.NumberOfSections; ++i) {
+            const IMAGE_SECTION_HEADER& section = sectionHeaders[i];
+            const size_t sectionStart = static_cast<size_t>(section.VirtualAddress);
+            const size_t sectionSize = (std::max)(
+                static_cast<size_t>(section.Misc.VirtualSize),
+                static_cast<size_t>(section.SizeOfRawData));
+            if (sectionStart > imageSize || sectionSize > imageSize - sectionStart)
                 return false;
-            }
+
+            const size_t requestStart = static_cast<size_t>(rva);
+            if (requestStart < sectionStart || requestStart >= sectionStart + sectionSize)
+                continue;
+
+            const size_t offsetWithinSection = requestStart - sectionStart;
+            if (offsetWithinSection > section.SizeOfRawData ||
+                static_cast<size_t>(size) > static_cast<size_t>(section.SizeOfRawData) - offsetWithinSection)
+                return false;
+
+            const size_t rawOffset = static_cast<size_t>(section.PointerToRawData);
+            if (rawOffset > m_diskImage.size() ||
+                offsetWithinSection > m_diskImage.size() - rawOffset ||
+                static_cast<size_t>(size) > m_diskImage.size() - rawOffset - offsetWithinSection)
+                return false;
+
+            const size_t finalOffset = rawOffset + offsetWithinSection;
+            if (finalOffset > (std::numeric_limits<DWORD>::max)()) return false;
+            fileOffset = static_cast<DWORD>(finalOffset);
+            return true;
+        }
+
+        if (static_cast<size_t>(rva) < ntHeaders->OptionalHeader.SizeOfHeaders &&
+            static_cast<size_t>(size) <=
+                static_cast<size_t>(ntHeaders->OptionalHeader.SizeOfHeaders) - rva &&
+            static_cast<size_t>(rva) <= m_diskImage.size() &&
+            static_cast<size_t>(size) <= m_diskImage.size() - rva) {
+            fileOffset = rva;
             return true;
         }
 
         return false;
     }
 
-    void SelfIntegrityGuard::BuildSkipIntervals(DWORD sectionStart, DWORD sectionEnd, std::vector<std::pair<size_t, size_t>>& skips) const {
+    void SelfIntegrityGuard::BuildSkipIntervals(DWORD sectionStart, DWORD sectionEnd,
+                                                   std::vector<std::pair<size_t, size_t>>& skips) const {
         skips.clear();
-        if (m_relocationSpans.empty() || sectionStart >= sectionEnd) {
-            return;
-        }
+        if (sectionStart >= sectionEnd) return;
 
         for (const auto& span : m_relocationSpans) {
-            const DWORD spanStart = span.rva;
-            const DWORD spanEnd = span.rva + static_cast<DWORD>(span.size);
-
-            if (spanEnd <= sectionStart || spanStart >= sectionEnd) {
+            if (span.size == 0 ||
+                span.size > static_cast<size_t>((std::numeric_limits<DWORD>::max)() - span.rva)) {
                 continue;
             }
 
-            const auto relativeStart = static_cast<size_t>(std::max<DWORD>(spanStart, sectionStart) - sectionStart);
-            const auto relativeEnd = static_cast<size_t>(std::min<DWORD>(spanEnd, sectionEnd) - sectionStart);
-            if (relativeStart < relativeEnd) {
-                skips.emplace_back(relativeStart, relativeEnd);
-            }
+            const DWORD spanStart = span.rva;
+            const DWORD spanEnd = spanStart + static_cast<DWORD>(span.size);
+            if (spanEnd <= sectionStart || spanStart >= sectionEnd) continue;
+
+            const size_t relativeStart =
+                static_cast<size_t>((std::max)(spanStart, sectionStart) - sectionStart);
+            const size_t relativeEnd =
+                static_cast<size_t>((std::min)(spanEnd, sectionEnd) - sectionStart);
+            if (relativeStart < relativeEnd) skips.emplace_back(relativeStart, relativeEnd);
         }
 
-        if (skips.empty()) {
-            return;
-        }
-
+        if (skips.empty()) return;
         std::sort(skips.begin(), skips.end());
 
         std::vector<std::pair<size_t, size_t>> merged;
         merged.reserve(skips.size());
-
         auto current = skips.front();
         for (size_t i = 1; i < skips.size(); ++i) {
             const auto& interval = skips[i];
-            if (interval.first <= current.second) {
-                current.second = std::max(current.second, interval.second);
-            } else {
+            if (interval.first <= current.second)
+                current.second = (std::max)(current.second, interval.second);
+            else {
                 merged.push_back(current);
                 current = interval;
             }
         }
         merged.push_back(current);
-
         skips.swap(merged);
     }
 }

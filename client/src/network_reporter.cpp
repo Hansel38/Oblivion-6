@@ -16,6 +16,8 @@
 #pragma comment(lib, "Ws2_32.lib")
 #pragma comment(lib, "Bcrypt.lib")
 
+extern void ReportViolationAndExit(const std::wstring& message, const std::string& type, const std::string& details);
+
 #ifndef BCRYPT_ALG_HANDLE_HMAC
 #define BCRYPT_ALG_HANDLE_HMAC 0x00000008
 #endif
@@ -208,6 +210,47 @@ namespace Oblivion {
             return false;
         }
 
+        // Server sends its active heartbeat interval/timeout as a separate frame.
+        std::string configFrame;
+        if (!ReceiveFrame(connectSocket, m_pendingNetworkData, configFrame, 3000, 128) ||
+            configFrame.rfind("HB_CONFIG:", 0) != 0 || configFrame.back() != ';') {
+            closesocket(connectSocket);
+            MessageBoxW(NULL, L"Konfigurasi heartbeat dari server tidak valid.",
+                        L"Oblivion Hack Shield - Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
+            ExitProcess(1);
+            return false;
+        }
+
+        const std::string configPayload = configFrame.substr(
+            strlen("HB_CONFIG:"), configFrame.size() - strlen("HB_CONFIG:") - 1);
+        const size_t separator = configPayload.find(':');
+        if (separator == std::string::npos ||
+            configPayload.find(':', separator + 1) != std::string::npos) {
+            closesocket(connectSocket);
+            ExitProcess(1);
+            return false;
+        }
+
+        try {
+            const std::string intervalText = configPayload.substr(0, separator);
+            const std::string timeoutText = configPayload.substr(separator + 1);
+            size_t parsedInterval = 0, parsedTimeout = 0;
+            const unsigned long long interval = std::stoull(intervalText, &parsedInterval, 10);
+            const unsigned long long timeout = std::stoull(timeoutText, &parsedTimeout, 10);
+            if (parsedInterval != intervalText.size() || parsedTimeout != timeoutText.size() ||
+                interval < 100 || interval > 60000 || timeout < 250 || timeout > 120000) {
+                throw std::invalid_argument("heartbeat config out of range");
+            }
+            m_hbIntervalMs = static_cast<uint32_t>(interval);
+            m_hbTimeoutMs = static_cast<uint32_t>(timeout);
+        } catch (...) {
+            closesocket(connectSocket);
+            MessageBoxW(NULL, L"Nilai konfigurasi heartbeat tidak valid.",
+                        L"Oblivion Hack Shield - Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
+            ExitProcess(1);
+            return false;
+        }
+
         m_hbSocket = connectSocket;
         StartHeartbeat();
         return true;
@@ -221,7 +264,11 @@ namespace Oblivion {
         NTSTATUS status = BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA256_ALGORITHM, NULL, BCRYPT_ALG_HANDLE_HMAC);
         if (status != 0) return std::string();
         DWORD objLen = 0, dataLen = 0;
-        (void)BCryptGetProperty(hAlg, BCRYPT_OBJECT_LENGTH, (PUCHAR)&objLen, sizeof(DWORD), &dataLen, 0);
+        status = BCryptGetProperty(hAlg, BCRYPT_OBJECT_LENGTH, (PUCHAR)&objLen, sizeof(DWORD), &dataLen, 0);
+        if (status != 0 || objLen == 0) {
+            BCryptCloseAlgorithmProvider(hAlg, 0);
+            return std::string();
+        }
         std::vector<UCHAR> obj(objLen);
         status = BCryptCreateHash(hAlg, &hHash, obj.data(), objLen, (PUCHAR)key.data(), (ULONG)key.size(), 0);
         if (status != 0) { BCryptCloseAlgorithmProvider(hAlg,0); return std::string(); }
@@ -249,10 +296,14 @@ namespace Oblivion {
                     HmacSha256(m_secretKey, m_hwid + ":" + std::to_string(m_sessionNonce));
                 if (sessionKey.empty()) {
                     m_hbRunning.store(false);
+                    ReportViolationAndExit(L"", "HEARTBEAT_CRYPTO_FAILURE",
+                                           "Unable to derive heartbeat session key");
                     return;
                 }
 
-                const Oblivion::HeartbeatConfig cfg;
+                Oblivion::HeartbeatConfig cfg;
+                cfg.interval_ms = m_hbIntervalMs;
+                cfg.timeout_ms = m_hbTimeoutMs;
                 while (m_hbRunning.load()) {
                     std::string frame;
                     if (!ReceiveFrame(socket, m_pendingNetworkData, frame,
@@ -280,7 +331,12 @@ namespace Oblivion {
                         if (!SendAll(socket, pong)) break;
                     } catch (...) { break; }
                 }
+                const bool endedUnexpectedly = m_hbRunning.load();
                 m_hbRunning.store(false);
+                if (endedUnexpectedly) {
+                    ReportViolationAndExit(L"", "HEARTBEAT_CONNECTION_LOST",
+                                           "Heartbeat stream ended or contained an invalid frame");
+                }
             });
         } catch (...) {
             m_hbRunning.store(false);
@@ -357,52 +413,32 @@ namespace Oblivion {
             ExitProcess(1);
         }
 
-        // Tunggu respons dari server dengan timeout
-        char recvbuf[512] = { 0 };
-        int recvbuflen = 512;
-        fd_set fdset;
-        struct timeval tv;
-        tv.tv_sec = 3; // Timeout 3 detik
-        tv.tv_usec = 0;
-        FD_ZERO(&fdset);
-        FD_SET(connectSocket, &fdset);
-
-            int selectResult = select(0, &fdset, NULL, NULL, &tv);
-            if (selectResult > 0) {
-                int bytesReceived = recv(connectSocket, recvbuf, recvbuflen, 0);
-                if (bytesReceived > 0) {
-                    // Parse response (hilangkan null terminator dan whitespace)
-                    std::string response(recvbuf, bytesReceived);
-                    // Trim whitespace dan null characters dari awal
-                    size_t start = response.find_first_not_of(" \t\n\r\0");
-                    if (start != std::string::npos) {
-                        response = response.substr(start);
-                    }
-                    // Trim dari akhir
-                    size_t end = response.find_last_not_of(" \t\n\r\0");
-                    if (end != std::string::npos) {
-                        response = response.substr(0, end + 1);
-                    }
-                    
-                    // Cleanup socket sebelum ExitProcess
-                    closesocket(connectSocket);
-                    
-                    // Cek apakah response adalah "KICK;" (case-sensitive sesuai server)
-                    if (response == "KICK;") {
-                        // Server mengirim perintah KICK - tampilkan message dan tutup
-                        MessageBoxW(NULL, L"Server mendeteksi pelanggaran.\n\nClient akan ditutup.", L"Oblivion Hack Shield - Violation", MB_OK | MB_ICONERROR | MB_TOPMOST);
-                        ExitProcess(0);
-                    }
-                }
-            }
-        else {
-            // Timeout atau error, juga dianggap pelanggaran (Fail-Closed)
+        // The server acknowledges every report with exactly one framed response.
+        std::string responsePending;
+        std::string responseFrame;
+        if (!ReceiveFrame(connectSocket, responsePending, responseFrame, 3000, 512)) {
             closesocket(connectSocket);
-            MessageBoxW(NULL, L"Timeout menunggu respons server.\n\nClient akan ditutup.", L"Oblivion Hack Shield - Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
+            MessageBoxW(NULL, L"Timeout atau respons server tidak lengkap saat mengirim laporan.",
+                        L"Oblivion Hack Shield - Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
             ExitProcess(0);
+            return;
         }
 
-        // Cleanup socket (jika masih terbuka)
+        if (responseFrame == "KICK;") {
+            closesocket(connectSocket);
+            MessageBoxW(NULL, L"Server mendeteksi pelanggaran.\n\nClient akan ditutup.",
+                        L"Oblivion Hack Shield - Violation", MB_OK | MB_ICONERROR | MB_TOPMOST);
+            ExitProcess(0);
+            return;
+        }
+        if (responseFrame != "OK;") {
+            closesocket(connectSocket);
+            MessageBoxW(NULL, L"Respons server tidak valid saat mengirim laporan.",
+                        L"Oblivion Hack Shield - Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
+            ExitProcess(0);
+            return;
+        }
+
         closesocket(connectSocket);
     }
 }
