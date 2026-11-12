@@ -91,6 +91,87 @@ namespace Oblivion {
         return connected;
     }
 
+    struct DnsResolveContext {
+        OVERLAPPED overlapped{};
+        ADDRINFOEXW* results = nullptr;
+        HANDLE completionEvent = nullptr;
+        DWORD completionError = WSANO_RECOVERY;
+    };
+
+    static VOID CALLBACK DnsResolveCompletion(
+        DWORD error, DWORD, LPOVERLAPPED overlapped) {
+        auto* context = reinterpret_cast<DnsResolveContext*>(overlapped);
+        context->completionError = error;
+        SetEvent(context->completionEvent);
+    }
+
+    static bool ResolveServerAddresses(
+        const std::string& serverName, int serverPort,
+        ADDRINFOEXW** addresses, DWORD timeoutMs) {
+        if (!addresses || serverName.empty() || serverPort <= 0 || serverPort > 65535) {
+            return false;
+        }
+        *addresses = nullptr;
+
+        // Preserve the existing ANSI hostname interpretation used by getaddrinfo().
+        const int hostLength = MultiByteToWideChar(
+            CP_ACP, 0, serverName.c_str(), -1, nullptr, 0);
+        if (hostLength <= 0) {
+            return false;
+        }
+
+        std::wstring wideHost(static_cast<size_t>(hostLength), L'\\0');
+        if (MultiByteToWideChar(
+                CP_ACP, 0, serverName.c_str(), -1, wideHost.data(), hostLength) == 0) {
+            return false;
+        }
+
+        const std::wstring wideService = std::to_wstring(serverPort);
+        ADDRINFOEXW hints{};
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_protocol = IPPROTO_TCP;
+
+        DnsResolveContext context{};
+        context.completionEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!context.completionEvent) {
+            return false;
+        }
+
+        HANDLE cancelHandle = nullptr;
+        const INT startResult = GetAddrInfoExW(
+            wideHost.c_str(), wideService.c_str(), NS_ALL, nullptr, &hints,
+            &context.results, nullptr, &context.overlapped,
+            DnsResolveCompletion, &cancelHandle);
+
+        DWORD resolveError = static_cast<DWORD>(startResult);
+        if (startResult == WSA_IO_PENDING) {
+            const DWORD waitResult = WaitForSingleObject(
+                context.completionEvent, timeoutMs);
+            if (waitResult != WAIT_OBJECT_0) {
+                // Cancellation invokes the completion callback. Wait for it before
+                // releasing the OVERLAPPED context or calling WSACleanup.
+                if (cancelHandle) {
+                    GetAddrInfoExCancel(&cancelHandle);
+                }
+                WaitForSingleObject(context.completionEvent, INFINITE);
+            }
+            resolveError = context.completionError;
+        }
+
+        const bool succeeded = resolveError == NO_ERROR && context.results != nullptr;
+        if (succeeded) {
+            *addresses = context.results;
+            context.results = nullptr;
+        }
+
+        if (context.results) {
+            FreeAddrInfoExW(context.results);
+        }
+        CloseHandle(context.completionEvent);
+        return succeeded;
+    }
+
     static bool ReceiveFrame(SOCKET socket, std::string& pending,
                              std::string& frame, DWORD timeoutMs,
                              size_t maxSize = 4096) {
@@ -163,17 +244,11 @@ namespace Oblivion {
     bool NetworkReporter::CheckBanStatus() {
         // Fungsi untuk check-in ke server dan mengecek apakah HWID di-ban
         SOCKET connectSocket = INVALID_SOCKET;
-        struct addrinfo* result = NULL, * ptr = NULL, hints;
+        ADDRINFOEXW* result = nullptr;
+        ADDRINFOEXW* ptr = nullptr;
 
-        ZeroMemory(&hints, sizeof(hints));
-        hints.ai_family = AF_UNSPEC;
-        hints.ai_socktype = SOCK_STREAM;
-        hints.ai_protocol = IPPROTO_TCP;
-
-        // Resolve server address and port
-        std::string portStr = std::to_string(m_serverPort);
-        int iResult = getaddrinfo(m_serverIP.c_str(), portStr.c_str(), &hints, &result);
-        if (iResult != 0) {
+        // DNS resolution is cancellable and bounded before the TCP connect deadline.
+        if (!ResolveServerAddresses(m_serverIP, m_serverPort, &result, 5000)) {
             // Gagal resolve alamat server - Fail-Closed
             MessageBoxW(NULL, L"Gagal menyelesaikan alamat server.\n\nClient akan ditutup.", L"Oblivion Hack Shield - Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
             ExitProcess(1);
@@ -201,7 +276,7 @@ namespace Oblivion {
             break; // Connected
         }
 
-        freeaddrinfo(result);
+        FreeAddrInfoExW(result);
 
         if (connectSocket == INVALID_SOCKET) {
             // Gagal terhubung - Fail-Closed
@@ -415,17 +490,11 @@ namespace Oblivion {
         // BLOCKING: Menunggu respons dari server sebelum kembali
         // Ini diperlukan agar client menunggu respons KICK dari server
         SOCKET connectSocket = INVALID_SOCKET;
-        struct addrinfo* result = NULL, * ptr = NULL, hints;
+        ADDRINFOEXW* result = nullptr;
+        ADDRINFOEXW* ptr = nullptr;
 
-        ZeroMemory(&hints, sizeof(hints));
-        hints.ai_family = AF_UNSPEC;
-        hints.ai_socktype = SOCK_STREAM;
-        hints.ai_protocol = IPPROTO_TCP;
-
-        // Resolve server address and port
-        std::string portStr = std::to_string(m_serverPort);
-        int iResult = getaddrinfo(m_serverIP.c_str(), portStr.c_str(), &hints, &result);
-        if (iResult != 0) {
+        // DNS resolution is cancellable and bounded before the TCP connect deadline.
+        if (!ResolveServerAddresses(m_serverIP, m_serverPort, &result, 5000)) {
             // Gagal resolve alamat server - Fail-Closed
             MessageBoxW(NULL, L"Gagal menyelesaikan alamat server.\n\nClient akan ditutup.", L"Oblivion Hack Shield - Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
             ExitProcess(1);
@@ -453,7 +522,7 @@ namespace Oblivion {
             break; // Connected
         }
 
-        freeaddrinfo(result);
+        FreeAddrInfoExW(result);
 
         if (connectSocket == INVALID_SOCKET) {
             // --- GAGAL TERHUBUNG ---
