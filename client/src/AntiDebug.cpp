@@ -366,7 +366,7 @@ namespace Oblivion {
     }
 
     bool AntiDebug::CheckPEBFlags() {
-        // Baca BeingDebugged dan NtGlobalFlag dari PEB via NtQueryInformationProcess
+        // Read the documented BeingDebugged PEB field via ProcessBasicInformation.
         typedef NTSTATUS(NTAPI* pNtQueryInformationProcess)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
         HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
         if (!hNtdll) return false;
@@ -378,31 +378,23 @@ namespace Oblivion {
             PVOID Reserved1;
             PVOID PebBaseAddress;
             PVOID Reserved2[2];
-            ULONG UniqueProcessId;
+            ULONG_PTR UniqueProcessId;
             PVOID Reserved3;
         } pbi = {};
 
         NTSTATUS st = NtQueryInfoProc(GetCurrentProcess(), ProcessBasicInformation, &pbi, sizeof(pbi), nullptr);
         if (st != 0x00000000 || !pbi.PebBaseAddress) return false;
 
-        // Struktur PEB minimal untuk membaca BeingDebugged dan NtGlobalFlag
-        struct PEB_MIN {
+        // Only read the documented BeingDebugged prefix. NtGlobalFlag is not
+        // part of the documented PEB layout and its offset varies by architecture/version.
+        struct PEB_PREFIX {
             BYTE Reserved1[2];
             BYTE BeingDebugged;
-            BYTE Reserved2[1];
-            PVOID Reserved3[2];
-            PVOID Ldr;
-            PVOID ProcessParameters;
-            BYTE Reserved4[104];
-            ULONG NtGlobalFlag;
         };
 
-        auto peb = (PEB_MIN*)pbi.PebBaseAddress;
+        const auto peb = static_cast<const PEB_PREFIX*>(pbi.PebBaseAddress);
         __try {
-            bool dbg = peb->BeingDebugged != 0;
-            // NtGlobalFlag sering memiliki 0x70 jika di bawah debugger (FLG_HEAP_ENABLE_TAIL_CHECK | FLG_HEAP_ENABLE_FREE_CHECK)
-            bool ngf = (peb->NtGlobalFlag & 0x70) != 0;
-            return dbg || ngf;
+            return peb->BeingDebugged != 0;
         }
         __except (EXCEPTION_EXECUTE_HANDLER) {
             return false;
