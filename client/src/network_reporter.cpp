@@ -208,6 +208,47 @@ namespace Oblivion {
             return false;
         }
 
+        // Server sends its active heartbeat interval/timeout as a separate frame.
+        std::string configFrame;
+        if (!ReceiveFrame(connectSocket, m_pendingNetworkData, configFrame, 3000, 128) ||
+            configFrame.rfind("HB_CONFIG:", 0) != 0 || configFrame.back() != ';') {
+            closesocket(connectSocket);
+            MessageBoxW(NULL, L"Konfigurasi heartbeat dari server tidak valid.",
+                        L"Oblivion Hack Shield - Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
+            ExitProcess(1);
+            return false;
+        }
+
+        const std::string configPayload = configFrame.substr(
+            strlen("HB_CONFIG:"), configFrame.size() - strlen("HB_CONFIG:") - 1);
+        const size_t separator = configPayload.find(':');
+        if (separator == std::string::npos ||
+            configPayload.find(':', separator + 1) != std::string::npos) {
+            closesocket(connectSocket);
+            ExitProcess(1);
+            return false;
+        }
+
+        try {
+            const std::string intervalText = configPayload.substr(0, separator);
+            const std::string timeoutText = configPayload.substr(separator + 1);
+            size_t parsedInterval = 0, parsedTimeout = 0;
+            const unsigned long long interval = std::stoull(intervalText, &parsedInterval, 10);
+            const unsigned long long timeout = std::stoull(timeoutText, &parsedTimeout, 10);
+            if (parsedInterval != intervalText.size() || parsedTimeout != timeoutText.size() ||
+                interval < 100 || interval > 60000 || timeout < 250 || timeout > 120000) {
+                throw std::invalid_argument("heartbeat config out of range");
+            }
+            m_hbIntervalMs = static_cast<uint32_t>(interval);
+            m_hbTimeoutMs = static_cast<uint32_t>(timeout);
+        } catch (...) {
+            closesocket(connectSocket);
+            MessageBoxW(NULL, L"Nilai konfigurasi heartbeat tidak valid.",
+                        L"Oblivion Hack Shield - Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
+            ExitProcess(1);
+            return false;
+        }
+
         m_hbSocket = connectSocket;
         StartHeartbeat();
         return true;
@@ -252,7 +293,9 @@ namespace Oblivion {
                     return;
                 }
 
-                const Oblivion::HeartbeatConfig cfg;
+                Oblivion::HeartbeatConfig cfg;
+                cfg.interval_ms = m_hbIntervalMs;
+                cfg.timeout_ms = m_hbTimeoutMs;
                 while (m_hbRunning.load()) {
                     std::string frame;
                     if (!ReceiveFrame(socket, m_pendingNetworkData, frame,
