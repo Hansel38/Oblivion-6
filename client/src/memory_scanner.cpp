@@ -399,6 +399,117 @@ namespace Oblivion {
         return sections.size() == sectionCount;
     }
 
+    bool MemoryScanner::ValidatePEStructure(const std::vector<uint8_t>& fileData) {
+        std::vector<PESectionInfo> sections;
+        if (!ParsePEHeaders(fileData, sections)) {
+            ReportViolationAndExit(L"", "PE_VALIDATION_FAILED",
+                                   "PE structure validation failed: invalid headers or section table");
+            return false;
+        }
+
+        const bool hasTextSection = std::any_of(sections.begin(), sections.end(),
+            [](const PESectionInfo& section) {
+                return section.name == ".text" ||
+                       section.name.rfind(".text$", 0) == 0;
+            });
+        if (!hasTextSection) {
+            ReportViolationAndExit(L"", "MISSING_TEXT_SECTION",
+                                   "PE validation failed: missing executable .text section");
+            return false;
+        }
+        return true;
+    }
+
+    uint32_t MemoryScanner::CalculateSignatureChecksum(const EmbeddedSignature& sig) {
+        const uint32_t data[] = {
+            sig.magicNumber,
+            sig.textSectionHash,
+            sig.rdataSectionHash,
+            sig.buildTimestamp,
+            sig.imageSize
+        };
+        return CalculateCRC32(reinterpret_cast<const uint8_t*>(data), sizeof(data));
+    }
+
+    bool MemoryScanner::ExtractEmbeddedSignature(const std::vector<uint8_t>& fileData,
+                                                 EmbeddedSignature& signature) {
+        std::vector<PESectionInfo> sections;
+        if (!ParsePEHeaders(fileData, sections)) return false;
+
+        for (const auto& section : sections) {
+            if (section.name != ".oblivion" && section.name != ".rdata") continue;
+
+            const size_t rawOffset = static_cast<size_t>(section.rawDataOffset);
+            const size_t rawSize = static_cast<size_t>(section.rawDataSize);
+            if (rawOffset > fileData.size() ||
+                rawSize > fileData.size() - rawOffset ||
+                rawSize < sizeof(EmbeddedSignature)) {
+                continue;
+            }
+
+            const size_t windowSize = (std::min)(
+                rawSize, sizeof(EmbeddedSignature) + static_cast<size_t>(256));
+            const size_t searchStart = rawOffset + rawSize - windowSize;
+            const size_t searchEnd = rawOffset + rawSize - sizeof(EmbeddedSignature);
+
+            for (size_t offset = searchStart; offset <= searchEnd; ++offset) {
+                EmbeddedSignature candidate{};
+                std::memcpy(&candidate, fileData.data() + offset, sizeof(candidate));
+
+                // 'OBLV'
+                if (candidate.magicNumber != 0x4F424C56) continue;
+                if (CalculateSignatureChecksum(candidate) != candidate.checksum) continue;
+
+                signature = candidate;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    bool MemoryScanner::VerifyEmbeddedSignature(const std::vector<uint8_t>& fileData) {
+        EmbeddedSignature signature{};
+        if (!ExtractEmbeddedSignature(fileData, signature)) {
+#ifdef OBLIVION_RELEASE
+            ReportViolationAndExit(L"", "SIGNATURE_MISSING",
+                                   "Embedded signature not found or invalid");
+            return false;
+#else
+            return true; // Development builds may not embed the release manifest.
+#endif
+        }
+
+        m_embeddedSig = signature;
+        std::vector<PESectionInfo> sections;
+        if (!ParsePEHeaders(fileData, sections)) return false;
+
+        for (const auto& section : sections) {
+            if (section.name != ".text" && section.name.rfind(".text$", 0) != 0)
+                continue;
+
+            const size_t rawOffset = static_cast<size_t>(section.rawDataOffset);
+            const size_t rawSize = static_cast<size_t>(section.rawDataSize);
+            if (rawOffset > fileData.size() ||
+                rawSize > fileData.size() - rawOffset) {
+                return false;
+            }
+
+            const uint64_t textHash = CalculateSHA256_32bit(
+                fileData.data() + rawOffset, rawSize);
+            if (static_cast<uint32_t>(textHash) != signature.textSectionHash) {
+                ReportViolationAndExit(L"", "SIGNATURE_MISMATCH",
+                                       "Text section hash does not match embedded signature");
+                return false;
+            }
+            return true;
+        }
+
+        ReportViolationAndExit(L"", "SIGNATURE_TEXT_SECTION_MISSING",
+                               "No .text section found for embedded signature verification");
+        return false;
+    }
+
     uint32_t MemoryScanner::CalculateSectionHashFromDisk(const std::vector<uint8_t>& fileData,
                                                          const PESectionInfo& section) {
         const size_t rawOffset = static_cast<size_t>(section.rawDataOffset);
