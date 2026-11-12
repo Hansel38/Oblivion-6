@@ -240,213 +240,129 @@ namespace Oblivion {
     bool MemoryScanner::ValidateImageHeaders(const std::vector<uint8_t>& fileData,
                                              IMAGE_DOS_HEADER& dosHeader,
                                              IMAGE_NT_HEADERS& ntHeaders) {
-        if (fileData.size() < sizeof(IMAGE_DOS_HEADER)) {
+        if (fileData.size() < sizeof(IMAGE_DOS_HEADER)) return false;
+
+        std::memcpy(&dosHeader, fileData.data(), sizeof(dosHeader));
+        if (dosHeader.e_magic != IMAGE_DOS_SIGNATURE ||
+            dosHeader.e_lfanew < static_cast<LONG>(sizeof(IMAGE_DOS_HEADER))) {
             return false;
         }
 
-        // Validate DOS header
-        dosHeader = *reinterpret_cast<const IMAGE_DOS_HEADER*>(fileData.data());
-        if (dosHeader.e_magic != IMAGE_DOS_SIGNATURE) {
+        const size_t ntOffset = static_cast<size_t>(dosHeader.e_lfanew);
+        if (ntOffset > fileData.size() ||
+            sizeof(IMAGE_NT_HEADERS) > fileData.size() - ntOffset) {
             return false;
         }
 
-        // Validate NT headers offset
-        if (static_cast<size_t>(dosHeader.e_lfanew) >= fileData.size() - sizeof(IMAGE_NT_HEADERS)) {
+        std::memcpy(&ntHeaders, fileData.data() + ntOffset, sizeof(ntHeaders));
+        if (ntHeaders.Signature != IMAGE_NT_SIGNATURE ||
+            ntHeaders.FileHeader.NumberOfSections == 0 ||
+            ntHeaders.FileHeader.NumberOfSections > 96 ||
+            ntHeaders.FileHeader.SizeOfOptionalHeader < sizeof(IMAGE_OPTIONAL_HEADER)) {
             return false;
         }
 
-        // Validate NT headers
-        ntHeaders = *reinterpret_cast<const IMAGE_NT_HEADERS*>(fileData.data() + dosHeader.e_lfanew);
-        if (ntHeaders.Signature != IMAGE_NT_SIGNATURE) {
+#if defined(_WIN64)
+        if (ntHeaders.FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
+            ntHeaders.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+            return false;
+        }
+#else
+        if (ntHeaders.FileHeader.Machine != IMAGE_FILE_MACHINE_I386 ||
+            ntHeaders.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
+            return false;
+        }
+#endif
+
+        const size_t optionalOffset = ntOffset + offsetof(IMAGE_NT_HEADERS, OptionalHeader);
+        if (optionalOffset > fileData.size() ||
+            ntHeaders.FileHeader.SizeOfOptionalHeader > fileData.size() - optionalOffset) {
             return false;
         }
 
-        // Validate machine type (x86 or x64)
-        if (ntHeaders.FileHeader.Machine != IMAGE_FILE_MACHINE_I386 &&
-            ntHeaders.FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64) {
+        const size_t sectionOffset = optionalOffset + ntHeaders.FileHeader.SizeOfOptionalHeader;
+        const size_t sectionBytes =
+            static_cast<size_t>(ntHeaders.FileHeader.NumberOfSections) * sizeof(IMAGE_SECTION_HEADER);
+        if (sectionOffset > fileData.size() || sectionBytes > fileData.size() - sectionOffset)
             return false;
+
+        const size_t imageSize = static_cast<size_t>(ntHeaders.OptionalHeader.SizeOfImage);
+        if (imageSize == 0 || ntHeaders.OptionalHeader.SizeOfHeaders > fileData.size())
+            return false;
+
+        for (WORD i = 0; i < ntHeaders.FileHeader.NumberOfSections; ++i) {
+            IMAGE_SECTION_HEADER section{};
+            std::memcpy(&section,
+                        fileData.data() + sectionOffset + static_cast<size_t>(i) * sizeof(section),
+                        sizeof(section));
+
+            const size_t virtualAddress = static_cast<size_t>(section.VirtualAddress);
+            const size_t mappedSize = (std::max)(
+                static_cast<size_t>(section.Misc.VirtualSize),
+                static_cast<size_t>(section.SizeOfRawData));
+            if (virtualAddress > imageSize || mappedSize > imageSize - virtualAddress)
+                return false;
+
+            const size_t rawOffset = static_cast<size_t>(section.PointerToRawData);
+            const size_t rawSize = static_cast<size_t>(section.SizeOfRawData);
+            if (rawOffset > fileData.size() || rawSize > fileData.size() - rawOffset)
+                return false;
         }
 
         return true;
     }
 
-    bool MemoryScanner::ParsePEHeaders(const std::vector<uint8_t>& fileData, 
+    bool MemoryScanner::ParsePEHeaders(const std::vector<uint8_t>& fileData,
                                        std::vector<PESectionInfo>& sections) {
-        IMAGE_DOS_HEADER dosHeader;
-        IMAGE_NT_HEADERS ntHeaders;
+        sections.clear();
+        m_sectionMap.clear();
 
-        if (!ValidateImageHeaders(fileData, dosHeader, ntHeaders)) {
-            return false;
-        }
+        IMAGE_DOS_HEADER dosHeader{};
+        IMAGE_NT_HEADERS ntHeaders{};
+        if (!ValidateImageHeaders(fileData, dosHeader, ntHeaders)) return false;
 
-        // Parse section headers
-        DWORD sectionOffset = dosHeader.e_lfanew + sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) + 
-                             ntHeaders.FileHeader.SizeOfOptionalHeader;
+        const size_t ntOffset = static_cast<size_t>(dosHeader.e_lfanew);
+        const size_t sectionOffset = ntOffset +
+            offsetof(IMAGE_NT_HEADERS, OptionalHeader) +
+            ntHeaders.FileHeader.SizeOfOptionalHeader;
+        const WORD sectionCount = ntHeaders.FileHeader.NumberOfSections;
 
-        for (WORD i = 0; i < ntHeaders.FileHeader.NumberOfSections; i++) {
-            if (sectionOffset + sizeof(IMAGE_SECTION_HEADER) > fileData.size()) {
-                break;
-            }
+        sections.reserve(sectionCount);
+        for (WORD i = 0; i < sectionCount; ++i) {
+            IMAGE_SECTION_HEADER sectionHeader{};
+            const size_t currentOffset =
+                sectionOffset + static_cast<size_t>(i) * sizeof(IMAGE_SECTION_HEADER);
+            std::memcpy(&sectionHeader, fileData.data() + currentOffset, sizeof(sectionHeader));
 
-            const IMAGE_SECTION_HEADER* sectionHeader = 
-                reinterpret_cast<const IMAGE_SECTION_HEADER*>(fileData.data() + sectionOffset);
+            size_t nameLength = 0;
+            while (nameLength < IMAGE_SIZEOF_SHORT_NAME && sectionHeader.Name[nameLength] != 0)
+                ++nameLength;
 
             PESectionInfo section;
-            section.name = std::string(reinterpret_cast<const char*>(sectionHeader->Name), 
-                                      strnlen(reinterpret_cast<const char*>(sectionHeader->Name), 8));
-            section.virtualAddress = sectionHeader->VirtualAddress;
-            section.virtualSize = sectionHeader->Misc.VirtualSize;
-            section.rawDataOffset = sectionHeader->PointerToRawData;
-            section.rawDataSize = sectionHeader->SizeOfRawData;
-            section.characteristics = sectionHeader->Characteristics;
+            section.name.assign(reinterpret_cast<const char*>(sectionHeader.Name), nameLength);
+            section.virtualAddress = sectionHeader.VirtualAddress;
+            section.virtualSize = sectionHeader.Misc.VirtualSize;
+            section.rawDataOffset = sectionHeader.PointerToRawData;
+            section.rawDataSize = sectionHeader.SizeOfRawData;
+            section.characteristics = sectionHeader.Characteristics;
 
-            sections.push_back(section);
-            m_sectionMap[section.virtualAddress] = section;
-
-            sectionOffset += sizeof(IMAGE_SECTION_HEADER);
+            if (!m_sectionMap.emplace(section.virtualAddress, section).second)
+                return false;
+            sections.push_back(std::move(section));
         }
 
-        return !sections.empty();
-    }
-
-    bool MemoryScanner::ValidatePEStructure(const std::vector<uint8_t>& fileData) {
-        std::vector<PESectionInfo> sections;
-        
-        if (!ParsePEHeaders(fileData, sections)) {
-            std::string details = "PE structure validation failed: Invalid headers or corrupted file";
-            ReportViolationAndExit(L"", "PE_VALIDATION_FAILED", details);
-            return false;
-        }
-
-        // Verify critical sections exist
-        bool hasTextSection = false;
-        bool hasDataSection = false;
-
-        for (const auto& section : sections) {
-            if (section.name.find(".text") != std::string::npos) {
-                hasTextSection = true;
-            }
-            if (section.name.find(".data") != std::string::npos || 
-                section.name.find(".rdata") != std::string::npos) {
-                hasDataSection = true;
-            }
-        }
-
-        if (!hasTextSection) {
-            std::string details = "PE validation failed: Missing .text section";
-            ReportViolationAndExit(L"", "MISSING_TEXT_SECTION", details);
-            return false;
-        }
-
-        return true;
-    }
-
-    // === LAYER 2 & 3: Embedded Signature + Disk-Based Baseline ===
-
-    uint32_t MemoryScanner::CalculateSignatureChecksum(const EmbeddedSignature& sig) {
-        // Calculate checksum dari semua field kecuali checksum itu sendiri
-        uint32_t data[] = {
-            sig.magicNumber,
-            sig.textSectionHash,
-            sig.rdataSectionHash,
-            sig.buildTimestamp,
-            sig.imageSize
-        };
-        return CalculateCRC32(reinterpret_cast<const uint8_t*>(data), sizeof(data));
-    }
-
-    bool MemoryScanner::ExtractEmbeddedSignature(const std::vector<uint8_t>& fileData,
-                                                 EmbeddedSignature& signature) {
-        // CATATAN: Dalam implementasi real, signature harus di-embed saat build-time
-        // oleh build system (post-build script) di section khusus seperti .rsrc atau .oblivion
-        // Untuk sekarang, kita cari di akhir .rdata section atau section khusus
-        
-        std::vector<PESectionInfo> sections;
-        if (!ParsePEHeaders(fileData, sections)) {
-            return false;
-        }
-
-        // Cari section .oblivion atau .rdata
-        for (const auto& section : sections) {
-            if (section.name == ".oblivion" || section.name == ".rdata") {
-                size_t searchStart = section.rawDataOffset + section.rawDataSize - sizeof(EmbeddedSignature) - 256;
-                size_t searchEnd = section.rawDataOffset + section.rawDataSize;
-
-                if (searchStart >= fileData.size()) continue;
-
-                // Cari magic number
-                for (size_t i = searchStart; i < searchEnd - sizeof(EmbeddedSignature); i++) {
-                    const EmbeddedSignature* potential = 
-                        reinterpret_cast<const EmbeddedSignature*>(fileData.data() + i);
-
-                    // Magic number untuk Oblivion: 0x4F424C56 ('OBLV')
-                    if (potential->magicNumber == 0x4F424C56) {
-                        // Verify checksum
-                        uint32_t calculatedChecksum = CalculateSignatureChecksum(*potential);
-                        if (calculatedChecksum == potential->checksum) {
-                            signature = *potential;
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-
-        return false;
-    }
-
-    bool MemoryScanner::VerifyEmbeddedSignature(const std::vector<uint8_t>& fileData) {
-        EmbeddedSignature signature;
-        
-        if (!ExtractEmbeddedSignature(fileData, signature)) {
-            // Signature tidak ditemukan - mungkin belum di-embed saat build
-            // Untuk development, kita skip verifikasi ini
-            // Untuk production, ini harus CRITICAL ERROR
-            #ifdef OBLIVION_RELEASE
-            std::string details = "Embedded signature not found or invalid - possible tampering";
-            ReportViolationAndExit(L"", "SIGNATURE_MISSING", details);
-            return false;
-            #else
-            return true; // Skip untuk debug builds
-            #endif
-        }
-
-        m_embeddedSig = signature;
-
-        // Verify signature data matches actual file
-        std::vector<PESectionInfo> sections;
-        if (!ParsePEHeaders(fileData, sections)) {
-            return false;
-        }
-
-        // Find .text section dan verify hash
-        for (const auto& section : sections) {
-            if (section.name.find(".text") != std::string::npos) {
-                if (section.rawDataOffset + section.rawDataSize > fileData.size()) {
-                    continue;
-                }
-
-                uint64_t textHash = CalculateSHA256_32bit(
-                    fileData.data() + section.rawDataOffset,
-                    section.rawDataSize
-                );
-
-                // Compare dengan embedded signature (gunakan 32-bit pertama)
-                if (static_cast<uint32_t>(textHash) != signature.textSectionHash) {
-                    std::string details = "Text section hash mismatch - file has been modified";
-                    ReportViolationAndExit(L"", "SIGNATURE_MISMATCH", details);
-                    return false;
-                }
-
-                break;
-            }
-        }
-
-        return true;
+        return sections.size() == sectionCount;
     }
 
     uint32_t MemoryScanner::CalculateSectionHashFromDisk(const std::vector<uint8_t>& fileData,
                                                          const PESectionInfo& section) {
+        const size_t rawOffset = static_cast<size_t>(section.rawDataOffset);
+        const size_t rawSize = static_cast<size_t>(section.rawDataSize);
+        if (rawOffset > fileData.size() || rawSize > fileData.size() - rawOffset)
+            return 0;
+
+        return CalculateCRC32(fileData.data() + rawOffset, rawSize);
+    }                                                         const PESectionInfo& section) {
         if (section.rawDataOffset + section.rawDataSize > fileData.size()) {
             return 0;
         }
@@ -565,7 +481,8 @@ namespace Oblivion {
                     // Hitung perbedaan byte-byte untuk membedakan relocations dari injection
                     // Relocations biasanya hanya mengubah beberapa bytes (< 0.1% dari section)
                     size_t rawDataSize = section.rawDataSize;
-                    if (rawDataSize > 0 && rawDataSize <= fileData.size() - section.rawDataOffset) {
+                    if (rawDataSize > 0 && section.rawDataOffset <= fileData.size() &&
+                        rawDataSize <= fileData.size() - section.rawDataOffset) {
                         const uint8_t* diskData = fileData.data() + section.rawDataOffset;
                         size_t differentBytes = 0;
                         size_t bytesToCompare = (sizeToHash < rawDataSize) ? sizeToHash : rawDataSize;
@@ -688,7 +605,8 @@ namespace Oblivion {
                     auto it_section_info = m_sectionMap.find(baseline.rva);
                     if (it_section_info != m_sectionMap.end() && !fileData.empty()) {
                         const auto& section = it_section_info->second;
-                        if (section.rawDataOffset + section.rawDataSize <= fileData.size()) {
+                        if (section.rawDataOffset <= fileData.size() &&
+                            section.rawDataSize <= fileData.size() - section.rawDataOffset) {
                             const uint8_t* diskData = fileData.data() + section.rawDataOffset;
                             size_t differentBytes = 0;
                             size_t bytesToCompare = (sizeToCheck < section.rawDataSize) ? sizeToCheck : section.rawDataSize;
