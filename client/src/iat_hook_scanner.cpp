@@ -64,7 +64,7 @@ namespace {
 
             const size_t available = static_cast<size_t>(regionEnd - cursor);
             const size_t chunkSize = (std::min)(remaining, available);
-            if (std::memchr(reinterpret_cast<const void*>(cursor), '\\0', chunkSize) != nullptr)
+            if (std::memchr(reinterpret_cast<const void*>(cursor), 0, chunkSize) != nullptr)
                 return true;
 
             cursor += chunkSize;
