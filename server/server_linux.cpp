@@ -920,7 +920,10 @@ void HandleClient(SocketType clientSocket) {
                     OblivionNet::SendAll(clientSocket, kickCommand, strlen(kickCommand));
                     std::cout << "[INFO] Perintah KICK dikirim ke client (HWID: " << hwid << ") - sudah ada di ban list." << std::endl;
                 } else {
-                    std::cout << "[WARNING] Pelanggaran terdeteksi dari HWID [" << hwid << "], dicatat ke log (menunggu review manual)." << std::endl;
+                    const char* acceptedCommand = "OK;";
+                    OblivionNet::SendAll(clientSocket, acceptedCommand, strlen(acceptedCommand));
+                    std::cout << "[WARNING] Pelanggaran terdeteksi dari HWID [" << hwid
+                              << "], dicatat ke log (menunggu review manual)." << std::endl;
                 }
             }
         } else if (bytesReceived == 0) {
