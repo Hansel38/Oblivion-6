@@ -217,8 +217,7 @@ namespace Oblivion {
             return;
         }
 
-        {
-            do {
+        do {
                 std::wstring processName = pe32.szExeFile;
                 DWORD processId = pe32.th32ProcessID;
                 activeProcesses.insert(processId);
@@ -284,7 +283,6 @@ namespace Oblivion {
                     ++it;
                 }
             }
-        }
 
         CloseHandle(hSnapshot);
     }
