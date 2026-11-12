@@ -78,7 +78,7 @@ namespace OblivionServer {
             readlink("/proc/self/exe", executablePath, PATH_MAX);
         std::string secretFilePath;
         if (executablePathLength > 0 && executablePathLength < PATH_MAX) {
-            executablePath[executablePathLength] = '\\0';
+            executablePath[executablePathLength] = '\0';
             std::string executablePathString(executablePath,
                                                static_cast<size_t>(executablePathLength));
             const size_t separator = executablePathString.find_last_of('/');
@@ -95,7 +95,9 @@ namespace OblivionServer {
                     if (fileSize > 0 && fileSize < 1024 && fseek(f, 0, SEEK_SET) == 0) {
                         std::vector<unsigned char> encoded(static_cast<size_t>(fileSize));
                         const size_t bytesRead = fread(encoded.data(), 1, encoded.size(), f);
-                        const bool completeRead = bytesRead == encoded.size() && fgetc(f) == EOF;
+                        const int trailingByte = fgetc(f);
+                        const bool completeRead = bytesRead == encoded.size() &&
+                                                  trailingByte == EOF && !ferror(f);
                         if (completeRead) {
                             secret.reserve(encoded.size());
                             for (size_t i = 0; i < encoded.size(); ++i) {
