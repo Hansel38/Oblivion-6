@@ -33,6 +33,9 @@ This checklist tracks findings from a source review. A checked item means the co
 - [x] **P1 — Scanner UTF-8 buffer overflow:** allocate space for the terminating NUL during `WideCharToMultiByte` in overlay and injection scanners.
 - [x] **P1 — Overlay window state:** refresh the game window rectangle and handle destroyed windows or failed Win32 window queries safely.
 - [x] **P1 — IAT PE bounds:** validate image headers, import descriptors, thunk tables, and import-name strings before dereferencing them.
+- [x] **P1 — MemoryScanner PE parsing:** validate DOS/NT offsets, machine/optional-header type, full section-table bounds, section RVAs, and raw file ranges; reject truncated/duplicate sections.
+- [x] **P1 — MemoryScanner memory ranges:** validate complete readable executable-section spans across page regions instead of silently skipping inaccessible or partially queried sections.
+- [x] **P1 — Executable file reads:** reject failed/negative/oversized file lengths before allocation and use alignment-safe hash extraction.
 - [x] **P1 — Module path trust checks:** resolve long module paths dynamically and compare against normalized Windows/Program Files directory roots rather than substring matches.
 - [x] **P1 — Signature publisher consistency:** align trusted publishers with the publishers in the process verification map.
 - [x] **P1 — System/Program Files module trust:** require a valid Authenticode signature for modules in those locations; filename-only unsigned exceptions cannot override a failed signature there.
