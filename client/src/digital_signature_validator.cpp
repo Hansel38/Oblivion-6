@@ -19,10 +19,10 @@ extern void ReportViolationAndExit(const std::wstring& message, const std::strin
 #pragma comment(lib, "crypt32.lib")
 namespace {
     std::wstring NormalizePathForComparison(std::wstring path) {
-        std::replace(path.begin(), path.end(), L'/', L'\\\\');
+        std::replace(path.begin(), path.end(), L'/', L'\\');
         std::transform(path.begin(), path.end(), path.begin(),
             [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
-        while (path.size() > 3 && (path.back() == L'\\\\' || path.back() == L'/')) {
+        while (path.size() > 3 && (path.back() == L'\\' || path.back() == L'/')) {
             path.pop_back();
         }
         return path;
@@ -33,7 +33,7 @@ namespace {
             path.compare(0, directory.size(), directory) != 0) {
             return false;
         }
-        return path[directory.size()] == L'\\\\' || path[directory.size()] == L'/';
+        return path[directory.size()] == L'\\' || path[directory.size()] == L'/';
     }
 
     bool GetEnvironmentPath(const wchar_t* variable, std::wstring& value) {
@@ -278,13 +278,6 @@ namespace Oblivion {
     DigitalSignatureValidator::~DigitalSignatureValidator() {}
 
     void DigitalSignatureValidator::PerformScan() {
-        std::wstring gameExePath;
-        if (!GetModulePathDynamic(GetCurrentProcess(), GetModuleHandleW(nullptr), gameExePath)) {
-            return;
-        }
-        const std::wstring gameDir = NormalizePathForComparison(
-            gameExePath.substr(0, gameExePath.find_last_of(L"\\\\/") + 1));
-
         std::wstring windowsDirectory;
         const bool haveWindowsDirectory = GetWindowsDirectoryDynamic(windowsDirectory);
         windowsDirectory = NormalizePathForComparison(windowsDirectory);
