@@ -10,6 +10,22 @@
 // Forward declaration
 extern void ReportViolationAndExit(const std::wstring& message, const std::string& type, const std::string& details);
 
+namespace {
+    std::string WideToUtf8(const wchar_t* value) {
+        if (!value) return {};
+        const int required = WideCharToMultiByte(CP_UTF8, 0, value, -1, nullptr, 0, nullptr, nullptr);
+        if (required <= 0) return {};
+
+        // Allocate the terminator too; remove it only after conversion succeeds.
+        std::string converted(static_cast<size_t>(required), '\\0');
+        const int written = WideCharToMultiByte(CP_UTF8, 0, value, -1,
+                                                &converted[0], required, nullptr, nullptr);
+        if (written != required) return {};
+        converted.pop_back();
+        return converted;
+    }
+}
+
 namespace Oblivion {
     InjectionScanner::InjectionScanner() {}
 
@@ -33,12 +49,7 @@ namespace Oblivion {
                 if (IsDllBlacklisted(me32.szModule)) {
                     // Jika iya, hentikan client
                     // Konversi DLL name ke UTF-8 untuk details
-                    std::string details_utf8;
-                    int size_needed = WideCharToMultiByte(CP_UTF8, 0, me32.szModule, -1, NULL, 0, NULL, NULL);
-                    if (size_needed > 0) {
-                        details_utf8.assign(size_needed - 1, 0); // -1 untuk menghilangkan null terminator
-                        WideCharToMultiByte(CP_UTF8, 0, me32.szModule, -1, &details_utf8[0], size_needed, NULL, NULL);
-                    }
+                    const std::string details_utf8 = WideToUtf8(me32.szModule);
                     
                     // Panggil fungsi pelaporan global
                     ReportViolationAndExit(L"", "INJECTION_DETECTED", details_utf8);
