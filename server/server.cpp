@@ -417,7 +417,8 @@ std::string SanitizeInput(const std::string& input, size_t maxLen) {
     for (size_t i = 0; i < input.length() && sanitized.length() < maxLen; i++) {
         char c = input[i];
         // Hanya izinkan karakter printable ASCII dan beberapa karakter khusus yang aman
-        if ((c >= 0x20 && c <= 0x7E) || c == '\n' || c == '\r' || c == '\t') {
+        // Strip CR/LF/TAB so untrusted reports cannot forge log lines.
+        if (c >= 0x20 && c <= 0x7E) {
             // Filter karakter yang bisa digunakan untuk injection
             if (c != '<' && c != '>' && c != '&' && c != '"' && c != '\'') {
                 sanitized += c;
@@ -609,8 +610,8 @@ void HandleClient(SOCKET clientSocket) {
                 std::cout << "[DEBUG] Expected format: TYPE:DETAILS:HWID:SECRET;" << std::endl;
                 
                 // Log attempt dengan data mentah (truncated untuk keamanan)
-                std::string truncatedReport = report.length() > 100 ? report.substr(0, 100) + "..." : report;
-                LogViolation("MALFORMED_REQUEST", parsed.errorMessage + " | Data: " + truncatedReport, extractedHwid);
+                // Never log raw untrusted protocol bytes; they may contain control characters.
+                LogViolation("MALFORMED_REQUEST", parsed.errorMessage, extractedHwid);
                 
                 // Kirim error response dan tutup koneksi
                 const char* errorResponse = "ERROR:INVALID_FORMAT;";
