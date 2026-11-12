@@ -13,7 +13,7 @@ namespace {
         if (required <= 0) return {};
 
         // Allocate the terminator too; remove it only after conversion succeeds.
-        std::string converted(static_cast<size_t>(required), '\\0');
+        std::string converted(static_cast<size_t>(required), '\0');
         const int written = WideCharToMultiByte(CP_UTF8, 0, value, -1,
                                                 &converted[0], required, nullptr, nullptr);
         if (written != required) return {};
@@ -49,10 +49,6 @@ namespace Oblivion {
         }
 
         // Refresh the game rectangle on every pass (window movement/resizing).
-        if (!m_gameWindow) {
-            return;
-        }
-
         // Enumerasi semua jendela tingkat atas dan jalankan callback untuk masing-masing jendela
         EnumWindows(EnumWindowsCallback, (LPARAM)this);
     }
@@ -88,7 +84,7 @@ namespace Oblivion {
 
         // 4. Periksa apakah jendela ada di whitelist
         wchar_t className[256] = {};
-        if (GetClassNameW(hwnd, className, static_cast<int>(std::size(className))) == 0) {
+        if (GetClassNameW(hwnd, className, 256) == 0) {
             return TRUE;
         }
         if (pThis->IsWhitelisted(className)) {
