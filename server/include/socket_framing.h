@@ -9,7 +9,9 @@
 
 #ifdef _WIN32
 #include <winsock2.h>
+#include <bcrypt.h>
 #else
+#include <openssl/rand.h>
 #include <cerrno>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -24,6 +26,18 @@ namespace OblivionNet {
 #else
     using SocketType = int;
 #endif
+
+    inline bool GenerateSecureNonce(uint64_t& value) {
+        value = 0;
+#ifdef _WIN32
+        return BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(&value),
+                               static_cast<ULONG>(sizeof(value)),
+                               BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0;
+#else
+        return RAND_bytes(reinterpret_cast<unsigned char*>(&value),
+                          static_cast<int>(sizeof(value))) == 1;
+#endif
+    }
 
     inline bool SendAll(SocketType socket, const char* data, size_t length) {
         size_t offset = 0;
