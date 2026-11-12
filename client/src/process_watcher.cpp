@@ -87,6 +87,7 @@ namespace Oblivion {
 
     void ProcessWatcher::Stop() {
         const bool wasRunning = m_isRunning.exchange(false);
+        m_waitCondition.notify_all();
         if (wasRunning) {
             std::cout << "[ProcessWatcher] Stopping monitoring system..." << std::endl;
         }
@@ -185,7 +186,10 @@ namespace Oblivion {
                 OutputDebugStringA("\n");
 #endif
 
-                Sleep(sleepDurationMs);
+                std::unique_lock<std::mutex> waitLock(m_waitMutex);
+                m_waitCondition.wait_for(
+                    waitLock, std::chrono::milliseconds(sleepDurationMs),
+                    [this]() { return !m_isRunning.load(); });
             }
         }
     }
