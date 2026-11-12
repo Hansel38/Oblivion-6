@@ -17,6 +17,72 @@ extern void ReportViolationAndExit(const std::wstring& message, const std::strin
 #pragma comment(lib, "wintrust.lib")
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "crypt32.lib")
+namespace {
+    std::wstring NormalizePathForComparison(std::wstring path) {
+        std::replace(path.begin(), path.end(), L'/', L'\\\\');
+        std::transform(path.begin(), path.end(), path.begin(),
+            [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
+        while (path.size() > 3 && (path.back() == L'\\\\' || path.back() == L'/')) {
+            path.pop_back();
+        }
+        return path;
+    }
+
+    bool IsWithinDirectory(const std::wstring& path, const std::wstring& directory) {
+        if (directory.empty() || path.size() <= directory.size() ||
+            path.compare(0, directory.size(), directory) != 0) {
+            return false;
+        }
+        return path[directory.size()] == L'\\\\' || path[directory.size()] == L'/';
+    }
+
+    bool GetEnvironmentPath(const wchar_t* variable, std::wstring& value) {
+        value.clear();
+        DWORD required = GetEnvironmentVariableW(variable, nullptr, 0);
+        if (required <= 1 || required > 32768) return false;
+
+        std::vector<wchar_t> buffer(required);
+        const DWORD copied = GetEnvironmentVariableW(variable, buffer.data(),
+                                                       static_cast<DWORD>(buffer.size()));
+        if (copied == 0 || copied >= buffer.size()) return false;
+        value.assign(buffer.data(), copied);
+        return true;
+    }
+
+    bool GetModulePathDynamic(HANDLE process, HMODULE module, std::wstring& value) {
+        value.clear();
+        size_t capacity = 512;
+        while (capacity <= 32768) {
+            std::vector<wchar_t> buffer(capacity);
+            const DWORD length = GetModuleFileNameExW(process, module, buffer.data(),
+                                                       static_cast<DWORD>(buffer.size()));
+            if (length == 0) return false;
+            if (length < buffer.size() - 1) {
+                value.assign(buffer.data(), length);
+                return true;
+            }
+            capacity *= 2;
+        }
+        return false;
+    }
+
+    bool GetWindowsDirectoryDynamic(std::wstring& value) {
+        value.clear();
+        size_t capacity = 512;
+        while (capacity <= 32768) {
+            std::vector<wchar_t> buffer(capacity);
+            const UINT length = GetWindowsDirectoryW(buffer.data(), static_cast<UINT>(buffer.size()));
+            if (length == 0) return false;
+            if (length < buffer.size()) {
+                value.assign(buffer.data(), length);
+                return true;
+            }
+            capacity = static_cast<size_t>(length) + 1;
+        }
+        return false;
+    }
+}
+
 
 // Daftar nama penerbit yang diizinkan.
 // PERHATIAN: Daftar ini sangat penting. Jika terlalu ketat, akan menyebabkan false positive.
@@ -30,8 +96,15 @@ const std::vector<std::wstring> Oblivion::DigitalSignatureValidator::m_trustedPu
     L"Valve Corporation", // Untuk DLL Steam
     L"Discord Inc.",      // Untuk DLL Discord
     L"Google LLC",        // Untuk DLL Chrome/Gecko
-    L"Mozilla Corporation" // Untuk DLL Firefox
-    // Tambahkan penerbit lain yang Anda percaya di sini
+    L"Mozilla Corporation", // Untuk DLL Firefox
+    L"Spotify AB",
+    L"VideoLAN",
+    L"Epic Games",
+    L"Blizzard Entertainment",
+    L"Electronic Arts",
+    L"Ubisoft",
+    L"Dropbox"
+    // Keep this list aligned with m_expectedPublishers above.
 };
 
 // Mapping process name -> expected publisher untuk whitelist verification
@@ -205,89 +278,97 @@ namespace Oblivion {
     DigitalSignatureValidator::~DigitalSignatureValidator() {}
 
     void DigitalSignatureValidator::PerformScan() {
-        // Dapatkan path folder game untuk membandingkan dengan path modul
-        WCHAR gameExePath[MAX_PATH];
-        if (GetModuleFileNameW(NULL, gameExePath, MAX_PATH) == 0) {
-            return; // Tidak bisa dapatkan path game, skip scan
-        }
-        std::wstring gameDir = gameExePath;
-        size_t lastSlash = gameDir.find_last_of(L"\\/");
-        if (lastSlash != std::wstring::npos) {
-            gameDir = gameDir.substr(0, lastSlash + 1);
-        }
-        std::transform(gameDir.begin(), gameDir.end(), gameDir.begin(), ::towlower);
-
-        HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
-        if (hSnapshot == INVALID_HANDLE_VALUE) {
+        std::wstring gameExePath;
+        if (!GetModulePathDynamic(GetCurrentProcess(), GetModuleHandleW(nullptr), gameExePath)) {
             return;
         }
+        const std::wstring gameDir = NormalizePathForComparison(
+            gameExePath.substr(0, gameExePath.find_last_of(L"\\\\/") + 1));
 
-        MODULEENTRY32W me32;
-        me32.dwSize = sizeof(MODULEENTRY32W);
+        std::wstring windowsDirectory;
+        const bool haveWindowsDirectory = GetWindowsDirectoryDynamic(windowsDirectory);
+        windowsDirectory = NormalizePathForComparison(windowsDirectory);
 
-        if (Module32FirstW(hSnapshot, &me32)) {
+        std::wstring programFiles;
+        std::wstring programFilesX86;
+        const bool haveProgramFiles = GetEnvironmentPath(L"ProgramFiles", programFiles);
+        const bool haveProgramFilesX86 = GetEnvironmentPath(L"ProgramFiles(x86)", programFilesX86);
+        programFiles = NormalizePathForComparison(programFiles);
+        programFilesX86 = NormalizePathForComparison(programFilesX86);
+
+        HANDLE snapshot = CreateToolhelp32Snapshot(
+            TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
+        if (snapshot == INVALID_HANDLE_VALUE) return;
+
+        MODULEENTRY32W moduleEntry{};
+        moduleEntry.dwSize = sizeof(moduleEntry);
+        if (Module32FirstW(snapshot, &moduleEntry)) {
             do {
-                // Lewati modul utama (rro.exe) karena seringkali tidak ditandatangani
-                if (me32.hModule == GetModuleHandle(NULL)) {
+                if (moduleEntry.hModule == GetModuleHandleW(nullptr)) continue;
+
+                std::wstring modulePath;
+                if (!GetModulePathDynamic(GetCurrentProcess(), moduleEntry.hModule, modulePath)) {
+                    // We cannot safely identify this module path; do not silently treat it as trusted.
+                    std::wstring detailsWide = L"Unable to resolve module path for: ";
+                    detailsWide += moduleEntry.szModule;
+                    std::string detailsUtf8;
+                    const int required = WideCharToMultiByte(CP_UTF8, 0, detailsWide.c_str(),
+                        static_cast<int>(detailsWide.size()), nullptr, 0, nullptr, nullptr);
+                    if (required > 0) {
+                        detailsUtf8.resize(static_cast<size_t>(required));
+                        if (WideCharToMultiByte(CP_UTF8, 0, detailsWide.c_str(),
+                                static_cast<int>(detailsWide.size()), &detailsUtf8[0],
+                                required, nullptr, nullptr) == required) {
+                            ReportViolationAndExit(L"", "MODULE_PATH_UNAVAILABLE", detailsUtf8);
+                        }
+                    }
                     continue;
                 }
 
-                // Dapatkan path lengkap modul
-                WCHAR modulePath[MAX_PATH];
-                if (GetModuleFileNameExW(GetCurrentProcess(), me32.hModule, modulePath, MAX_PATH) == 0) {
-                    continue; // Skip jika tidak bisa dapatkan path
+                const std::wstring normalizedModulePath = NormalizePathForComparison(modulePath);
+
+                // System/Program Files folders are not trusted by name alone.
+                // Only allow modules from those roots when their Authenticode signature validates.
+                const bool isWindowsModule = haveWindowsDirectory &&
+                    IsWithinDirectory(normalizedModulePath, windowsDirectory);
+                const bool isProgramFilesModule =
+                    (haveProgramFiles && IsWithinDirectory(normalizedModulePath, programFiles)) ||
+                    (haveProgramFilesX86 && IsWithinDirectory(normalizedModulePath, programFilesX86));
+
+                if ((isWindowsModule || isProgramFilesModule) && VerifyFileSignature(modulePath)) {
+                    continue;
                 }
 
-                std::wstring modulePathStr(modulePath);
-                std::transform(modulePathStr.begin(), modulePathStr.end(), modulePathStr.begin(), ::towlower);
-
-                // Skip modul dari Windows system folders (System32, SysWOW64, Windows)
-                if (modulePathStr.find(L"\\windows\\system32\\") != std::wstring::npos ||
-                    modulePathStr.find(L"\\windows\\syswow64\\") != std::wstring::npos ||
-                    modulePathStr.find(L"\\windows\\") != std::wstring::npos) {
-                    continue; // Skip DLL Windows system
-                }
-
-                // Skip modul dari Program Files (aplikasi legitimate seperti antivirus)
-                if (modulePathStr.find(L"\\program files\\") != std::wstring::npos ||
-                    modulePathStr.find(L"\\program files (x86)\\") != std::wstring::npos) {
-                    continue; // Skip DLL dari Program Files
-                }
-
-                // Hanya periksa modul yang berasal dari folder game atau folder lain yang mencurigakan
-                // (seperti modul yang di-inject dari cheat engine, wpe, rpe, openkore)
-                std::wstring moduleName(me32.szModule);
-                if (!IsModuleTrusted(me32.hModule, moduleName)) {
-                    // Modul tidak tepercaya!
-                    std::wstring message = L"Modul tidak tepercaya (tidak ditandatangani atau penerbit tidak dikenal) terdeteksi: ";
-                    message += me32.szModule;
-                    message += L"\n\nPath: ";
+                std::wstring moduleName(moduleEntry.szModule);
+                if (!IsModuleTrusted(moduleEntry.hModule, moduleName)) {
+                    std::wstring message =
+                        L"Modul tidak tepercaya (tidak ditandatangani atau penerbit tidak dikenal) terdeteksi: ";
+                    message += moduleEntry.szModule;
+                    message += L"\\n\\nPath: ";
                     message += modulePath;
-                    message += L"\n\nClient akan ditutup.";
-                    
-                    // Build details untuk server report
-                    std::wstringstream detailsStream;
-                    detailsStream << L"Module: " << me32.szModule
-                                  << L" | Path: " << modulePath;
-                    
-                    std::wstring detailsWide = detailsStream.str();
-                    
-                    // Convert ke UTF-8 untuk server
-                    int size_needed = WideCharToMultiByte(CP_UTF8, 0, detailsWide.c_str(), (int)detailsWide.length(), NULL, 0, NULL, NULL);
-                    std::string details_utf8;
-                    if (size_needed > 0) {
-                        details_utf8.resize(size_needed);
-                        WideCharToMultiByte(CP_UTF8, 0, detailsWide.c_str(), (int)detailsWide.length(), &details_utf8[0], size_needed, NULL, NULL);
-                    }
-                    
-                    // Report ke server dan exit (ReportViolationAndExit akan mengirim laporan ke server sebelum ExitProcess)
-                    ReportViolationAndExit(message, "UNTRUSTED_MODULE", details_utf8);
-                }
+                    message += L"\\n\\nClient akan ditutup.";
 
-            } while (Module32NextW(hSnapshot, &me32));
+                    std::wstringstream detailsStream;
+                    detailsStream << L"Module: " << moduleEntry.szModule
+                                  << L" | Path: " << modulePath;
+                    const std::wstring detailsWide = detailsStream.str();
+
+                    std::string detailsUtf8;
+                    const int required = WideCharToMultiByte(CP_UTF8, 0, detailsWide.c_str(),
+                        static_cast<int>(detailsWide.size()), nullptr, 0, nullptr, nullptr);
+                    if (required > 0) {
+                        detailsUtf8.resize(static_cast<size_t>(required));
+                        if (WideCharToMultiByte(CP_UTF8, 0, detailsWide.c_str(),
+                                static_cast<int>(detailsWide.size()), &detailsUtf8[0],
+                                required, nullptr, nullptr) == required) {
+                            ReportViolationAndExit(message, "UNTRUSTED_MODULE", detailsUtf8);
+                        }
+                    }
+                }
+            } while (Module32NextW(snapshot, &moduleEntry));
         }
 
-        CloseHandle(hSnapshot);
+        CloseHandle(snapshot);
     }
 
     bool DigitalSignatureValidator::IsModuleTrusted(HMODULE hModule, std::wstring& moduleName) {
