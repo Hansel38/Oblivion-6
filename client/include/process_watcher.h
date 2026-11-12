@@ -5,6 +5,8 @@
 #include <atomic>
 #include <set>
 #include <memory>
+#include <condition_variable>
+#include <mutex>
 
 namespace Oblivion {
     // Forward declarations
@@ -31,6 +33,8 @@ namespace Oblivion {
 
         std::thread m_watcherThread;
         std::atomic<bool> m_isRunning;
+        std::mutex m_waitMutex;
+        std::condition_variable m_waitCondition;
 
         std::unique_ptr<AntiDebug> m_pAntiDebug;
         std::unique_ptr<InjectionScanner> m_pInjectionScanner;
