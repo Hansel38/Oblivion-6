@@ -4,6 +4,7 @@
 #include <thread>
 #include <atomic>
 #include <set>
+#include <memory>
 
 namespace Oblivion {
     // Forward declarations
@@ -31,14 +32,14 @@ namespace Oblivion {
         std::thread m_watcherThread;
         std::atomic<bool> m_isRunning;
 
-        AntiDebug* m_pAntiDebug;
-        InjectionScanner* m_pInjectionScanner;
-        AntiSuspend* m_pAntiSuspend;
-        OverlayScanner* m_pOverlayScanner;
-        MemoryScanner* m_pMemoryScanner;
-        DigitalSignatureValidator* m_pDigitalSignatureValidator;
-        IATHookScanner* m_pIATHookScanner;
-        AdvancedProcessHeuristics* m_pAdvancedHeuristics;
+        std::unique_ptr<AntiDebug> m_pAntiDebug;
+        std::unique_ptr<InjectionScanner> m_pInjectionScanner;
+        std::unique_ptr<AntiSuspend> m_pAntiSuspend;
+        std::unique_ptr<OverlayScanner> m_pOverlayScanner;
+        std::unique_ptr<MemoryScanner> m_pMemoryScanner;
+        std::unique_ptr<DigitalSignatureValidator> m_pDigitalSignatureValidator;
+        std::unique_ptr<IATHookScanner> m_pIATHookScanner;
+        std::unique_ptr<AdvancedProcessHeuristics> m_pAdvancedHeuristics;
         
         // Cache untuk menghindari log spam
         std::set<DWORD> m_scannedProcesses;
