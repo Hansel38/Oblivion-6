@@ -33,6 +33,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [x] **P1 — Scanner UTF-8 buffer overflow:** allocate space for the terminating NUL during `WideCharToMultiByte` in overlay and injection scanners.
 - [x] **P1 — Overlay window state:** refresh the game window rectangle and handle destroyed windows or failed Win32 window queries safely.
 - [x] **P1 — IAT PE bounds:** validate image headers, import descriptors, thunk tables, and import-name strings before dereferencing them.
+- [x] **P1 — IAT ordinal imports:** use the correct 32-bit or 64-bit ordinal flag for the active build architecture.
 - [x] **P1 — MemoryScanner PE parsing:** validate DOS/NT offsets, machine/optional-header type, full section-table bounds, section RVAs, and raw file ranges; reject truncated/duplicate sections.
 - [x] **P1 — MemoryScanner memory ranges:** validate complete readable executable-section spans across page regions instead of silently skipping inaccessible or partially queried sections.
 - [x] **P1 — Executable file reads:** reject failed/negative/oversized file lengths before allocation and use alignment-safe hash extraction.
