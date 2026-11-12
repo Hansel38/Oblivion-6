@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <atomic>
 #include <limits>
+#include <cerrno>
+#include <cstdlib>
 #include <mutex>
 #include <windows.h>
 #include "secret_obf.h"
@@ -570,7 +572,7 @@ ParsedReport ParseProtocol(const std::string& report) {
 }
 
 // Fungsi untuk menangani setiap client yang terhubung
-void HandleClient(SOCKET clientSocket) {
+void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbeatConfig) {
     const uint32_t activeBefore = g_activeClientCount.fetch_add(1, std::memory_order_relaxed);
     if (activeBefore >= kMaxConcurrentClients) {
         g_activeClientCount.fetch_sub(1, std::memory_order_relaxed);
@@ -659,7 +661,7 @@ void HandleClient(SOCKET clientSocket) {
                     std::cout << "[INFO] Untuk unban, hapus HWID dari bans.txt dan restart client." << std::endl;
                 } else {
                     // Negotiate the exact heartbeat timing used by this server session.
-                    Oblivion::HeartbeatConfig cfg;
+                    const Oblivion::HeartbeatConfig& cfg = sessionHeartbeatConfig;
                     uint64_t sessionNonce = 0;
                     if (!OblivionNet::GenerateSecureNonce(sessionNonce)) {
                         LogViolation("RNG_FAILURE", "Unable to generate secure session nonce", hwid);
@@ -982,18 +984,47 @@ int main() {
     std::cout << "[INFO] Menunggu koneksi dari client..." << std::endl;
     std::cout << "==================================================" << std::endl;
 
-    // Optional: read heartbeat config overrides from environment
-    auto readEnvUint = [](const char* name, uint32_t defVal){
-        char buf[64]; DWORD n = GetEnvironmentVariableA(name, buf, sizeof(buf));
-        if (n == 0 || n >= sizeof(buf)) return defVal; 
-        try { return (uint32_t)std::stoul(std::string(buf)); } catch (...) { return defVal; }
+    // Read heartbeat overrides using the same strict numeric parsing as the Linux server.
+    auto readEnvUint = [](const char* name, uint32_t defaultValue) {
+        char buffer[64] = {};
+        const DWORD length = GetEnvironmentVariableA(name, buffer, static_cast<DWORD>(sizeof(buffer)));
+        if (length == 0) return defaultValue;
+        if (length >= sizeof(buffer)) {
+            std::cerr << "[HB CFG] Invalid value for " << name
+                      << "; using default " << defaultValue << std::endl;
+            return defaultValue;
+        }
+
+        errno = 0;
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(buffer, &end, 10);
+        if (errno != 0 || end == buffer || *end != '\\0' ||
+            parsed > (std::numeric_limits<uint32_t>::max)()) {
+            std::cerr << "[HB CFG] Invalid value for " << name
+                      << "; using default " << defaultValue << std::endl;
+            return defaultValue;
+        }
+        return static_cast<uint32_t>(parsed);
     };
+
     Oblivion::HeartbeatConfig globalHbCfg;
     globalHbCfg.interval_ms = readEnvUint("OBLV_HB_INTERVAL_MS", globalHbCfg.interval_ms);
     globalHbCfg.jitter_ms = readEnvUint("OBLV_HB_JITTER_MS", globalHbCfg.jitter_ms);
     globalHbCfg.timeout_ms = readEnvUint("OBLV_HB_TIMEOUT_MS", globalHbCfg.timeout_ms);
     globalHbCfg.max_consecutive_miss = readEnvUint("OBLV_HB_MAX_MISS", globalHbCfg.max_consecutive_miss);
     globalHbCfg.rtt_warn_ms = readEnvUint("OBLV_HB_RTT_WARN_MS", globalHbCfg.rtt_warn_ms);
+
+    if (globalHbCfg.interval_ms < 100 || globalHbCfg.interval_ms > 60000 ||
+        globalHbCfg.jitter_ms > 10000 ||
+        globalHbCfg.timeout_ms < 250 || globalHbCfg.timeout_ms > 120000 ||
+        globalHbCfg.max_consecutive_miss < 1 || globalHbCfg.max_consecutive_miss > 10 ||
+        globalHbCfg.rtt_warn_ms > 60000) {
+        std::cerr << "[FATAL] Heartbeat configuration outside supported bounds." << std::endl;
+        closesocket(ListenSocket);
+        WSACleanup();
+        return 1;
+    }
+
     std::cout << "[HB CFG] interval=" << globalHbCfg.interval_ms << "ms jitter=" << globalHbCfg.jitter_ms
               << "ms timeout=" << globalHbCfg.timeout_ms << "ms maxMiss=" << globalHbCfg.max_consecutive_miss
               << " rttWarn=" << globalHbCfg.rtt_warn_ms << "ms" << std::endl;
@@ -1012,7 +1043,7 @@ int main() {
         // Buat thread baru untuk menangani client agar server bisa menerima client lain
         // Pass socket to handler; handler will use defaults; environment already logged
         try {
-            std::thread clientThread(HandleClient, ClientSocket);
+            std::thread clientThread(HandleClient, ClientSocket, globalHbCfg);
             clientThread.detach();
         } catch (const std::exception& e) {
             std::cerr << "[ERROR] Failed to start client handler thread: " << e.what() << std::endl;
