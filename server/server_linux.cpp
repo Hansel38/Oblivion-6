@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <ctime>
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <cstdlib>
 #include <cerrno>
@@ -66,6 +67,14 @@ static std::string SERVER_SECRET = OblivionServer::GetServerSecret();
 #define VIOLATION_LOG_FILE "violations.log"
 
 static std::mutex g_violationLogMutex;
+
+static std::atomic<uint32_t> g_activeClientCount{ 0 };
+static constexpr uint32_t kMaxConcurrentClients = 256;
+
+struct ActiveClientGuard {
+    std::atomic<uint32_t>& counter;
+    ~ActiveClientGuard() { counter.fetch_sub(1, std::memory_order_relaxed); }
+};
 
 static Oblivion::HeartbeatConfig GLOBAL_HB_CONFIG;
 
@@ -650,6 +659,15 @@ ParsedReport ParseProtocol(const std::string& report) {
 }
 
 void HandleClient(SocketType clientSocket) {
+    const uint32_t activeBefore = g_activeClientCount.fetch_add(1, std::memory_order_relaxed);
+    if (activeBefore >= kMaxConcurrentClients) {
+        g_activeClientCount.fetch_sub(1, std::memory_order_relaxed);
+        const char* busyResponse = "BUSY;";
+        OblivionNet::SendAll(clientSocket, busyResponse, strlen(busyResponse));
+        closesocket_impl(clientSocket);
+        return;
+    }
+    ActiveClientGuard activeGuard{ g_activeClientCount };
     std::string extractedHwid = "UNKNOWN";
     std::string pendingNetworkData;
     std::string report;
@@ -1051,8 +1069,13 @@ int main() {
 
         std::cout << "\n[CONNECTION] New client connected" << std::endl;
         
-        std::thread clientThread(HandleClient, ClientSocket);
-        clientThread.detach();
+        try {
+            std::thread clientThread(HandleClient, ClientSocket);
+            clientThread.detach();
+        } catch (const std::exception& e) {
+            std::cerr << "[ERROR] Failed to start client handler thread: " << e.what() << std::endl;
+            closesocket_impl(ClientSocket);
+        }
     }
 
     closesocket_impl(ListenSocket);
