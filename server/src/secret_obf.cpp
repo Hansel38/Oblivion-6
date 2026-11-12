@@ -86,7 +86,8 @@ namespace OblivionServer {
         }
 #endif
 
-        // 3) Fallback development value jika tidak ada konfigurasi
+        // Release builds must fail closed when no production secret is configured.
+#if defined(_DEBUG)
         const char* devDefault = "DEV_SECRET_NOT_SET";
         size_t len = strlen(devDefault);
         std::vector<unsigned char> encoded(len);
@@ -102,5 +103,8 @@ namespace OblivionServer {
 
         cached = secret;
         return cached;
+#else
+        return {};
+#endif
     }
 }
