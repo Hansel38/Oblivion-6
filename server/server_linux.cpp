@@ -22,6 +22,7 @@
 #include <sys/time.h>
 #include <limits.h>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <openssl/hmac.h>
 #include <openssl/sha.h>
@@ -63,6 +64,8 @@
 static std::string SERVER_SECRET = OblivionServer::GetServerSecret();
 #define BAN_LIST_FILE "bans.txt"
 #define VIOLATION_LOG_FILE "violations.log"
+
+static std::mutex g_violationLogMutex;
 
 static Oblivion::HeartbeatConfig GLOBAL_HB_CONFIG;
 
@@ -439,6 +442,7 @@ std::string ExtractDetectedFile(const std::string& type, const std::string& deta
 }
 
 void LogViolation(const std::string& type, const std::string& details, const std::string& hwid) {
+    std::lock_guard<std::mutex> lock(g_violationLogMutex);
     std::string logFilePath = GetFilePath(VIOLATION_LOG_FILE);
     std::ofstream logFile(logFilePath, std::ios::app);
     if (logFile.is_open()) {
