@@ -21,6 +21,8 @@
 #include <sys/select.h>
 #include <sys/time.h>
 #include <limits.h>
+#include <limits>
+#include <stdexcept>
 #include <openssl/hmac.h>
 #include <openssl/sha.h>
 #include <openssl/evp.h>
@@ -706,7 +708,7 @@ void HandleClient(SocketType clientSocket) {
                 
                 if (isBanned) {
                     const char* kickCommand = "KICK;";
-                    send(clientSocket, kickCommand, strlen(kickCommand), 0);
+                    OblivionNet::SendAll(clientSocket, kickCommand, strlen(kickCommand));
                     std::cout << "[BAN] HWID [" << hwid << "] terdeteksi di ban list. Perintah KICK dikirim." << std::endl;
                     std::cout << "[INFO] Untuk unban, hapus HWID dari bans.txt dan restart client." << std::endl;
                 } else {
@@ -989,7 +991,7 @@ int main() {
         errno = 0;
         char* end = nullptr;
         const unsigned long long parsed = std::strtoull(envValue, &end, 10);
-        if (errno != 0 || end == envValue || *end != '\\0' ||
+        if (errno != 0 || end == envValue || *end != 0 ||
             parsed > (std::numeric_limits<uint32_t>::max)()) {
             std::cerr << "[HB CFG] Invalid value for " << name << "; using default "
                       << defaultValue << std::endl;
