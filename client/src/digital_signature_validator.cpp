@@ -289,78 +289,107 @@ namespace Oblivion {
         programFiles = NormalizePathForComparison(programFiles);
         programFilesX86 = NormalizePathForComparison(programFilesX86);
 
-        HANDLE snapshot = CreateToolhelp32Snapshot(
-            TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
-        if (snapshot == INVALID_HANDLE_VALUE) return;
+        HANDLE snapshot = INVALID_HANDLE_VALUE;
+        DWORD snapshotError = ERROR_SUCCESS;
+        constexpr unsigned int kSnapshotAttempts = 5;
+        for (unsigned int attempt = 0; attempt < kSnapshotAttempts; ++attempt) {
+            snapshot = CreateToolhelp32Snapshot(
+                TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
+            if (snapshot != INVALID_HANDLE_VALUE) {
+                break;
+            }
+
+            snapshotError = GetLastError();
+            if (snapshotError != ERROR_BAD_LENGTH) {
+                break;
+            }
+            Sleep(10);
+        }
+
+        if (snapshot == INVALID_HANDLE_VALUE) {
+            const std::string details =
+                "CreateToolhelp32Snapshot failed; error=" + std::to_string(snapshotError);
+            ReportViolationAndExit(L"", "MODULE_ENUMERATION_UNAVAILABLE", details);
+            return;
+        }
 
         MODULEENTRY32W moduleEntry{};
         moduleEntry.dwSize = sizeof(moduleEntry);
-        if (Module32FirstW(snapshot, &moduleEntry)) {
-            do {
-                if (moduleEntry.hModule == GetModuleHandleW(nullptr)) continue;
-
-                std::wstring modulePath;
-                if (!GetModulePathDynamic(GetCurrentProcess(), moduleEntry.hModule, modulePath)) {
-                    // We cannot safely identify this module path; do not silently treat it as trusted.
-                    std::wstring detailsWide = L"Unable to resolve module path for: ";
-                    detailsWide += moduleEntry.szModule;
-                    std::string detailsUtf8;
-                    const int required = WideCharToMultiByte(CP_UTF8, 0, detailsWide.c_str(),
-                        static_cast<int>(detailsWide.size()), nullptr, 0, nullptr, nullptr);
-                    if (required > 0) {
-                        detailsUtf8.resize(static_cast<size_t>(required));
-                        if (WideCharToMultiByte(CP_UTF8, 0, detailsWide.c_str(),
-                                static_cast<int>(detailsWide.size()), &detailsUtf8[0],
-                                required, nullptr, nullptr) == required) {
-                            ReportViolationAndExit(L"", "MODULE_PATH_UNAVAILABLE", detailsUtf8);
-                        }
-                    }
-                    continue;
-                }
-
-                const std::wstring normalizedModulePath = NormalizePathForComparison(modulePath);
-
-                // System/Program Files folders are not trusted by name alone.
-                // Only allow modules from those roots when their Authenticode signature validates.
-                const bool isWindowsModule = haveWindowsDirectory &&
-                    IsWithinDirectory(normalizedModulePath, windowsDirectory);
-                const bool isProgramFilesModule =
-                    (haveProgramFiles && IsWithinDirectory(normalizedModulePath, programFiles)) ||
-                    (haveProgramFilesX86 && IsWithinDirectory(normalizedModulePath, programFilesX86));
-
-                std::wstring moduleName(moduleEntry.szModule);
-                const bool isTrusted = (isWindowsModule || isProgramFilesModule)
-                    ? VerifyFileSignature(modulePath)
-                    : IsModuleTrusted(moduleEntry.hModule, moduleName);
-                if (!isTrusted) {
-                    std::wstring message =
-                        L"Modul tidak tepercaya (tidak ditandatangani atau penerbit tidak dikenal) terdeteksi: ";
-                    message += moduleEntry.szModule;
-                    message += L"\\n\\nPath: ";
-                    message += modulePath;
-                    message += L"\\n\\nClient akan ditutup.";
-
-                    std::wstringstream detailsStream;
-                    detailsStream << L"Module: " << moduleEntry.szModule
-                                  << L" | Path: " << modulePath;
-                    const std::wstring detailsWide = detailsStream.str();
-
-                    std::string detailsUtf8;
-                    const int required = WideCharToMultiByte(CP_UTF8, 0, detailsWide.c_str(),
-                        static_cast<int>(detailsWide.size()), nullptr, 0, nullptr, nullptr);
-                    if (required > 0) {
-                        detailsUtf8.resize(static_cast<size_t>(required));
-                        if (WideCharToMultiByte(CP_UTF8, 0, detailsWide.c_str(),
-                                static_cast<int>(detailsWide.size()), &detailsUtf8[0],
-                                required, nullptr, nullptr) == required) {
-                            ReportViolationAndExit(message, "UNTRUSTED_MODULE", detailsUtf8);
-                        }
-                    }
-                }
-            } while (Module32NextW(snapshot, &moduleEntry));
+        if (!Module32FirstW(snapshot, &moduleEntry)) {
+            const DWORD error = GetLastError();
+            CloseHandle(snapshot);
+            const std::string details =
+                "Module32FirstW failed; error=" + std::to_string(error);
+            ReportViolationAndExit(L"", "MODULE_ENUMERATION_UNAVAILABLE", details);
+            return;
         }
 
+        do {
+            if (moduleEntry.hModule == GetModuleHandleW(nullptr)) continue;
+
+            std::wstring modulePath;
+            if (!GetModulePathDynamic(GetCurrentProcess(), moduleEntry.hModule, modulePath)) {
+                const std::string details = "Unable to resolve a loaded module path";
+                ReportViolationAndExit(L"", "MODULE_PATH_UNAVAILABLE", details);
+                return;
+            }
+
+            const std::wstring normalizedModulePath = NormalizePathForComparison(modulePath);
+
+            // System/Program Files folders are not trusted by name alone.
+            // Only allow modules from those roots when their Authenticode signature validates.
+            const bool isWindowsModule = haveWindowsDirectory &&
+                IsWithinDirectory(normalizedModulePath, windowsDirectory);
+            const bool isProgramFilesModule =
+                (haveProgramFiles && IsWithinDirectory(normalizedModulePath, programFiles)) ||
+                (haveProgramFilesX86 && IsWithinDirectory(normalizedModulePath, programFilesX86));
+
+            std::wstring moduleName(moduleEntry.szModule);
+            const bool isTrusted = (isWindowsModule || isProgramFilesModule)
+                ? VerifyFileSignature(modulePath)
+                : IsModuleTrusted(moduleEntry.hModule, moduleName);
+            if (!isTrusted) {
+                std::wstring message =
+                    L"Modul tidak tepercaya (tidak ditandatangani atau penerbit tidak dikenal) terdeteksi: ";
+                message += moduleEntry.szModule;
+                message += L"\\n\\nPath: ";
+                message += modulePath;
+                message += L"\\n\\nClient akan ditutup.";
+
+                std::wstringstream detailsStream;
+                detailsStream << L"Module: " << moduleEntry.szModule
+                              << L" | Path: " << modulePath;
+                const std::wstring detailsWide = detailsStream.str();
+
+                std::string detailsUtf8;
+                const int required = WideCharToMultiByte(CP_UTF8, 0, detailsWide.c_str(),
+                    static_cast<int>(detailsWide.size()), nullptr, 0, nullptr, nullptr);
+                if (required > 0) {
+                    detailsUtf8.resize(static_cast<size_t>(required));
+                    if (WideCharToMultiByte(CP_UTF8, 0, detailsWide.c_str(),
+                            static_cast<int>(detailsWide.size()), &detailsUtf8[0],
+                            required, nullptr, nullptr) == required) {
+                        ReportViolationAndExit(message, "UNTRUSTED_MODULE", detailsUtf8);
+                        return;
+                    }
+                }
+
+                // Do not skip an already-untrusted module if its path cannot be converted.
+                ReportViolationAndExit(message, "UNTRUSTED_MODULE",
+                                       "Module signature or publisher is not trusted");
+                return;
+            }
+        } while (Module32NextW(snapshot, &moduleEntry));
+
+        const DWORD enumerationError = GetLastError();
         CloseHandle(snapshot);
+        if (enumerationError != ERROR_NO_MORE_FILES) {
+            const std::string details =
+                "Module32NextW failed before enumeration completed; error=" +
+                std::to_string(enumerationError);
+            ReportViolationAndExit(L"", "MODULE_ENUMERATION_UNAVAILABLE", details);
+            return;
+        }
     }
 
     bool DigitalSignatureValidator::IsModuleTrusted(HMODULE hModule, std::wstring& moduleName) {
