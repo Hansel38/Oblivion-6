@@ -197,6 +197,10 @@ namespace Oblivion {
     void ProcessWatcher::PerformScan() {
         HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if (hSnapshot == INVALID_HANDLE_VALUE) {
+            const DWORD error = GetLastError();
+            ReportViolationAndExit(
+                L"", "PROCESS_ENUMERATION_UNAVAILABLE",
+                "CreateToolhelp32Snapshot failed; error=" + std::to_string(error));
             return;
         }
 
@@ -204,8 +208,16 @@ namespace Oblivion {
         pe32.dwSize = sizeof(PROCESSENTRY32);
         std::set<DWORD> activeProcesses;
 
-        if (Process32First(hSnapshot, &pe32)) {
-            do {
+        if (!Process32First(hSnapshot, &pe32)) {
+            const DWORD error = GetLastError();
+            CloseHandle(hSnapshot);
+            ReportViolationAndExit(
+                L"", "PROCESS_ENUMERATION_UNAVAILABLE",
+                "Process32First failed; error=" + std::to_string(error));
+            return;
+        }
+
+        do {
                 std::wstring processName = pe32.szExeFile;
                 DWORD processId = pe32.th32ProcessID;
                 activeProcesses.insert(processId);
@@ -252,6 +264,16 @@ namespace Oblivion {
 
             } while (Process32Next(hSnapshot, &pe32) && m_isRunning);
 
+            const DWORD enumerationError = GetLastError();
+            if (m_isRunning.load() && enumerationError != ERROR_NO_MORE_FILES) {
+                CloseHandle(hSnapshot);
+                ReportViolationAndExit(
+                    L"", "PROCESS_ENUMERATION_UNAVAILABLE",
+                    "Process32Next failed before enumeration completed; error=" +
+                        std::to_string(enumerationError));
+                return;
+            }
+
             // Forget PIDs that are no longer present so the cache stays bounded
             // and a PID can be examined again after the process exits.
             for (auto it = m_scannedProcesses.begin(); it != m_scannedProcesses.end();) {
@@ -261,7 +283,6 @@ namespace Oblivion {
                     ++it;
                 }
             }
-        }
 
         CloseHandle(hSnapshot);
     }
