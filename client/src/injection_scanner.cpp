@@ -17,7 +17,7 @@ namespace {
         if (required <= 0) return {};
 
         // Allocate the terminator too; remove it only after conversion succeeds.
-        std::string converted(static_cast<size_t>(required), '\\0');
+        std::string converted(static_cast<size_t>(required), '\0');
         const int written = WideCharToMultiByte(CP_UTF8, 0, value, -1,
                                                 &converted[0], required, nullptr, nullptr);
         if (written != required) return {};
