@@ -71,6 +71,7 @@ namespace Oblivion {
         bool expected = false;
         if (!m_isRunning.compare_exchange_strong(expected, true)) return;
 
+        m_scannedProcesses.clear();
         std::cout << "[ProcessWatcher] Starting monitoring system..." << std::endl;
         try {
             m_pAntiSuspend->Start();
