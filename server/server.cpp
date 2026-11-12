@@ -97,9 +97,13 @@ bool IsHWIDBanned(const std::string& hwid) {
     
     std::string line;
     while (std::getline(banFile, line)) {
-        // Hapus whitespace dari awal dan akhir
-        line.erase(0, line.find_first_not_of(" \t\n\r"));
-        line.erase(line.find_last_not_of(" \t\n\r") + 1);
+        // Skip empty/whitespace-only lines before trimming to avoid npos arithmetic.
+        const size_t firstNonWhitespace = line.find_first_not_of(" \t\n\r");
+        if (firstNonWhitespace == std::string::npos) {
+            continue;
+        }
+        const size_t lastNonWhitespace = line.find_last_not_of(" \t\n\r");
+        line = line.substr(firstNonWhitespace, lastNonWhitespace - firstNonWhitespace + 1);
         
         // Jika line kosong atau komentar (dimulai dengan #), skip
         if (line.empty() || line[0] == '#') {
