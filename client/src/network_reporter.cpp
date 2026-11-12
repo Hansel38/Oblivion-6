@@ -162,6 +162,16 @@ namespace Oblivion {
             ExitProcess(1);
             return false;
         }
+        // Server sends "OK;" followed by "SESSION_NONCE:...;" on the same TCP stream.
+        if (response == "OK;") {
+            std::string nonceFrame;
+            if (!ReceiveFrame(connectSocket, m_pendingNetworkData, nonceFrame, 3000, 512)) {
+                closesocket(connectSocket);
+                ExitProcess(1);
+                return false;
+            }
+            response += nonceFrame;
+        }
 
         if (response == "KICK;") {
             closesocket(connectSocket);
