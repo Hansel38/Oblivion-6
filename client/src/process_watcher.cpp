@@ -17,6 +17,7 @@
 #include <sstream>
 #include <iomanip>
 #include <ctime>
+#include <stdexcept>
 
 // Forward declaration
 extern void ReportViolationAndExit(const std::wstring& message, const std::string& type, const std::string& details);
@@ -194,13 +195,15 @@ namespace Oblivion {
             return;
         }
 
-        PROCESSENTRY32 pe32;
+        PROCESSENTRY32 pe32{};
         pe32.dwSize = sizeof(PROCESSENTRY32);
+        std::set<DWORD> activeProcesses;
 
         if (Process32First(hSnapshot, &pe32)) {
             do {
                 std::wstring processName = pe32.szExeFile;
                 DWORD processId = pe32.th32ProcessID;
+                activeProcesses.insert(processId);
 
                 // Deteksi blacklist
                 if (IsProcessBlacklisted(processName)) {
@@ -243,6 +246,16 @@ namespace Oblivion {
                 }
 
             } while (Process32Next(hSnapshot, &pe32) && m_isRunning);
+
+            // Forget PIDs that are no longer present so the cache stays bounded
+            // and a PID can be examined again after the process exits.
+            for (auto it = m_scannedProcesses.begin(); it != m_scannedProcesses.end();) {
+                if (activeProcesses.find(*it) == activeProcesses.end()) {
+                    it = m_scannedProcesses.erase(it);
+                } else {
+                    ++it;
+                }
+            }
         }
 
         CloseHandle(hSnapshot);
