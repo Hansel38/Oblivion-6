@@ -79,7 +79,7 @@ struct ActiveClientGuard {
 static Oblivion::HeartbeatConfig GLOBAL_HB_CONFIG;
 
 bool ConstantTimeEquals(const std::string& left, const std::string& right) {
-    if (left.size() != right.size()) return false;
+    if (left.size() != 64 || right.size() != 64) return false;
     unsigned char difference = 0;
     for (size_t i = 0; i < left.size(); ++i) {
         difference |= static_cast<unsigned char>(left[i] ^ right[i]);
@@ -719,7 +719,7 @@ void HandleClient(SocketType clientSocket) {
             
             std::cout << "[PARSE] TYPE: " << type << " | HWID: " << hwid << " | DETAILS_LEN: " << details.length() << std::endl;
 
-            if (secret != SERVER_SECRET) {
+            if (!ConstantTimeEquals(secret, SERVER_SECRET)) {
                 std::cout << "[AUTH] Secret key tidak valid dari HWID [" << hwid << "]" << std::endl;
                 // Never write authentication secrets to logs.
 
@@ -764,6 +764,11 @@ void HandleClient(SocketType clientSocket) {
                     enum class HbState { Healthy, Warning, Flagged } state = HbState::Healthy;
 
                     std::string sessionKey = hmacSha256(SERVER_SECRET, hwid + ":" + std::to_string(sessionNonce));
+                    if (sessionKey.size() != 64) {
+                        LogViolation("HB_CRYPTO_FAILURE", "Unable to derive heartbeat session key", hwid);
+                        closesocket_impl(clientSocket);
+                        return;
+                    }
                     
                     std::cout << "[HEARTBEAT] Started for HWID [" << hwid << "]" << std::endl;
 
