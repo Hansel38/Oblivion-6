@@ -4,6 +4,7 @@
 #include <thread>
 #include <atomic>
 #include <set>
+#include <map>
 #include <memory>
 #include <condition_variable>
 #include <mutex>
@@ -46,6 +47,6 @@ namespace Oblivion {
         std::unique_ptr<AdvancedProcessHeuristics> m_pAdvancedHeuristics;
         
         // Cache untuk menghindari log spam
-        std::set<DWORD> m_scannedProcesses;
+        std::map<DWORD, ULONGLONG> m_scannedProcesses;
     };
 }
