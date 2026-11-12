@@ -530,7 +530,8 @@ std::string SanitizeInput(const std::string& input, size_t maxLen) {
     
     for (size_t i = 0; i < input.length() && sanitized.length() < maxLen; i++) {
         char c = input[i];
-        if ((c >= 0x20 && c <= 0x7E) || c == '\n' || c == '\r' || c == '\t') {
+        // Strip CR/LF/TAB so untrusted reports cannot forge log lines.
+        if (c >= 0x20 && c <= 0x7E) {
             if (c != '<' && c != '>' && c != '&' && c != '"' && c != '\'') {
                 sanitized += c;
             }
@@ -702,8 +703,8 @@ void HandleClient(SocketType clientSocket) {
                 std::cout << "[ERROR] Invalid protocol format: " << parsed.errorMessage << std::endl;
                 std::cout << "[DEBUG] Expected format: TYPE:DETAILS:HWID:SECRET;" << std::endl;
                 
-                std::string truncatedReport = report.length() > 100 ? report.substr(0, 100) + "..." : report;
-                LogViolation("MALFORMED_REQUEST", parsed.errorMessage + " | Data: " + truncatedReport, extractedHwid);
+                // Never log raw untrusted protocol bytes; they may contain control characters.
+                LogViolation("MALFORMED_REQUEST", parsed.errorMessage, extractedHwid);
                 
                 const char* errorResponse = "ERROR:INVALID_FORMAT;";
                 OblivionNet::SendAll(clientSocket, errorResponse, strlen(errorResponse));
