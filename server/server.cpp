@@ -684,7 +684,11 @@ void HandleClient(SOCKET clientSocket) {
                         BCRYPT_ALG_HANDLE hAlg = NULL; BCRYPT_HASH_HANDLE hHash = NULL;
                         NTSTATUS st = BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA256_ALGORITHM, NULL, BCRYPT_ALG_HANDLE_HMAC);
                         if (st != 0) return std::string(); DWORD objLen=0, dlen=0;
-                        (void)BCryptGetProperty(hAlg, BCRYPT_OBJECT_LENGTH, (PUCHAR)&objLen, sizeof(DWORD), &dlen, 0);
+                        st = BCryptGetProperty(hAlg, BCRYPT_OBJECT_LENGTH, (PUCHAR)&objLen, sizeof(DWORD), &dlen, 0);
+                        if (st != 0 || objLen == 0) {
+                            BCryptCloseAlgorithmProvider(hAlg, 0);
+                            return std::string();
+                        }
                         std::vector<UCHAR> obj(objLen);
                         st = BCryptCreateHash(hAlg, &hHash, obj.data(), objLen, (PUCHAR)key.data(), (ULONG)key.size(), 0);
                         if (st != 0) { BCryptCloseAlgorithmProvider(hAlg,0); return std::string(); }
