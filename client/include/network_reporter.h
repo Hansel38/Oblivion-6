@@ -1,6 +1,8 @@
 #pragma once
 
+#include <atomic>
 #include <string>
+#include <thread>
 #include <winsock2.h>
 
 namespace Oblivion {
@@ -27,8 +29,11 @@ namespace Oblivion {
         std::string m_secretKey; // Secret sederhana untuk autentikasi dasar
 
         // Internal heartbeat state
-        volatile bool m_hbRunning = false;
+        std::atomic<bool> m_hbRunning{ false };
+        std::thread m_hbThread;
+        std::string m_pendingNetworkData; // Buffer untuk byte TCP yang belum membentuk frame
         SOCKET m_hbSocket = INVALID_SOCKET; // Socket untuk heartbeat
         uint64_t m_sessionNonce = 0; // Session nonce dari server
+        bool m_winsockInitialized = false;
     };
 }
