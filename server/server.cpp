@@ -12,6 +12,7 @@
 #include <windows.h>
 #include "secret_obf.h"
 #include "include/heartbeat_protocol.h"
+#include "include/socket_framing.h"
 #include <bcrypt.h>
 
 #pragma comment(lib, "Ws2_32.lib")
@@ -541,17 +542,26 @@ ParsedReport ParseProtocol(const std::string& report) {
 
 // Fungsi untuk menangani setiap client yang terhubung
 void HandleClient(SOCKET clientSocket) {
-    char buffer[BUFFER_LEN] = {0};
-    int bytesReceived;
+    int bytesReceived = 0;
     std::string extractedHwid = "UNKNOWN"; // Untuk logging jika parsing gagal
+    std::string pendingNetworkData;
+    std::string report;
 
     try {
-        bytesReceived = recv(clientSocket, buffer, BUFFER_LEN - 1, 0);
+        if (!OblivionNet::ReceiveFrame(clientSocket, pendingNetworkData,
+                                       report, 5000, BUFFER_LEN - 1)) {
+            LogViolation("FRAME_READ_FAILED", "Timed out or received an oversized/incomplete request", extractedHwid);
+            closesocket(clientSocket);
+            return;
+        }
+        // A client may send only one request frame before the server replies.
+        if (!pendingNetworkData.empty()) {
+            LogViolation("MALFORMED_REQUEST", "Unexpected bytes after initial request frame", extractedHwid);
+            closesocket(clientSocket);
+            return;
+        }
+        bytesReceived = static_cast<int>(report.size());
         if (bytesReceived > 0) {
-            // Null-terminate untuk keamanan
-            buffer[bytesReceived] = '\0';
-            
-            std::string report(buffer, bytesReceived);
             
             // Extract HWID untuk logging (best effort, sebelum parsing)
             extractedHwid = ExtractHWIDFromRawData(report);
@@ -571,7 +581,7 @@ void HandleClient(SOCKET clientSocket) {
                 
                 // Kirim error response dan tutup koneksi
                 const char* errorResponse = "ERROR:INVALID_FORMAT;";
-                send(clientSocket, errorResponse, (int)strlen(errorResponse), 0);
+                OblivionNet::SendAll(clientSocket, errorResponse, strlen(errorResponse));
                 closesocket(clientSocket);
                 return;
             }
@@ -593,7 +603,7 @@ void HandleClient(SOCKET clientSocket) {
 
                 // Kirim KICK saja; keputusan ban tetap manual via bans.txt
                 const char* kickCommand = "KICK;";
-                send(clientSocket, kickCommand, (int)strlen(kickCommand), 0);
+                OblivionNet::SendAll(clientSocket, kickCommand, strlen(kickCommand));
                 std::cout << "[INFO] KICK dikirim (secret invalid). Review manual untuk ban jika diperlukan." << std::endl;
             }
             else if (type == "CHECKIN") {
@@ -614,7 +624,7 @@ void HandleClient(SOCKET clientSocket) {
                     // HWID tidak di-ban, kirim OK dan session nonce dalam satu pesan
                     uint64_t sessionNonce = ((uint64_t)rand() << 32) ^ (uint64_t)rand();
                     std::string response = "OK;SESSION_NONCE:" + std::to_string(sessionNonce) + ";";
-                    send(clientSocket, response.c_str(), (int)response.length(), 0);
+                    OblivionNet::SendAll(clientSocket, response.data(), response.size());
                     std::cout << "[OK] HWID [" << hwid << "] diizinkan. Memulai heartbeat ping." << std::endl;
 
                     // Basic ping scheduler over the same socket (line-based)
@@ -654,106 +664,103 @@ void HandleClient(SOCKET clientSocket) {
                         // naive nonce
                         uint64_t ping_nonce = ((uint64_t)rand() << 32) ^ (uint64_t)rand();
                         std::string ping = "PING:" + std::to_string(seq) + ":" + std::to_string(ping_ts) + ":" + std::to_string(ping_nonce) + ";";
-                        int sres = send(clientSocket, ping.c_str(), (int)ping.length(), 0);
-                        if (sres <= 0) { 
+                        const bool pingSent = OblivionNet::SendAll(clientSocket, ping.data(), ping.size());
+                        if (!pingSent) { 
                             std::cout << "[HEARTBEAT] Connection closed for HWID [" << hwid << "] - send failed" << std::endl; 
                             break; 
                         }
 
-                        // Wait for PONG with timeout
-                        fd_set fdset; FD_ZERO(&fdset); FD_SET(clientSocket, &fdset);
-                        timeval tv; tv.tv_sec = (cfg.timeout_ms/1000); tv.tv_usec = (cfg.timeout_ms%1000)*1000;
-                        int sel = select(0, &fdset, NULL, NULL, &tv);
-                        if (sel > 0) {
-                            char rbuf[512] = {0};
-                            int rcv = recv(clientSocket, rbuf, sizeof(rbuf)-1, 0);
-                            if (rcv > 0) {
-                                std::string resp(rbuf, rcv);
-                                // trim to semicolon
-                                size_t sc = resp.find(';'); if (sc != std::string::npos) resp = resp.substr(0, sc);
-                                if (resp.rfind("PONG:", 0) == 0) {
-                                    // Parse: PONG:seq:ts_client:nonce:status:hwid:hmac
-                                    // Find all colons
-                                    std::vector<size_t> col;
-                                    size_t pos = 0;
-                                    while ((pos = resp.find(':', pos)) != std::string::npos) {
-                                        col.push_back(pos);
-                                        pos++; // Move past this colon
-                                    }
-                                    if (col.size() >= 6) {
-                                        try {
-                                            // col[0] = after "PONG"
-                                            // col[1] = after seq
-                                            // col[2] = after ts_client
-                                            // col[3] = after nonce
-                                            // col[4] = after status
-                                            // col[5] = after hwid
-                                            uint32_t pseq = std::stoul(resp.substr(col[0]+1, col[1]-col[0]-1));
-                                            uint64_t tclient = std::stoull(resp.substr(col[1]+1, col[2]-col[1]-1));
-                                            uint64_t pnonce = std::stoull(resp.substr(col[2]+1, col[3]-col[2]-1));
-                                            std::string status = resp.substr(col[3]+1, col[4]-col[3]-1);
-                                            std::string phwid = resp.substr(col[4]+1, col[5]-col[4]-1);
-                                            std::string hmac = resp.substr(col[5]+1);
+                        std::string pongFrame;
+                        if (OblivionNet::ReceiveFrame(clientSocket, pendingNetworkData,
+                                                      pongFrame, cfg.timeout_ms, 512)) {
+                            if (pongFrame.rfind("PONG:", 0) == 0 && pongFrame.back() == ';') {
+                                const std::string resp = pongFrame.substr(0, pongFrame.size() - 1);
+                                std::vector<size_t> col;
+                                size_t pos = 0;
+                                while ((pos = resp.find(':', pos)) != std::string::npos) {
+                                    col.push_back(pos);
+                                    ++pos;
+                                }
 
-                                            // Verify seq/nonce
-                                            if (pseq != seq || pnonce != ping_nonce) {
-                                                std::cout << "[HB] seq/nonce mismatch - Expected seq=" << seq << " nonce=" << ping_nonce 
-                                                          << " | Got seq=" << pseq << " nonce=" << pnonce << std::endl;
-                                                consecutiveMiss++;
-                                                totalMisses++;
+                                if (col.size() == 6) {
+                                    try {
+                                        size_t parsedSeq = 0, parsedClientTs = 0, parsedNonce = 0;
+                                        const unsigned long seqValue = std::stoul(
+                                            resp.substr(col[0] + 1, col[1] - col[0] - 1), &parsedSeq);
+                                        const std::string seqText = resp.substr(col[0] + 1, col[1] - col[0] - 1);
+                                        const std::string clientTsText = resp.substr(col[1] + 1, col[2] - col[1] - 1);
+                                        const std::string nonceText = resp.substr(col[2] + 1, col[3] - col[2] - 1);
+                                        const uint64_t pnonce = std::stoull(nonceText, &parsedNonce);
+                                        const uint64_t tclient = std::stoull(clientTsText, &parsedClientTs);
+                                        (void)tclient;
+                                        if (parsedSeq != seqText.size() ||
+                                            parsedClientTs != clientTsText.size() ||
+                                            parsedNonce != nonceText.size() ||
+                                            seqValue > (std::numeric_limits<uint32_t>::max)()) {
+                                            throw std::invalid_argument("invalid numeric field");
+                                        }
+
+                                        const uint32_t pseq = static_cast<uint32_t>(seqValue);
+                                        const std::string status = resp.substr(col[3] + 1, col[4] - col[3] - 1);
+                                        const std::string phwid = resp.substr(col[4] + 1, col[5] - col[4] - 1);
+                                        const std::string hmac = resp.substr(col[5] + 1);
+
+                                        if (pseq != seq || pnonce != ping_nonce || phwid != hwid ||
+                                            (status != "1|1" && status != "0|1" &&
+                                             status != "1|0" && status != "0|0")) {
+                                            ++consecutiveMiss;
+                                            ++totalMisses;
+                                        } else {
+                                            const std::string data = std::to_string(pseq) + ":" +
+                                                std::to_string(ping_ts) + ":" +
+                                                std::to_string(pnonce) + ":" + phwid;
+                                            const std::string expect = hmacSha256(sessionKey, data);
+                                            if (expect.size() != hmac.size() || expect != hmac) {
+                                                ++consecutiveMiss;
+                                                ++totalMisses;
                                             } else {
-                                                // Verify HMAC
-                                                std::string data = std::to_string(pseq) + ":" + std::to_string(ping_ts) + ":" + std::to_string(pnonce) + ":" + phwid;
-                                                std::string expect = hmacSha256(sessionKey, data);
-                                                if (expect != hmac) {
-                                                    std::cout << "[HB] hmac mismatch" << std::endl;
-                                                    consecutiveMiss++;
-                                                    totalMisses++;
-                                                } else {
-                                                    // RTT estimate
-                                                    uint64_t rtt = (uint64_t)GetTickCount64() - ping_ts;
-                                                    rttSum += rtt; rttCount++;
-                                                    rttSumCumulative += rtt; rttCountCumulative++;
-                                                    consecutiveMiss = 0;
-                                                    // State transitions based on RTT average over last N (5) samples
-                                                    if (rttCount >= 5) {
-                                                        uint64_t avg = rttSum / rttCount;
-                                                        if (avg > cfg.rtt_warn_ms) {
-                                                            if (state == HbState::Healthy) {
-                                                                state = HbState::Warning;
-                                                                std::cout << "[HB] state->WARNING (avg RTT=" << avg << ")" << std::endl;
-                                                                double avgCumSnap = rttCountCumulative ? (double)rttSumCumulative / (double)rttCountCumulative : 0.0;
-                                                                LogViolation("HB_WARNING", std::string("High average RTT ") + std::to_string(avg) +
-                                                                    "ms | avgCum=" + std::to_string((int)avgCumSnap) + "ms | missesTotal=" + std::to_string(totalMisses), hwid);
-                                                            }
-                                                        } else if (state != HbState::Healthy) {
-                                                            state = HbState::Healthy; std::cout << "[HB] state->HEALTHY (avg RTT=" << avg << ")" << std::endl;
-                                                        }
-                                                        // reset window
-                                                        rttSum = 0; rttCount = 0;
+                                                const uint64_t rtt = static_cast<uint64_t>(GetTickCount64()) - ping_ts;
+                                                rttSum += rtt;
+                                                ++rttCount;
+                                                rttSumCumulative += rtt;
+                                                ++rttCountCumulative;
+                                                consecutiveMiss = 0;
+
+                                                if (rttCount >= 5) {
+                                                    const uint64_t avg = rttSum / rttCount;
+                                                    if (avg > cfg.rtt_warn_ms && state == HbState::Healthy) {
+                                                        state = HbState::Warning;
+                                                        std::cout << "[HB] state->WARNING (avg RTT=" << avg << ")" << std::endl;
+                                                        const double avgCumSnap = rttCountCumulative
+                                                            ? static_cast<double>(rttSumCumulative) / rttCountCumulative : 0.0;
+                                                        LogViolation("HB_WARNING",
+                                                            "High average RTT " + std::to_string(avg) +
+                                                            "ms | avgCum=" + std::to_string(static_cast<int>(avgCumSnap)) +
+                                                            "ms | missesTotal=" + std::to_string(totalMisses), hwid);
+                                                    } else if (avg <= cfg.rtt_warn_ms && state != HbState::Healthy) {
+                                                        state = HbState::Healthy;
+                                                        std::cout << "[HB] state->HEALTHY (avg RTT=" << avg << ")" << std::endl;
                                                     }
+                                                    rttSum = 0;
+                                                    rttCount = 0;
                                                 }
                                             }
-                                        } catch (...) {
-                                            std::cout << "[HB] parse error" << std::endl;
-                                            consecutiveMiss++;
-                                            totalMisses++;
                                         }
-                                    } else {
-                                        consecutiveMiss++;
-                                        totalMisses++;
+                                    } catch (...) {
+                                        ++consecutiveMiss;
+                                        ++totalMisses;
                                     }
                                 } else {
-                                    consecutiveMiss++;
-                                    totalMisses++;
+                                    ++consecutiveMiss;
+                                    ++totalMisses;
                                 }
                             } else {
-                                consecutiveMiss++;
-                                totalMisses++;
+                                ++consecutiveMiss;
+                                ++totalMisses;
                             }
                         } else {
-                            consecutiveMiss++;
-                            totalMisses++;
+                            ++consecutiveMiss;
+                            ++totalMisses;
                         }
 
                         // Check consecutive miss threshold
