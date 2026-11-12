@@ -10,7 +10,6 @@
 #include <sstream>
 #include <limits>
 #include <cstring>
-#include <limits>
 
 #pragma comment(lib, "crypt32.lib")
 
@@ -870,7 +869,8 @@ namespace Oblivion {
                                 // Baca disk data untuk perbandingan
                                 std::vector<uint8_t> fileData;
                                 if (ReadExecutableFile(m_executablePath, fileData) && 
-                                    section.rawDataOffset + section.rawDataSize <= fileData.size()) {
+                                    section.rawDataOffset <= fileData.size() &&
+                                    section.rawDataSize <= fileData.size() - section.rawDataOffset) {
                                     const uint8_t* diskData = fileData.data() + section.rawDataOffset;
                                     size_t differentBytes = 0;
                                     size_t bytesToCompare = (sizeToCheck < section.rawDataSize) ? sizeToCheck : section.rawDataSize;
