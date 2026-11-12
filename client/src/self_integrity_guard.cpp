@@ -281,7 +281,7 @@ namespace Oblivion {
     void SelfIntegrityGuard::MonitoringLoop() {
         while (m_running.load()) {
             if (!VerifySectionsOnce()) {
-                // ReportViolationAndExit already called inside VerifySectionsOnce.
+                // Every failed verification path is reported before returning.
                 return;
             }
 
@@ -299,6 +299,8 @@ namespace Oblivion {
         const IMAGE_SECTION_HEADER* memorySections = nullptr;
         size_t imageSize = 0;
         if (!GetMappedPeHeaders(moduleBase, memoryNt, memorySections, imageSize)) {
+            ReportViolationAndExit(L"", "SELF_INTEGRITY_UNAVAILABLE",
+                                   "Mapped PE headers could not be read during self-integrity verification");
             return false;
         }
 
@@ -306,6 +308,8 @@ namespace Oblivion {
         const IMAGE_SECTION_HEADER* diskSections = nullptr;
         size_t diskSectionOffset = 0;
         if (!GetDiskPeHeaders(m_diskImage, diskNt, diskSections, diskSectionOffset)) {
+            ReportViolationAndExit(L"", "SELF_INTEGRITY_UNAVAILABLE",
+                                   "Disk PE headers could not be read during self-integrity verification");
             return false;
         }
 
