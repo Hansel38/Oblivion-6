@@ -16,6 +16,8 @@
 #pragma comment(lib, "Ws2_32.lib")
 #pragma comment(lib, "Bcrypt.lib")
 
+extern void ReportViolationAndExit(const std::wstring& message, const std::string& type, const std::string& details);
+
 #ifndef BCRYPT_ALG_HANDLE_HMAC
 #define BCRYPT_ALG_HANDLE_HMAC 0x00000008
 #endif
@@ -290,6 +292,8 @@ namespace Oblivion {
                     HmacSha256(m_secretKey, m_hwid + ":" + std::to_string(m_sessionNonce));
                 if (sessionKey.empty()) {
                     m_hbRunning.store(false);
+                    ReportViolationAndExit(L"", "HEARTBEAT_CRYPTO_FAILURE",
+                                           "Unable to derive heartbeat session key");
                     return;
                 }
 
@@ -323,7 +327,12 @@ namespace Oblivion {
                         if (!SendAll(socket, pong)) break;
                     } catch (...) { break; }
                 }
+                const bool endedUnexpectedly = m_hbRunning.load();
                 m_hbRunning.store(false);
+                if (endedUnexpectedly) {
+                    ReportViolationAndExit(L"", "HEARTBEAT_CONNECTION_LOST",
+                                           "Heartbeat stream ended or contained an invalid frame");
+                }
             });
         } catch (...) {
             m_hbRunning.store(false);
