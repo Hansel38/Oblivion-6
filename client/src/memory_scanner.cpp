@@ -10,8 +10,54 @@
 #include <sstream>
 #include <limits>
 #include <cstring>
+#include <limits>
 
 #pragma comment(lib, "crypt32.lib")
+
+namespace {
+    bool IsReadableMemoryRange(const void* address, size_t length) {
+        if (length == 0) return true;
+        uintptr_t cursor = reinterpret_cast<uintptr_t>(address);
+        if (cursor == 0 || cursor > (std::numeric_limits<uintptr_t>::max)() - length)
+            return false;
+
+        size_t remaining = length;
+        while (remaining > 0) {
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (VirtualQuery(reinterpret_cast<const void*>(cursor), &mbi, sizeof(mbi)) == 0 ||
+                mbi.State != MEM_COMMIT ||
+                (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+                return false;
+            }
+
+            const DWORD protection = mbi.Protect & 0xFF;
+            const bool readable =
+                protection == PAGE_READONLY ||
+                protection == PAGE_READWRITE ||
+                protection == PAGE_WRITECOPY ||
+                protection == PAGE_EXECUTE_READ ||
+                protection == PAGE_EXECUTE_READWRITE ||
+                protection == PAGE_EXECUTE_WRITECOPY;
+            if (!readable) return false;
+
+            const uintptr_t regionBase = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+            if (regionBase > cursor ||
+                mbi.RegionSize > (std::numeric_limits<uintptr_t>::max)() - regionBase) {
+                return false;
+            }
+            const uintptr_t regionEnd = regionBase + mbi.RegionSize;
+            if (regionEnd <= cursor) return false;
+
+            const size_t step = (std::min)(remaining,
+                static_cast<size_t>(regionEnd - cursor));
+            cursor += step;
+            remaining -= step;
+        }
+        return true;
+    }
+}
+
+
 
 // Forward declaration
 extern void ReportViolationAndExit(const std::wstring& message, const std::string& type, const std::string& details);
@@ -443,25 +489,30 @@ namespace Oblivion {
 
             ExecutableRegion baseline;
             baseline.rva = section.virtualAddress;
-            baseline.size = section.virtualSize;
+            baseline.size = section.virtualSize != 0 ? section.virtualSize : section.rawDataSize;
             baseline.isCodeSection = (section.name.find(".text") != std::string::npos);
 
             // CRITICAL: Hash dari DISK (trusted source)
             baseline.diskCRC32 = CalculateSectionHashFromDisk(fileData, section);
 
             // Cross-check: Hash dari memory (untuk detect early injection)
-            uint8_t* memoryAddr = reinterpret_cast<uint8_t*>(m_moduleBaseAddress + section.virtualAddress);
-            
-            MEMORY_BASIC_INFORMATION mbi;
-            if (VirtualQuery(memoryAddr, &mbi, sizeof(mbi)) > 0 && mbi.State == MEM_COMMIT) {
-                // Gunakan ukuran yang sama dengan baseline.size untuk konsistensi
-                // baseline.size = section.virtualSize, jadi gunakan ukuran minimum antara
-                // virtualSize dan regionSize yang tersedia
-                size_t sizeToHash = (section.virtualSize < static_cast<uint32_t>(mbi.RegionSize)) ? section.virtualSize : static_cast<size_t>(mbi.RegionSize);
-                // Pastikan sizeToHash tidak melebihi baseline.size
-                if (sizeToHash > baseline.size) {
-                    sizeToHash = baseline.size;
-                }
+            if (section.virtualAddress >
+                (std::numeric_limits<uintptr_t>::max)() - m_moduleBaseAddress) {
+                ReportViolationAndExit(L"", "MEMORY_RANGE_OVERFLOW", "Executable section address overflow");
+                return;
+            }
+            uint8_t* memoryAddr = reinterpret_cast<uint8_t*>(
+                m_moduleBaseAddress + static_cast<uintptr_t>(section.virtualAddress));
+
+            if (baseline.size == 0 ||
+                !IsReadableMemoryRange(memoryAddr, baseline.size)) {
+                ReportViolationAndExit(L"", "MEMORY_SECTION_UNREADABLE",
+                                       "Executable section is not fully readable during baseline creation");
+                return;
+            }
+
+            {
+                const size_t sizeToHash = baseline.size;
                 baseline.memoryCRC32 = CalculateCRC32(memoryAddr, sizeToHash);
                 
                 // CRITICAL CHECK: Jika memory sudah berbeda dari disk saat baseline creation,
@@ -523,8 +574,6 @@ namespace Oblivion {
                         //           << differentBytes << " bytes (" << diffPercentage << "%)" << std::endl;
                     }
                 }
-            } else {
-                baseline.memoryCRC32 = 0;
             }
 
             m_diskBaseline.push_back(baseline);
@@ -547,11 +596,18 @@ namespace Oblivion {
         m_verifiedSections.clear();
 
         for (const auto& baseline : m_diskBaseline) {
-            uint8_t* memoryAddr = reinterpret_cast<uint8_t*>(m_moduleBaseAddress + baseline.rva);
-            
-            MEMORY_BASIC_INFORMATION mbi;
-            if (VirtualQuery(memoryAddr, &mbi, sizeof(mbi)) == 0 || mbi.State != MEM_COMMIT) {
-                continue;
+            if (baseline.rva >
+                (std::numeric_limits<uintptr_t>::max)() - m_moduleBaseAddress) {
+                ReportViolationAndExit(L"", "MEMORY_RANGE_OVERFLOW", "Executable section address overflow");
+                return false;
+            }
+            uint8_t* memoryAddr = reinterpret_cast<uint8_t*>(
+                m_moduleBaseAddress + baseline.rva);
+            if (baseline.size == 0 ||
+                !IsReadableMemoryRange(memoryAddr, baseline.size)) {
+                ReportViolationAndExit(L"", "MEMORY_SECTION_UNREADABLE",
+                                       "Executable section is not fully readable during verification");
+                return false;
             }
 
             // Skip non-code sections atau sections yang legitimate berubah
@@ -576,7 +632,7 @@ namespace Oblivion {
                 }
             }
 
-            size_t sizeToCheck = (baseline.size < static_cast<size_t>(mbi.RegionSize)) ? baseline.size : static_cast<size_t>(mbi.RegionSize);
+            const size_t sizeToCheck = baseline.size;
             uint32_t currentMemoryCRC32 = CalculateCRC32(memoryAddr, sizeToCheck);
 
             // CRITICAL: Bandingkan dengan memory baseline (bukan disk baseline)
@@ -657,7 +713,8 @@ namespace Oblivion {
             auto it_disk_check = m_sectionMap.find(baseline.rva);
             if (it_disk_check != m_sectionMap.end() && !fileData.empty()) {
                 const auto& section = it_disk_check->second;
-                if (section.rawDataOffset + section.rawDataSize <= fileData.size()) {
+                if (section.rawDataOffset <= fileData.size() &&
+                    section.rawDataSize <= fileData.size() - section.rawDataOffset) {
                     uint32_t currentDiskCRC32 = CalculateSectionHashFromDisk(fileData, section);
                     if (currentDiskCRC32 != baseline.diskCRC32) {
                         // File disk telah diubah!
@@ -696,18 +753,17 @@ namespace Oblivion {
     bool MemoryScanner::CompareCodeSections(const std::vector<uint8_t>& diskData,
                                            const uint8_t* memoryBase,
                                            const PESectionInfo& section) {
-        if (section.rawDataOffset + section.rawDataSize > diskData.size()) {
+        const size_t rawOffset = static_cast<size_t>(section.rawDataOffset);
+        const size_t rawSize = static_cast<size_t>(section.rawDataSize);
+        const size_t memorySize = static_cast<size_t>(section.virtualSize);
+        if (rawOffset > diskData.size() || rawSize > diskData.size() - rawOffset ||
+            memorySize == 0 || !IsReadableMemoryRange(memoryBase, memorySize)) {
             return false;
         }
 
-        uint32_t diskHash = CalculateCRC32(
-            diskData.data() + section.rawDataOffset,
-            section.rawDataSize
-        );
-
-        uint32_t memoryHash = CalculateCRC32(memoryBase, section.virtualSize);
-
-        return (diskHash == memoryHash);
+        const uint32_t diskHash = CalculateCRC32(diskData.data() + rawOffset, rawSize);
+        const uint32_t memoryHash = CalculateCRC32(memoryBase, memorySize);
+        return diskHash == memoryHash;
     }
 
     // === LAYER 5: Runtime Integrity Verification ===
