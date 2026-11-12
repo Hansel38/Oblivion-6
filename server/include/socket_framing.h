@@ -13,7 +13,7 @@
 #else
 #include <openssl/rand.h>
 #include <cerrno>
-#include <sys/select.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -91,25 +91,29 @@ namespace OblivionNet {
             const auto remainingUs =
                 std::chrono::duration_cast<std::chrono::microseconds>(deadline - now).count();
 
+#ifdef _WIN32
             timeval timeout{};
             timeout.tv_sec = static_cast<long>(remainingUs / 1000000);
             timeout.tv_usec = static_cast<long>(remainingUs % 1000000);
-
             fd_set readSet;
             FD_ZERO(&readSet);
             FD_SET(socket, &readSet);
-#ifdef _WIN32
             const int ready = select(0, &readSet, nullptr, nullptr, &timeout);
+            if (ready <= 0) return false;
 #else
-            const int ready = select(socket + 1, &readSet, nullptr, nullptr, &timeout);
-#endif
+            const long long remainingMs = (remainingUs + 999) / 1000;
+            const int pollTimeout = static_cast<int>((std::min)(
+                remainingMs, static_cast<long long>((std::numeric_limits<int>::max)())));
+            pollfd descriptor{};
+            descriptor.fd = socket;
+            descriptor.events = POLLIN;
+            const int ready = poll(&descriptor, 1, pollTimeout);
             if (ready < 0) {
-#ifndef _WIN32
                 if (errno == EINTR) continue;
-#endif
                 return false;
             }
-            if (ready == 0) return false;
+            if (ready == 0 || (descriptor.revents & POLLNVAL) != 0) return false;
+#endif
 
             char buffer[512];
 #ifdef _WIN32
