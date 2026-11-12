@@ -2,6 +2,11 @@
 #include <vector>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
+#include <limits.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 #include "secret_obf.h"
 #if defined(_WIN32)
 #include <windows.h>
@@ -67,24 +72,47 @@ namespace OblivionServer {
             CloseHandle(hFile);
         }
 #else
-        // Non-Windows: simple file read from current dir
-        FILE* f = fopen("secret.dat", "rb");
-        if (f) {
-            std::vector<unsigned char> encoded;
-            unsigned char buf[256];
-            size_t r;
-            while ((r = fread(buf, 1, sizeof(buf), f)) > 0) {
-                encoded.insert(encoded.end(), buf, buf + r);
+        // Linux: resolve secret.dat relative to the executable, not the process CWD.
+        char executablePath[PATH_MAX + 1] = {};
+        const ssize_t executablePathLength =
+            readlink("/proc/self/exe", executablePath, PATH_MAX);
+        std::string secretFilePath;
+        if (executablePathLength > 0 && executablePathLength < PATH_MAX) {
+            executablePath[executablePathLength] = '\\0';
+            std::string executablePathString(executablePath,
+                                               static_cast<size_t>(executablePathLength));
+            const size_t separator = executablePathString.find_last_of('/');
+            secretFilePath = separator == std::string::npos
+                ? std::string("secret.dat")
+                : executablePathString.substr(0, separator + 1) + "secret.dat";
+        }
+
+        if (!secretFilePath.empty()) {
+            FILE* f = fopen(secretFilePath.c_str(), "rb");
+            if (f) {
+                if (fseek(f, 0, SEEK_END) == 0) {
+                    const long fileSize = ftell(f);
+                    if (fileSize > 0 && fileSize < 1024 && fseek(f, 0, SEEK_SET) == 0) {
+                        std::vector<unsigned char> encoded(static_cast<size_t>(fileSize));
+                        const size_t bytesRead = fread(encoded.data(), 1, encoded.size(), f);
+                        const bool completeRead = bytesRead == encoded.size() && fgetc(f) == EOF;
+                        if (completeRead) {
+                            secret.reserve(encoded.size());
+                            for (size_t i = 0; i < encoded.size(); ++i) {
+                                const unsigned char key =
+                                    static_cast<unsigned char>(0x5A + ((i * 7) % 0x3F));
+                                secret += static_cast<char>(encoded[i] ^ key);
+                            }
+                        }
+                    }
+                }
+                fclose(f);
             }
-            fclose(f);
-            for (size_t i = 0; i < encoded.size(); ++i) {
-                unsigned char key = (unsigned char)(0x5A + ((i * 7) % 0x3F));
-                secret += (char)(encoded[i] ^ key);
-            }
-            if (!secret.empty()) {
-                cached = secret;
-                return cached;
-            }
+        }
+
+        if (!secret.empty()) {
+            cached = secret;
+            return cached;
         }
 #endif
 
