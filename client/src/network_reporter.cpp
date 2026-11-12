@@ -37,6 +37,60 @@ namespace Oblivion {
         return true;
     }
 
+    static bool ConnectWithDeadline(
+        SOCKET socket, const sockaddr* address, int addressLength,
+        const std::chrono::steady_clock::time_point& deadline) {
+        u_long nonBlocking = 1;
+        if (ioctlsocket(socket, FIONBIO, &nonBlocking) == SOCKET_ERROR) {
+            return false;
+        }
+
+        bool connected = false;
+        const int connectResult = connect(socket, address, addressLength);
+        if (connectResult == 0) {
+            connected = true;
+        }
+        else {
+            const int connectError = WSAGetLastError();
+            if (connectError == WSAEWOULDBLOCK ||
+                connectError == WSAEINPROGRESS ||
+                connectError == WSAEALREADY) {
+                const auto now = std::chrono::steady_clock::now();
+                if (now < deadline) {
+                    const auto remainingUs =
+                        std::chrono::duration_cast<std::chrono::microseconds>(deadline - now).count();
+                    timeval timeout{};
+                    timeout.tv_sec = static_cast<long>(remainingUs / 1000000);
+                    timeout.tv_usec = static_cast<long>(remainingUs % 1000000);
+
+                    fd_set writeSet;
+                    fd_set exceptSet;
+                    FD_ZERO(&writeSet);
+                    FD_ZERO(&exceptSet);
+                    FD_SET(socket, &writeSet);
+                    FD_SET(socket, &exceptSet);
+
+                    const int selectResult = select(0, nullptr, &writeSet, &exceptSet, &timeout);
+                    if (selectResult > 0 &&
+                        (FD_ISSET(socket, &writeSet) || FD_ISSET(socket, &exceptSet))) {
+                        int socketError = 0;
+                        int errorLength = sizeof(socketError);
+                        connected = getsockopt(socket, SOL_SOCKET, SO_ERROR,
+                            reinterpret_cast<char*>(&socketError), &errorLength) == 0 &&
+                            socketError == 0;
+                    }
+                }
+            }
+        }
+
+        // Restore the blocking mode expected by the existing send/receive code.
+        u_long blocking = 0;
+        if (ioctlsocket(socket, FIONBIO, &blocking) == SOCKET_ERROR) {
+            return false;
+        }
+        return connected;
+    }
+
     static bool ReceiveFrame(SOCKET socket, std::string& pending,
                              std::string& frame, DWORD timeoutMs,
                              size_t maxSize = 4096) {
@@ -125,15 +179,21 @@ namespace Oblivion {
             ExitProcess(1);
         }
 
-        // Attempt to connect to an address until one succeeds
+        // Share one deadline across all resolved addresses.
+        const auto connectDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        // Attempt to connect to an address until one succeeds or the deadline expires.
         for (ptr = result; ptr != NULL; ptr = ptr->ai_next) {
+            if (std::chrono::steady_clock::now() >= connectDeadline) {
+                break;
+            }
             connectSocket = socket(ptr->ai_family, ptr->ai_socktype, ptr->ai_protocol);
             if (connectSocket == INVALID_SOCKET) {
                 continue;
             }
 
-            // Connect to server.
-            if (connect(connectSocket, ptr->ai_addr, (int)ptr->ai_addrlen) == SOCKET_ERROR) {
+            // Connect without allowing an unreachable endpoint to block indefinitely.
+            if (!ConnectWithDeadline(connectSocket, ptr->ai_addr,
+                                     static_cast<int>(ptr->ai_addrlen), connectDeadline)) {
                 closesocket(connectSocket);
                 connectSocket = INVALID_SOCKET;
                 continue;
@@ -371,15 +431,21 @@ namespace Oblivion {
             ExitProcess(1);
         }
 
-        // Attempt to connect to an address until one succeeds
+        // Share one deadline across all resolved addresses.
+        const auto connectDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        // Attempt to connect to an address until one succeeds or the deadline expires.
         for (ptr = result; ptr != NULL; ptr = ptr->ai_next) {
+            if (std::chrono::steady_clock::now() >= connectDeadline) {
+                break;
+            }
             connectSocket = socket(ptr->ai_family, ptr->ai_socktype, ptr->ai_protocol);
             if (connectSocket == INVALID_SOCKET) {
                 continue;
             }
 
-            // Connect to server.
-            if (connect(connectSocket, ptr->ai_addr, (int)ptr->ai_addrlen) == SOCKET_ERROR) {
+            // Connect without allowing an unreachable endpoint to block indefinitely.
+            if (!ConnectWithDeadline(connectSocket, ptr->ai_addr,
+                                     static_cast<int>(ptr->ai_addrlen), connectDeadline)) {
                 closesocket(connectSocket);
                 connectSocket = INVALID_SOCKET;
                 continue;

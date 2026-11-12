@@ -76,7 +76,8 @@ This checklist tracks findings from a source review. A checked item means the co
 - [x] **P1 — Validate Linux heartbeat environment configuration.** Linux rejects invalid or out-of-range interval, timeout, jitter, miss-count, and RTT settings; Windows uses bounded defaults. Add equivalent configurable Windows settings only if required.
 - [x] **P1 — Fix authentication failure flow.** Invalid credentials take the rejection branch, send `KICK;`, and do not enter the CHECKIN/report handlers; the client socket is closed on handler exit.
 - [ ] **P1 — Do not accept empty/unknown client status as healthy.** Heartbeat status is currently hard-coded to `1|1` on the client. Connect it to real health state and treat unavailable checks distinctly from successful checks.
-- [ ] **P1 — Bound client connection and handshake duration.** DNS resolution and blocking `connect()` currently have no explicit deadline. Add bounded connect/receive deadlines and structured error handling.
+- [x] **P1 — Bound client TCP connection attempts.** Use nonblocking `connect()` plus `select()` / `SO_ERROR` with a single five-second deadline shared across all resolved addresses in both check-in and violation-report paths.
+- [ ] **P1 — Bound DNS resolution duration.** `getaddrinfo()` remains synchronous and can still block before the TCP connection deadline starts.
 
 ### P1 — Client lifecycle and stability
 
