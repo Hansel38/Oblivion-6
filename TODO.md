@@ -56,10 +56,10 @@ This checklist tracks findings from a source review. A checked item means the co
 
 ## Open findings — prioritize next
 
-### P0 — Authentication and transport security
+### P0 — Authentication over plain TCP (TLS intentionally out of scope)
 
 - [ ] **P0 — Replace shared static client secret.** The client embeds or loads a long-lived shared secret. Any secret shipped to an untrusted client can be extracted; obfuscation does not make it confidential. Use per-account/per-session credentials issued by a trusted login service, short-lived challenges, and server-side revocation.
-- [ ] **P0 — Protect the protocol with TLS.** Check-in and violation reports currently send credentials and metadata over plain TCP. Deploy TLS with certificate validation and a documented certificate-rotation strategy. HMAC alone does not provide confidentiality.
+- [x] **Design decision — Keep plain TCP; do not add TLS.** The deployment intentionally uses ordinary TCP sockets. The protocol must still authenticate every client-to-server and server-to-client frame, bind message type/length/session/sequence/nonce/payload into a MAC, reject replay and malformed frames, and avoid sending the long-lived shared secret in reports. Plain TCP does not encrypt traffic, so credentials and metadata remain observable to network observers; this is an accepted deployment trade-off, not a pending TLS task.
 - [ ] **P0 — Authenticate all protocol frames consistently.** The initial check-in uses a raw shared secret while heartbeat uses a derived HMAC key. Define a versioned, canonical protocol and authenticate message type, length, sequence, nonce, client identity, and payload.
 - [x] **P0 — Use constant-time MAC comparison.** Both server variants reject non-64-character MACs and compare heartbeat HMACs in constant time.
 - [x] **P0 — Replace predictable `rand()` nonces.** Both servers use the OS CSPRNG (Windows CNG / OpenSSL RAND_bytes) for session and heartbeat nonces, and fail closed when RNG fails.
@@ -118,7 +118,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [ ] **P2 — Add fuzz tests.** Fuzz all protocol parsers and PE parsing routines using bounded input corpora.
 - [ ] **P2 — Add integration tests.** Exercise check-in, banned client, invalid secret, partial send, delayed response, disconnect, heartbeat timeout, and graceful shutdown.
 - [ ] **P2 — Add structured security telemetry.** Use event IDs, severity, session correlation IDs, and redaction. Avoid logging credentials or full hardware identifiers.
-- [ ] **P2 — Document deployment.** Define TLS termination, firewall policy, secret provisioning, rotation, backup, ban review, and incident response.
+- [ ] **P2 — Document deployment.** Define plain-TCP network exposure, firewall/IP restrictions, secret provisioning and rotation, backup, ban review, and incident response. Do not add TLS to this deployment.
 
 ## Verification checklist
 
@@ -141,4 +141,4 @@ This checklist tracks findings from a source review. A checked item means the co
 - A checked item means source changes were committed, not that a build/runtime test has passed.
 - This branch is a defensive hardening pass, not a claim that the anti-cheat is bypass-proof.
 - Do not automatically ban solely on a single heuristic signal. Prefer server-side evidence, confidence scoring, and human review to reduce false positives.
-- Any protocol redesign must update Windows client, Windows server, Linux server, and deployment documentation together.
+- The transport is intentionally plain TCP (no TLS). Any protocol redesign must update Windows client, Windows server, Linux server, and deployment documentation together. MACs provide authenticity/integrity, not confidentiality.
