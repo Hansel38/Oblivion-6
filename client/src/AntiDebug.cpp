@@ -315,7 +315,7 @@ namespace Oblivion {
 
         // Tambahan: cek prolog branch yang umum dipakai sebagai trampoline.
         const auto bytes = reinterpret_cast<const BYTE*>(pNtQIP);
-        const bool suspiciousJmp = IsSuspiciousBranchPrologue(bytes);
+        bool suspiciousJmp = IsSuspiciousBranchPrologue(bytes);
 
         // Whitelist suppression
         if (isDbgHooked) {
