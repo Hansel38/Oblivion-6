@@ -877,9 +877,11 @@ void HandleClient(SOCKET clientSocket) {
                     OblivionNet::SendAll(clientSocket, kickCommand, strlen(kickCommand));
                     std::cout << "[INFO] Perintah KICK dikirim ke client (HWID: " << hwid << ") - sudah ada di ban list." << std::endl;
                 } else {
-                    // Pelanggaran hanya dicatat ke log, tidak langsung di-ban atau di-kick
-                    std::cout << "[WARNING] Pelanggaran terdeteksi dari HWID [" << hwid << "], dicatat ke log (menunggu review manual)." << std::endl;
-                    // Tidak kirim KICK - client tetap berjalan sampai admin memutuskan ban manual
+                    // Acknowledge the report so the client can distinguish review-only from a lost reply.
+                    const char* acceptedCommand = "OK;";
+                    OblivionNet::SendAll(clientSocket, acceptedCommand, strlen(acceptedCommand));
+                    std::cout << "[WARNING] Pelanggaran terdeteksi dari HWID [" << hwid
+                              << "], dicatat ke log (menunggu review manual)." << std::endl;
                 }
             }
         } else if (bytesReceived == 0) {
