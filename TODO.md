@@ -86,7 +86,8 @@ This checklist tracks findings from a source review. A checked item means the co
 - [x] **P1 — Fix partial-construction leaks in `ProcessWatcher`.** Scanner ownership now uses `std::unique_ptr` and constructor unwinding cleans up completed components.
 - [ ] **P1 — Make watcher stop interruptible.** `Sleep(500..3000)` delays shutdown; use a condition variable/event and interruptible wait.
 - [ ] **P1 — Avoid blocking joins during loader-lock detach.** Validate shutdown order with a host that loads/unloads the DLL repeatedly.
-- [ ] **P1 — Validate module path lengths.** Several calls use `GetModuleFileNameW(..., MAX_PATH)` without detecting truncation. Support long paths or fail explicitly.
+- [x] **P1 — SelfIntegrityGuard module path length.** Resolve the module path with a dynamically sized buffer and fail explicitly if the Windows path cannot be retrieved within the supported buffer limit.
+- [ ] **P1 — Validate remaining module path length usage.** `dllmain.cpp` still uses `GetModuleFileNameW(..., MAX_PATH)` for the splash-image directory without detecting truncation.
 - [ ] **P1 — Handle Winsock startup failure consistently.** Ensure every successful `WSAStartup` is balanced exactly once and no socket operation proceeds after failed initialization.
 
 ### P1 — Integrity and detection correctness
