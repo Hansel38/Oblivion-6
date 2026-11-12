@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <ctime>
 #include <algorithm>
+#include <limits>
 #include <windows.h>
 #include "secret_obf.h"
 #include "include/heartbeat_protocol.h"
@@ -33,6 +34,16 @@
 static std::string SERVER_SECRET = OblivionServer::GetServerSecret();
 #define BAN_LIST_FILE "bans.txt"
 #define VIOLATION_LOG_FILE "violations.log"
+
+bool ConstantTimeEquals(const std::string& left, const std::string& right) {
+    if (left.size() != right.size()) return false;
+    unsigned char difference = 0;
+    for (size_t i = 0; i < left.size(); ++i) {
+        difference |= static_cast<unsigned char>(left[i] ^ right[i]);
+    }
+    return difference == 0;
+}
+
 
 // Fungsi untuk mendapatkan path folder tempat executable berada
 std::string GetExecutableDirectory() {
@@ -616,15 +627,23 @@ void HandleClient(SOCKET clientSocket) {
                 if (isBanned) {
                     // HWID di-ban, kirim KICK
                     const char* kickCommand = "KICK;";
-                    send(clientSocket, kickCommand, (int)strlen(kickCommand), 0);
+                    OblivionNet::SendAll(clientSocket, kickCommand, strlen(kickCommand));
                     std::cout << "[BAN] HWID [" << hwid << "] terdeteksi di ban list. Perintah KICK dikirim." << std::endl;
                     std::cout << "[INFO] Untuk unban, hapus HWID dari bans.txt dan restart client." << std::endl;
                 } else {
                     // HWID tidak di-ban, kirim OK dan mulai heartbeat ping
                     // HWID tidak di-ban, kirim OK dan session nonce dalam satu pesan
-                    uint64_t sessionNonce = ((uint64_t)rand() << 32) ^ (uint64_t)rand();
+                    uint64_t sessionNonce = 0;
+                    if (!OblivionNet::GenerateSecureNonce(sessionNonce)) {
+                        LogViolation("RNG_FAILURE", "Unable to generate secure session nonce", hwid);
+                        closesocket(clientSocket);
+                        return;
+                    }
                     std::string response = "OK;SESSION_NONCE:" + std::to_string(sessionNonce) + ";";
-                    OblivionNet::SendAll(clientSocket, response.data(), response.size());
+                    if (!OblivionNet::SendAll(clientSocket, response.data(), response.size())) {
+                        closesocket(clientSocket);
+                        return;
+                    }
                     std::cout << "[OK] HWID [" << hwid << "] diizinkan. Memulai heartbeat ping." << std::endl;
 
                     // Basic ping scheduler over the same socket (line-based)
@@ -662,7 +681,11 @@ void HandleClient(SOCKET clientSocket) {
                         // Compose ping: PING:seq:ts:nonce;
                         uint64_t ping_ts = (uint64_t)GetTickCount64();
                         // naive nonce
-                        uint64_t ping_nonce = ((uint64_t)rand() << 32) ^ (uint64_t)rand();
+                        uint64_t ping_nonce = 0;
+                        if (!OblivionNet::GenerateSecureNonce(ping_nonce)) {
+                            LogViolation("RNG_FAILURE", "Unable to generate secure heartbeat nonce", hwid);
+                            break;
+                        }
                         std::string ping = "PING:" + std::to_string(seq) + ":" + std::to_string(ping_ts) + ":" + std::to_string(ping_nonce) + ";";
                         const bool pingSent = OblivionNet::SendAll(clientSocket, ping.data(), ping.size());
                         if (!pingSent) { 
@@ -706,8 +729,7 @@ void HandleClient(SOCKET clientSocket) {
                                         const std::string hmac = resp.substr(col[5] + 1);
 
                                         if (pseq != seq || pnonce != ping_nonce || phwid != hwid ||
-                                            (status != "1|1" && status != "0|1" &&
-                                             status != "1|0" && status != "0|0")) {
+                                            status != "1|1") {
                                             ++consecutiveMiss;
                                             ++totalMisses;
                                         } else {
@@ -715,7 +737,7 @@ void HandleClient(SOCKET clientSocket) {
                                                 std::to_string(ping_ts) + ":" +
                                                 std::to_string(pnonce) + ":" + phwid;
                                             const std::string expect = hmacSha256(sessionKey, data);
-                                            if (expect.size() != hmac.size() || expect != hmac) {
+                                            if (!ConstantTimeEquals(expect, hmac)) {
                                                 ++consecutiveMiss;
                                                 ++totalMisses;
                                             } else {
