@@ -20,7 +20,9 @@ namespace OblivionServer {
     #if defined(_WIN32)
         char* envSecret = nullptr; size_t envLen = 0;
         if (_dupenv_s(&envSecret, &envLen, "OBLIVION_SECRET") == 0 && envSecret && envLen > 0) {
-            cached = std::string(envSecret, envLen);
+            // _dupenv_s reports the buffer size including the terminating NUL.
+            // Construct from the C string so the terminator is not part of the key.
+            cached = std::string(envSecret);
             free(envSecret);
             return cached;
         }
