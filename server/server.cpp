@@ -998,7 +998,7 @@ int main() {
         errno = 0;
         char* end = nullptr;
         const unsigned long long parsed = std::strtoull(buffer, &end, 10);
-        if (errno != 0 || end == buffer || *end != '\\0' ||
+        if (errno != 0 || end == buffer || *end != 0 ||
             parsed > (std::numeric_limits<uint32_t>::max)()) {
             std::cerr << "[HB CFG] Invalid value for " << name
                       << "; using default " << defaultValue << std::endl;
@@ -1041,7 +1041,7 @@ int main() {
         std::cout << "\n[CONNECTION] New client connected" << std::endl;
         
         // Buat thread baru untuk menangani client agar server bisa menerima client lain
-        // Pass socket to handler; handler will use defaults; environment already logged
+        // Pass the validated heartbeat configuration into each client session.
         try {
             std::thread clientThread(HandleClient, ClientSocket, globalHbCfg);
             clientThread.detach();
