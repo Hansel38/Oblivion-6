@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <wincrypt.h>
 #include <sstream>
+#include <limits>
+#include <cstring>
 
 #pragma comment(lib, "crypt32.lib")
 
@@ -100,6 +102,11 @@ namespace Oblivion {
         DWORD hashLen = 32;
         uint64_t result = 0;
 
+        if ((!data && size != 0) ||
+            size > static_cast<size_t>((std::numeric_limits<DWORD>::max)())) {
+            return 0;
+        }
+
         if (!CryptAcquireContextW(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
             return 0;
         }
@@ -121,8 +128,8 @@ namespace Oblivion {
             return 0;
         }
 
-        // Ambil 64-bit pertama dari SHA256
-        result = *reinterpret_cast<uint64_t*>(hash);
+        // Copy bytes instead of dereferencing a potentially unaligned uint64_t pointer.
+        std::memcpy(&result, hash, sizeof(result));
 
         CryptDestroyHash(hHash);
         CryptReleaseContext(hProv, 0);
@@ -132,16 +139,31 @@ namespace Oblivion {
 
     // === LAYER 1: PE Structure Validation ===\n    
     bool MemoryScanner::ReadExecutableFile(const std::wstring& filePath, std::vector<uint8_t>& fileData) {
+        fileData.clear();
         std::ifstream file(filePath, std::ios::binary | std::ios::ate);
-        if (!file.is_open()) {
+        if (!file.is_open()) return false;
+
+        const std::streamoff fileSize = static_cast<std::streamoff>(file.tellg());
+        // This reader is for the anti-cheat/game executable image, not arbitrary archives.
+        constexpr std::streamoff kMaxExecutableImageSize = 512LL * 1024LL * 1024LL;
+        if (fileSize <= 0 || fileSize > kMaxExecutableImageSize ||
+            static_cast<uint64_t>(fileSize) >
+                static_cast<uint64_t>((std::numeric_limits<size_t>::max)())) {
             return false;
         }
 
-        std::streamsize size = file.tellg();
-        file.seekg(0, std::ios::beg);
+        if (!file.seekg(0, std::ios::beg)) return false;
+        try {
+            fileData.resize(static_cast<size_t>(fileSize));
+        } catch (...) {
+            fileData.clear();
+            return false;
+        }
 
-        fileData.resize(static_cast<size_t>(size));
-        if (!file.read(reinterpret_cast<char*>(fileData.data()), size)) {
+        if (!file.read(reinterpret_cast<char*>(fileData.data()),
+                       static_cast<std::streamsize>(fileSize)) ||
+            file.gcount() != static_cast<std::streamsize>(fileSize)) {
+            fileData.clear();
             return false;
         }
 
