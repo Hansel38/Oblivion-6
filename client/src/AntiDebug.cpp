@@ -125,7 +125,6 @@ namespace Oblivion {
         add("IsDebuggerPresent", CheckDebuggerPresentAPI());
         add("NtQueryInfoProcess(DebugPort)", CheckNtQueryInfoProcess());
         add("INT3Trap", CheckInt3Trap());
-        add("HWBreakpoints", CheckHardwareBreakpoints());
         add("KernelDebugger", CheckKernelDebugger());
         add("TimingAnomalies", CheckTimingAnomalies());
         add("ApiHookIntegrity", CheckApiHookIntegrity());
@@ -192,20 +191,7 @@ namespace Oblivion {
     }
 
     bool AntiDebug::CheckHardwareBreakpoints() {
-        // Cek DR0–DR3 dan flag enable di DR7 pada thread saat ini
-        CONTEXT ctx = {};
-        ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-        if (!GetThreadContext(GetCurrentThread(), &ctx)) {
-            return false; // Tidak bisa mendapatkan konteks, asumsikan aman
-        }
-
-        bool anyDrSet = (ctx.Dr0 != 0) || (ctx.Dr1 != 0) || (ctx.Dr2 != 0) || (ctx.Dr3 != 0);
-        bool dr7Enabled = (ctx.Dr7 & 0xFF) != 0; // Enable bits untuk local/global bp
-        return anyDrSet || dr7Enabled;
-    }
-
-    bool AntiDebug::CheckKernelDebugger() {
-        // Query SystemKernelDebuggerInformation untuk melihat apakah kernel debugger aktif
+        /ry SystemKernelDebuggerInformation untuk melihat apakah kernel debugger aktif
         typedef NTSTATUS (NTAPI* pNtQuerySystemInformation)(
             ULONG SystemInformationClass,
             PVOID SystemInformation,
