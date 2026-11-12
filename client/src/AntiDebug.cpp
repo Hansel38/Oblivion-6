@@ -366,7 +366,7 @@ namespace Oblivion {
     }
 
     bool AntiDebug::CheckPEBFlags() {
-        // Baca BeingDebugged dan NtGlobalFlag dari PEB via NtQueryInformationProcess
+        // Read the documented BeingDebugged PEB field via ProcessBasicInformation.
         typedef NTSTATUS(NTAPI* pNtQueryInformationProcess)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
         HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
         if (!hNtdll) return false;
@@ -378,7 +378,7 @@ namespace Oblivion {
             PVOID Reserved1;
             PVOID PebBaseAddress;
             PVOID Reserved2[2];
-            ULONG UniqueProcessId;
+            ULONG_PTR UniqueProcessId;
             PVOID Reserved3;
         } pbi = {};
 
