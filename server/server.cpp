@@ -10,6 +10,7 @@
 #include <ctime>
 #include <algorithm>
 #include <limits>
+#include <mutex>
 #include <windows.h>
 #include "secret_obf.h"
 #include "include/heartbeat_protocol.h"
@@ -34,6 +35,8 @@
 static std::string SERVER_SECRET = OblivionServer::GetServerSecret();
 #define BAN_LIST_FILE "bans.txt"
 #define VIOLATION_LOG_FILE "violations.log"
+
+static std::mutex g_violationLogMutex;
 
 bool ConstantTimeEquals(const std::string& left, const std::string& right) {
     if (left.size() != right.size()) return false;
@@ -318,6 +321,7 @@ std::string ExtractDetectedFile(const std::string& type, const std::string& deta
 
 // Fungsi untuk mencatat pelanggaran ke log file
 void LogViolation(const std::string& type, const std::string& details, const std::string& hwid) {
+    std::lock_guard<std::mutex> lock(g_violationLogMutex);
     std::string logFilePath = GetFilePath(VIOLATION_LOG_FILE);
     std::ofstream logFile(logFilePath, std::ios::app);
     if (logFile.is_open()) {
