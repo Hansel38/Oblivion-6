@@ -82,11 +82,11 @@ This checklist tracks findings from a source review. A checked item means the co
 
 ### P1 — Client lifecycle and stability
 
-- [ ] **P1 — Remove heavy cleanup from `DllMain`.** `DLL_PROCESS_DETACH` stops and joins workers, deletes objects, and logs while under the loader lock. Introduce an explicit exported shutdown API and require the host to call it before unloading; keep `DllMain` minimal.
-- [ ] **P1 — Synchronize initialization and shutdown.** The initialization thread is detached while global raw pointers are read/written by worker and detach paths. Add a lifecycle state machine, owned initialization thread, cancellation, and synchronization.
+- [x] **P1 — Remove heavy cleanup from `DllMain`.** `DllMain` now only records the module handle and disables thread notifications on process attach. Export `Oblivion_Shutdown()` performs worker joins and object destruction outside the loader lock; the host must call it before unloading. Host integration and repeated unload tests remain required.
+- [x] **P1 — Synchronize initialization and shutdown.** Replace the detached initialization thread with an owned thread; add explicit `NotStarted/Starting/Started/Stopping/Stopped` states, shutdown cancellation checkpoints, serialized shutdown, and join initialization before cleaning shared objects. Runtime race/stress tests remain required.
 - [x] **P1 — Fix partial-construction leaks in `ProcessWatcher`.** Scanner ownership now uses `std::unique_ptr` and constructor unwinding cleans up completed components.
 - [x] **P1 — Make watcher stop interruptible.** Replace the 500–3000 ms sleep with a condition-variable wait that is notified by `Stop()`, preserving the normal scan interval while allowing prompt shutdown.
-- [ ] **P1 — Avoid blocking joins during loader-lock detach.** Validate shutdown order with a host that loads/unloads the DLL repeatedly.
+- [x] **P1 — Avoid blocking joins during loader-lock detach.** `DllMain` no longer joins workers. The host calls `Oblivion_Shutdown()` before `FreeLibrary`; repeated load/unload validation remains open in the verification checklist.
 - [x] **P1 — SelfIntegrityGuard module path length.** Resolve the module path with a dynamically sized buffer and fail explicitly if the Windows path cannot be retrieved within the supported buffer limit.
 - [x] **P1 — DllMain splash-image module path length.** Resolve the module path with a dynamically sized buffer, detect API failure/truncation, and skip splash loading safely when the path cannot be resolved.
 - [ ] **P1 — Handle Winsock startup failure consistently.** Ensure every successful `WSAStartup` is balanced exactly once and no socket operation proceeds after failed initialization.
@@ -138,7 +138,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [ ] Static analysis: MSVC Code Analysis / clang-tidy
 - [ ] Runtime test: client handshake and nonce parsing
 - [ ] Runtime test: heartbeat fragmentation/coalescing
-- [ ] Runtime test: shutdown/unload under repeated cycles
+- [ ] Runtime test: call `Oblivion_Entry()`, then `Oblivion_Shutdown()`, then unload the DLL across repeated cycles
 - [ ] Runtime test: file integrity pass/fail with known test fixtures
 - [ ] Security test: invalid/missing secret fails closed
 - [ ] Security test: malformed/oversized protocol messages rejected
@@ -147,6 +147,7 @@ This checklist tracks findings from a source review. A checked item means the co
 
 - PR #1 was merged into `main`; commits after that merge are collected for follow-up review.
 - A checked item means source changes were committed, not that a build/runtime test has passed.
+- The host/injector must call exported `Oblivion_Entry()` after loading the DLL and exported `Oblivion_Shutdown()` before unloading it. Calling `FreeLibrary` without the shutdown export is unsupported; process termination is left to the operating system.
 - This branch is a defensive hardening pass, not a claim that the anti-cheat is bypass-proof.
 - Do not automatically ban solely on a single heuristic signal. Prefer server-side evidence, confidence scoring, and human review to reduce false positives.
 - The transport is intentionally plain TCP (no TLS). Any protocol redesign must update Windows client, Windows server, Linux server, and deployment documentation together. MACs provide authenticity/integrity, not confidentiality.
