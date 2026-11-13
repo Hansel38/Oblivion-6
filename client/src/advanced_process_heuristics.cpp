@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "advanced_process_heuristics.h"
 #include "digital_signature_validator.h"
+#include <limits>
 #include <tlhelp32.h>
 #include <vector>
 #include <algorithm>
