@@ -60,7 +60,6 @@
 #define MAX_TYPE_LEN 64
 #define MAX_DETAILS_LEN 2048
 #define MAX_HWID_LEN 128
-#define MAX_SECRET_LEN 128
 
 static std::string SERVER_SECRET = OblivionServer::GetServerSecret();
 #define BAN_LIST_FILE "bans.txt"
