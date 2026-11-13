@@ -339,11 +339,23 @@ namespace Oblivion {
             }
 
             if (!IsCodeSection(diskSection)) continue;
-            if (!CompareSection(diskSection)) {
-                size_t nameLength = 0;
-                while (nameLength < IMAGE_SIZEOF_SHORT_NAME && diskSection.Name[nameLength] != 0)
-                    ++nameLength;
-                ReportTamper(std::string(reinterpret_cast<const char*>(diskSection.Name), nameLength));
+
+            size_t nameLength = 0;
+            while (nameLength < IMAGE_SIZEOF_SHORT_NAME && diskSection.Name[nameLength] != 0)
+                ++nameLength;
+            const std::string sectionName(
+                reinterpret_cast<const char*>(diskSection.Name), nameLength);
+
+            const SectionCompareResult comparison = CompareSection(diskSection);
+            if (comparison == SectionCompareResult::Incomplete) {
+                ReportViolationAndExit(
+                    L"", "SELF_INTEGRITY_UNAVAILABLE",
+                    "Unable to inspect executable code section " + sectionName +
+                        " during self-integrity verification");
+                return false;
+            }
+            if (comparison == SectionCompareResult::Mismatch) {
+                ReportTamper(sectionName);
                 return false;
             }
         }
@@ -351,37 +363,39 @@ namespace Oblivion {
         return true;
     }
 
-    bool SelfIntegrityGuard::CompareSection(const IMAGE_SECTION_HEADER& section) const {
+    SelfIntegrityGuard::SectionCompareResult
+    SelfIntegrityGuard::CompareSection(const IMAGE_SECTION_HEADER& section) const {
         const auto* moduleBase = reinterpret_cast<const uint8_t*>(m_module);
         const IMAGE_NT_HEADERS* memoryNt = nullptr;
         const IMAGE_SECTION_HEADER* memorySections = nullptr;
         size_t imageSize = 0;
         if (!GetMappedPeHeaders(moduleBase, memoryNt, memorySections, imageSize))
-            return false;
+            return SectionCompareResult::Incomplete;
         (void)memoryNt;
         (void)memorySections;
 
         size_t sectionSize = static_cast<size_t>(section.SizeOfRawData);
         const size_t virtualSize = static_cast<size_t>(section.Misc.VirtualSize);
         if (virtualSize > 0 && virtualSize < sectionSize) sectionSize = virtualSize;
-        if (sectionSize == 0) return true;
+        if (sectionSize == 0) return SectionCompareResult::Match;
 
         const size_t sectionRva = static_cast<size_t>(section.VirtualAddress);
         if (sectionRva > imageSize || sectionSize > imageSize - sectionRva)
-            return false;
+            return SectionCompareResult::Incomplete;
 
         const size_t rawOffset = static_cast<size_t>(section.PointerToRawData);
         if (rawOffset > m_diskImage.size() ||
             sectionSize > m_diskImage.size() - rawOffset) {
-            return false;
+            return SectionCompareResult::Incomplete;
         }
 
         const auto* sectionMemory = moduleBase + sectionRva;
-        if (!IsReadableRange(sectionMemory, sectionSize)) return false;
+        if (!IsReadableRange(sectionMemory, sectionSize))
+            return SectionCompareResult::Incomplete;
         const auto* sectionOnDisk = m_diskImage.data() + rawOffset;
 
         if (sectionRva > (std::numeric_limits<DWORD>::max)() - sectionSize)
-            return false;
+            return SectionCompareResult::Incomplete;
         const DWORD sectionStartRva = section.VirtualAddress;
         const DWORD sectionEndRva = sectionStartRva + static_cast<DWORD>(sectionSize);
 
@@ -393,18 +407,22 @@ namespace Oblivion {
             const size_t start = interval.first;
             const size_t end = interval.second;
             if (start > sectionSize || end > sectionSize || start > end)
-                return false;
+                return SectionCompareResult::Incomplete;
             if (currentOffset < start &&
                 std::memcmp(sectionMemory + currentOffset, sectionOnDisk + currentOffset,
                             start - currentOffset) != 0) {
-                return false;
+                return SectionCompareResult::Mismatch;
             }
             currentOffset = (std::max)(currentOffset, end);
         }
 
-        return currentOffset >= sectionSize ||
+        const bool matches =
+            currentOffset >= sectionSize ||
             std::memcmp(sectionMemory + currentOffset, sectionOnDisk + currentOffset,
                         sectionSize - currentOffset) == 0;
+        return matches
+            ? SectionCompareResult::Match
+            : SectionCompareResult::Mismatch;
     }
 
     void SelfIntegrityGuard::ReportTamper(const std::string& sectionName) const {
