@@ -27,6 +27,10 @@ jobs:
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror tests/heartbeat_protocol_test.cpp -o /tmp/heartbeat_protocol_test
           /tmp/heartbeat_protocol_test
+      - name: Test TCP socket framing
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -pthread -I server/include tests/socket_framing_test.cpp -o /tmp/socket_framing_test
+          /tmp/socket_framing_test
       - name: Build Linux server
         run: |
           make -C server clean
