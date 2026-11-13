@@ -3,8 +3,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <fstream>
 #include <limits>
+#include <new>
+#include <stdexcept>
 #include <vector>
 #include <cstddef>
 
@@ -266,16 +269,55 @@ namespace Oblivion {
             return false;
         }
 
-        const auto fileSize = file.tellg();
+        const std::streampos fileEnd = file.tellg();
+        if (fileEnd <= std::streampos(0)) {
+            return false;
+        }
+
+        const std::streamoff fileSize = static_cast<std::streamoff>(fileEnd);
         if (fileSize <= 0) {
             return false;
         }
 
-        const auto sizeValue = static_cast<std::streamsize>(fileSize);
-        m_diskImage.resize(static_cast<size_t>(sizeValue));
+        const std::uintmax_t unsignedFileSize =
+            static_cast<std::uintmax_t>(fileSize);
+        if (unsignedFileSize >
+                static_cast<std::uintmax_t>((std::numeric_limits<size_t>::max)()) ||
+            unsignedFileSize >
+                static_cast<std::uintmax_t>((std::numeric_limits<std::streamsize>::max)())) {
+            return false;
+        }
+
+        const size_t imageSize = static_cast<size_t>(fileSize);
+        const std::streamsize readSize = static_cast<std::streamsize>(fileSize);
+        std::vector<uint8_t> loadedImage;
+        if (imageSize > loadedImage.max_size()) {
+            return false;
+        }
+
+        try {
+            loadedImage.resize(imageSize);
+        } catch (const std::bad_alloc&) {
+            return false;
+        } catch (const std::length_error&) {
+            return false;
+        }
+
         file.seekg(0, std::ios::beg);
-        file.read(reinterpret_cast<char*>(m_diskImage.data()), sizeValue);
-        return file.good();
+        if (!file) {
+            return false;
+        }
+
+        file.read(reinterpret_cast<char*>(loadedImage.data()), readSize);
+        if (!file || file.gcount() != readSize) {
+            // Keep the member image empty; a later Start() must retry the read.
+            return false;
+        }
+
+        // Publish only a complete image. A partial read is discarded with the
+        // local temporary instead of leaving a non-empty member that looks loaded.
+        m_diskImage.swap(loadedImage);
+        return true;
     }
 
     void SelfIntegrityGuard::MonitoringLoop() {
