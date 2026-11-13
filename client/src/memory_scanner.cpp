@@ -730,7 +730,6 @@ namespace Oblivion {
                         //           << differentBytes << " bytes (" << diffPercentage << "%)" << std::endl;
                     }
                 }
-            }
 
             m_diskBaseline.push_back(baseline);
         }
