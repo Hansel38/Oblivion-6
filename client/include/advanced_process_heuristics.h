@@ -32,7 +32,16 @@ namespace Oblivion {
         bool HasSuspiciousPath(DWORD processId, std::wstring& matchedPath) const;
         
         // Handle-based detection (ULTIMATE - detects any memory scanner)
-        bool HasSuspiciousHandleToGame(DWORD gameProcessId, std::wstring& suspiciousProcess) const;
+        enum class HandleScanResult {
+            Clean,
+            Suspicious,
+            Incomplete
+        };
+
+        HandleScanResult HasSuspiciousHandleToGame(
+            DWORD gameProcessId,
+            std::wstring& suspiciousProcess,
+            std::wstring& scanIssue) const;
         
         // Behavioral detection
         bool HasSuspiciousBehavior(DWORD processId, std::wstring& behaviorType) const;
