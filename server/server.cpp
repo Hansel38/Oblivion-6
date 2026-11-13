@@ -18,6 +18,7 @@
 #include "secret_obf.h"
 #include "include/heartbeat_protocol.h"
 #include "include/socket_framing.h"
+#include "include/protocol_validation.h"
 #include <bcrypt.h>
 
 #pragma comment(lib, "Ws2_32.lib")
@@ -518,21 +519,6 @@ struct ParsedReport {
     std::string errorMessage;
 };
 
-static bool IsValidChallengeNonce(const std::string& nonce) {
-    if (nonce.empty() || nonce.size() > 20 ||
-        !std::all_of(nonce.begin(), nonce.end(),
-            [](unsigned char c) { return c >= '0' && c <= '9'; })) {
-        return false;
-    }
-    try {
-        size_t parsed = 0;
-        std::stoull(nonce, &parsed, 10);
-        return parsed == nonce.size();
-    } catch (...) {
-        return false;
-    }
-}
-
 ParsedReport ParseProtocol(const std::string& report) {
     ParsedReport result;
     if (report.length() < 12) {
@@ -573,7 +559,7 @@ ParsedReport ParseProtocol(const std::string& report) {
     if (result.type.empty() || result.type.length() > MAX_TYPE_LEN ||
         result.details.length() > MAX_DETAILS_LEN ||
         result.hwid.empty() || result.hwid.length() > MAX_HWID_LEN ||
-        !IsValidChallengeNonce(result.challengeNonce) ||
+        !OblivionNet::IsValidChallengeNonce(result.challengeNonce) ||
         result.mac.size() != 64) {
         result.errorMessage = "Request field length or value is invalid";
         return result;

@@ -26,5 +26,8 @@
     <ClInclude Include="include\secret_obf.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\protocol_validation.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
