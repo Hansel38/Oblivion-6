@@ -446,13 +446,28 @@ namespace {
         
         const std::wstring& expectedPublisher = it->second;
         
-        // Verifikasi digital signature dengan expected publisher
-        std::wcout << L"[AdvHeuristics] Verifying signature: " << processName << L" (PID: " << processId << L")..." << std::endl;
-        bool isVerified = Oblivion::DigitalSignatureValidator::VerifyProcessSignature(processPath, expectedPublisher);
-        
-        // Simpan hasil ke cache
+        // Verifikasi digital signature dengan expected publisher.
+        std::wcout << L"[AdvHeuristics] Verifying signature: " << processName
+                   << L" (PID: " << processId << L")..." << std::endl;
+        std::wstring signatureIssue;
+        const auto signatureResult =
+            Oblivion::DigitalSignatureValidator::VerifyProcessSignatureDetailed(
+                processPath, expectedPublisher, signatureIssue);
+        if (signatureResult ==
+            Oblivion::DigitalSignatureValidator::ProcessSignatureResult::Incomplete) {
+            if (scanIssue != nullptr) {
+                *scanIssue = L"Authenticode verification incomplete: " + signatureIssue;
+            }
+            return ProcessWhitelistResult::Incomplete;
+        }
+
+        const bool isVerified =
+            signatureResult ==
+            Oblivion::DigitalSignatureValidator::ProcessSignatureResult::Trusted;
+
+        // Cache only definitive trust decisions.
         g_signatureCache[cacheKey] = isVerified;
-        
+
         if (!isVerified) {
             // SPOOFING DETECTED!
             std::wcout << L"[AdvHeuristics] SPOOFING DETECTED: Process \"" << processName 
