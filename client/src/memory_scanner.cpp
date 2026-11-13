@@ -552,65 +552,32 @@ namespace Oblivion {
         }
 
         // STEP 5: Get module base address from memory
-        HANDLE hSnapshot = CreateToolhelp32Snapshot(
-            TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
+        HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
         if (hSnapshot == INVALID_HANDLE_VALUE) {
-            const DWORD error = GetLastError();
-            ReportViolationAndExit(
-                L"", "MODULE_ENUMERATION_UNAVAILABLE",
-                "CreateToolhelp32Snapshot failed during baseline creation; error=" +
-                    std::to_string(error));
+            std::string details = "Failed to enumerate modules";
+            ReportViolationAndExit(L"", "MODULE_ENUM_FAILED", details);
             return;
         }
 
-        MODULEENTRY32W me32{};
+        MODULEENTRY32W me32;
         me32.dwSize = sizeof(MODULEENTRY32W);
 
-        uintptr_t moduleBaseAddress = 0;
-        bool foundExecutableModule = false;
-        DWORD enumerationError = ERROR_SUCCESS;
-        if (!Module32FirstW(hSnapshot, &me32)) {
-            enumerationError = GetLastError();
-        } else {
+        if (Module32FirstW(hSnapshot, &me32)) {
             do {
                 if (_wcsicmp(me32.szExePath, filePath.c_str()) == 0) {
-                    moduleBaseAddress =
-                        reinterpret_cast<uintptr_t>(me32.modBaseAddr);
-                    foundExecutableModule = true;
+                    m_moduleBaseAddress = reinterpret_cast<uintptr_t>(me32.modBaseAddr);
                     break;
                 }
-
-                if (!Module32NextW(hSnapshot, &me32)) {
-                    enumerationError = GetLastError();
-                    break;
-                }
-            } while (true);
+            } while (Module32NextW(hSnapshot, &me32));
         }
 
         CloseHandle(hSnapshot);
 
-        if (!foundExecutableModule) {
-            if (enumerationError == ERROR_NO_MORE_FILES) {
-                ReportViolationAndExit(
-                    L"", "MODULE_BASE_NOT_FOUND",
-                    "Module snapshot did not contain the executable during baseline creation");
-            } else {
-                ReportViolationAndExit(
-                    L"", "MODULE_ENUMERATION_UNAVAILABLE",
-                    "Module enumeration failed during baseline creation; error=" +
-                        std::to_string(enumerationError));
-            }
+        if (m_moduleBaseAddress == 0) {
+            std::string details = "Failed to find module base address";
+            ReportViolationAndExit(L"", "MODULE_BASE_NOT_FOUND", details);
             return;
         }
-
-        if (moduleBaseAddress == 0) {
-            ReportViolationAndExit(
-                L"", "MODULE_ENUMERATION_UNAVAILABLE",
-                "Executable module entry was found without a valid base address");
-            return;
-        }
-
-        m_moduleBaseAddress = moduleBaseAddress;
 
         // STEP 6: Create baseline untuk setiap executable section
         for (const auto& section : sections) {
@@ -952,118 +919,144 @@ namespace Oblivion {
     }
 
     MemoryScanner::RegionIntegrityResult
-    MemoryScanner::VerifyRegionIntegrity(uint8_t* memoryBase, size_t regionSize, uintptr_t rva) {
+    MemoryScanner::VerifyRegionIntegrity(
+        uint8_t* memoryBase, size_t regionSize, uintptr_t rva) {
         if (!m_baselineCreated || !m_baselineVerified ||
             memoryBase == nullptr || regionSize == 0) {
             return RegionIntegrityResult::Incomplete;
         }
 
-        // Cari baseline untuk RVA ini (toleransi ukuran sedikit berbeda karena alignment)
+        // Match only a baseline starting at this region. Compare sizes without
+        // signed narrowing so malformed or large values cannot overflow.
         for (const auto& baseline : m_diskBaseline) {
-            // Match RVA dan ukuran harus sama atau sangat dekat (untuk toleransi alignment)
             const size_t sizeDiff = baseline.size > regionSize
                 ? baseline.size - regionSize
                 : regionSize - baseline.size;
-            if (baseline.rva == rva && sizeDiff < 0x1000) {
-                const size_t sizeToCheck = (std::min)(baseline.size, regionSize);
-                if (sizeToCheck == 0 ||
-                    !IsReadableMemoryRange(memoryBase, sizeToCheck)) {
+            if (baseline.rva != rva || sizeDiff >= 0x1000) {
+                continue;
+            }
+
+            if (baseline.size == 0) {
+                return RegionIntegrityResult::Incomplete;
+            }
+
+            const size_t sizeToCheck = (std::min)(baseline.size, regionSize);
+            if (!IsReadableMemoryRange(memoryBase, sizeToCheck)) {
+                return RegionIntegrityResult::Incomplete;
+            }
+
+            const uint32_t currentCRC32 =
+                CalculateCRC32(memoryBase, sizeToCheck);
+            bool memoryModified = false;
+
+            if (baseline.memoryCRC32 != 0) {
+                // A full-region CRC cannot validate a shorter prefix. The old
+                // fallback re-read the live module as its own "baseline" and,
+                // on a short VirtualQuery range, could hash baseline.size bytes
+                // from a buffer that only had regionSize bytes available.
+                if (baseline.size > regionSize) {
                     return RegionIntegrityResult::Incomplete;
                 }
-                uint32_t currentCRC32 = CalculateCRC32(memoryBase, sizeToCheck);
-
-                // CRITICAL: Bandingkan dengan memory baseline (bukan disk baseline)
-                // karena relocations membuat memory berbeda dari disk sejak awal
-                bool memoryModified = false;
-                
-                if (baseline.memoryCRC32 != 0) {
-                    // A full-region CRC cannot validate a shorter prefix.
-                    // Do not re-read the live module as its own baseline.
-                    if (baseline.size > regionSize) {
+                // A larger VirtualQuery region may include alignment padding;
+                // the complete baseline-sized prefix is still safe to compare.
+                memoryModified = currentCRC32 != baseline.memoryCRC32;
+            } else if (currentCRC32 != baseline.diskCRC32) {
+                // Fallback: compare executable bytes against the disk image,
+                // retaining the existing relocation-tolerance threshold.
+                if (baseline.isCodeSection) {
+                    const auto sectionIt = m_sectionMap.find(
+                        static_cast<uint32_t>(baseline.rva));
+                    if (sectionIt == m_sectionMap.end()) {
                         return RegionIntegrityResult::Incomplete;
                     }
+
+                    const auto& section = sectionIt->second;
+                    std::vector<uint8_t> fileData;
+                    if (!ReadExecutableFile(m_executablePath, fileData) ||
+                        section.rawDataOffset > fileData.size() ||
+                        section.rawDataSize > fileData.size() - section.rawDataOffset) {
+                        return RegionIntegrityResult::Incomplete;
+                    }
+
+                    const size_t bytesToCompare =
+                        (std::min)(sizeToCheck, static_cast<size_t>(section.rawDataSize));
+                    if (bytesToCompare == 0) {
+                        return RegionIntegrityResult::Incomplete;
+                    }
+
+                    const uint8_t* diskData =
+                        fileData.data() + section.rawDataOffset;
+                    size_t differentBytes = 0;
+                    for (size_t i = 0; i < bytesToCompare; ++i) {
+                        if (diskData[i] != memoryBase[i]) {
+                            ++differentBytes;
+                        }
+                    }
+
+                    const double diffPercentage =
+                        100.0 * static_cast<double>(differentBytes) /
+                        static_cast<double>(bytesToCompare);
+                    const size_t diffThreshold =
+                        bytesToCompare > 100000 ? bytesToCompare / 1000 : 100;
+
                     memoryModified =
-                        CalculateCRC32(memoryBase, baseline.size) != baseline.memoryCRC32;
+                        differentBytes > diffThreshold || diffPercentage > 0.1;
                 } else {
-                    // Fallback: jika memory baseline tidak tersedia, bandingkan dengan disk
-                    // tapi perlu toleransi untuk relocations
-                    if (currentCRC32 != baseline.diskCRC32) {
-                        // Untuk code sections, hitung perbedaan byte untuk membedakan relocations
-                        if (baseline.isCodeSection) {
-                            auto it_section = m_sectionMap.find(baseline.rva);
-                            if (it_section != m_sectionMap.end()) {
-                                const auto& section = it_section->second;
-                                // Baca disk data untuk perbandingan
-                                std::vector<uint8_t> fileData;
-                                if (ReadExecutableFile(m_executablePath, fileData) && 
-                                    section.rawDataOffset <= fileData.size() &&
-                                    section.rawDataSize <= fileData.size() - section.rawDataOffset) {
-                                    const uint8_t* diskData = fileData.data() + section.rawDataOffset;
-                                    size_t differentBytes = 0;
-                                    size_t bytesToCompare = (sizeToCheck < section.rawDataSize) ? sizeToCheck : section.rawDataSize;
-                                    
-                                    for (size_t i = 0; i < bytesToCompare; i++) {
-                                        if (diskData[i] != memoryBase[i]) {
-                                            differentBytes++;
-                                        }
-                                    }
-                                    
-                                    // Relocations biasanya < 0.1% atau < 100 bytes
-                                    double diffPercentage = (bytesToCompare > 0) ? (100.0 * differentBytes / bytesToCompare) : 0.0;
-                                    size_t diffThreshold = (bytesToCompare > 100000) ? (bytesToCompare / 1000) : 100;
-                                    
-                                    // Hanya flag jika perbedaannya signifikan
-                                    memoryModified = (differentBytes > diffThreshold || diffPercentage > 0.1);
-                                } else {
-                                    return RegionIntegrityResult::Incomplete;
-                                }
-                            } else {
-                                return RegionIntegrityResult::Incomplete;
-                            }
-                        } else {
-                            // Untuk non-code sections, gunakan heuristik SHA256
-                            uint64_t sha32 = CalculateSHA256_32bit(memoryBase, sizeToCheck);
-                            uint32_t sha32_lo = static_cast<uint32_t>(sha32);
-                            memoryModified = (sha32_lo != baseline.memoryCRC32 && baseline.memoryCRC32 != 0);
-                        }
-                    }
+                    // Preserve the existing non-code fallback behavior.
+                    const uint64_t sha32 =
+                        CalculateSHA256_32bit(memoryBase, sizeToCheck);
+                    const uint32_t sha32Lo = static_cast<uint32_t>(sha32);
+                    memoryModified =
+                        sha32Lo != baseline.memoryCRC32 &&
+                        baseline.memoryCRC32 != 0;
                 }
+            }
 
-                if (memoryModified) {
-                    // Jika memang ada modifikasi, baru lakukan deteksi code cave sebagai konfirmasi tambahan
-                    if (baseline.isCodeSection && DetectCodeCaveInjection(memoryBase, sizeToCheck)) {
-                        // Extract executable filename dari path
-                        std::string exeName = "unknown";
-                        if (!m_executablePath.empty()) {
-                            size_t lastSlash = m_executablePath.find_last_of(L"\\/");
-                            if (lastSlash != std::wstring::npos && lastSlash + 1 < m_executablePath.length()) {
-                                std::wstring exeNameWide = m_executablePath.substr(lastSlash + 1);
-                                int size_needed = WideCharToMultiByte(CP_UTF8, 0, exeNameWide.c_str(), (int)exeNameWide.length(), NULL, 0, NULL, NULL);
-                                if (size_needed > 0) {
-                                    exeName.assign(size_needed, 0);
-                                    WideCharToMultiByte(CP_UTF8, 0, exeNameWide.c_str(), (int)exeNameWide.length(), &exeName[0], size_needed, NULL, NULL);
-                                }
-                            }
-                        }
-                        
-                        std::stringstream ss;
-                        ss << "File: " << exeName
-                           << " | Suspicious code pattern detected (NOP sled/code cave) at RVA: 0x" 
-                           << std::hex << rva;
-                        ReportViolationAndExit(L"", "CODE_CAVE_DETECTED", ss.str());
-                        return RegionIntegrityResult::Modified;
-                    }
-
-                    // Jika tidak terdeteksi code cave spesifik, tetap anggap modifikasi
-                    return RegionIntegrityResult::Modified;
-                }
-
-                // Tidak ada modifikasi terdeteksi
+            if (!memoryModified) {
                 return RegionIntegrityResult::Clean;
             }
+
+            // A confirmed modified code region still receives the existing
+            // code-cave check before reporting the stronger finding.
+            if (baseline.isCodeSection &&
+                DetectCodeCaveInjection(memoryBase, sizeToCheck)) {
+                std::string exeName = "unknown";
+                if (!m_executablePath.empty()) {
+                    const size_t lastSlash =
+                        m_executablePath.find_last_of(L"\\/");
+                    if (lastSlash != std::wstring::npos &&
+                        lastSlash + 1 < m_executablePath.length()) {
+                        const std::wstring exeNameWide =
+                            m_executablePath.substr(lastSlash + 1);
+                        const int required = WideCharToMultiByte(
+                            CP_UTF8, 0, exeNameWide.c_str(),
+                            static_cast<int>(exeNameWide.length()),
+                            nullptr, 0, nullptr, nullptr);
+                        if (required > 0) {
+                            exeName.resize(static_cast<size_t>(required));
+                            if (WideCharToMultiByte(
+                                    CP_UTF8, 0, exeNameWide.c_str(),
+                                    static_cast<int>(exeNameWide.length()),
+                                    &exeName[0], required, nullptr, nullptr) != required) {
+                                exeName = "unknown";
+                            }
+                        }
+                    }
+                }
+
+                std::stringstream details;
+                details << "File: " << exeName
+                        << " | Suspicious code pattern detected (NOP sled/code cave) at RVA: 0x"
+                        << std::hex << rva;
+                ReportViolationAndExit(L"", "CODE_CAVE_DETECTED", details.str());
+            }
+
+            return RegionIntegrityResult::Modified;
         }
 
-        return RegionIntegrityResult::Clean; // Region tidak dikenal, tidak langsung flag
+        // Some executable pages do not begin at a baseline section RVA. They
+        // remain outside this section-level comparison, as before.
+        return RegionIntegrityResult::Clean;
     }
 
     bool MemoryScanner::DetectSuspiciousMemoryRegion(uint8_t* memoryBase, size_t regionSize) {
@@ -1169,99 +1162,31 @@ namespace Oblivion {
         
         HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
         if (hSnapshot == INVALID_HANDLE_VALUE) {
-            const DWORD error = GetLastError();
-            ReportViolationAndExit(
-                L"", "MODULE_ENUMERATION_UNAVAILABLE",
-                "CreateToolhelp32Snapshot failed during runtime memory scan; error=" +
-                    std::to_string(error));
             return;
         }
 
-        MODULEENTRY32W me32{};
+        MODULEENTRY32W me32;
         me32.dwSize = sizeof(MODULEENTRY32W);
 
-        bool foundExecutableModule = false;
-        DWORD enumerationError = ERROR_SUCCESS;
-        if (!Module32FirstW(hSnapshot, &me32)) {
-            enumerationError = GetLastError();
-        } else {
+        if (Module32FirstW(hSnapshot, &me32)) {
             do {
                 if (_wcsicmp(me32.szExePath, m_executablePath.c_str()) == 0) {
-                    foundExecutableModule = true;
                     uint8_t* baseAddr = reinterpret_cast<uint8_t*>(me32.modBaseAddr);
                     SIZE_T moduleSize = me32.modBaseSize;
 
-                    const uintptr_t moduleStart = reinterpret_cast<uintptr_t>(baseAddr);
-                    const uintptr_t maximumAddress =
-                        (std::numeric_limits<uintptr_t>::max)();
-                    if (baseAddr == nullptr || moduleSize == 0 ||
-                        moduleStart > maximumAddress - static_cast<uintptr_t>(moduleSize)) {
-                        CloseHandle(hSnapshot);
-                        ReportViolationAndExit(
-                            L"", "MEMORY_SCAN_UNAVAILABLE",
-                            "Runtime executable module has an invalid base address or image size");
-                        return;
-                    }
-                    if (moduleStart != m_moduleBaseAddress) {
-                        CloseHandle(hSnapshot);
-                        ReportViolationAndExit(
-                            L"", "MEMORY_SCAN_UNAVAILABLE",
-                            "Executable module base changed after the memory baseline was created");
-                        return;
-                    }
-
-                    const uintptr_t moduleEnd =
-                        moduleStart + static_cast<uintptr_t>(moduleSize);
-                    bool queryFailed = false;
-                    std::string queryIssue;
-                    for (size_t offset = 0; offset < moduleSize;) {
-                        const uintptr_t queryAddress = moduleStart + offset;
-                        MEMORY_BASIC_INFORMATION mbi{};
-                        if (VirtualQuery(
-                                reinterpret_cast<const void*>(queryAddress),
-                                &mbi, sizeof(mbi)) == 0) {
-                            const DWORD error = GetLastError();
-                            queryFailed = true;
-                            queryIssue =
-                                "VirtualQuery failed during runtime memory scan; address=" +
-                                std::to_string(queryAddress) + "; error=" +
-                                std::to_string(error);
+                    MEMORY_BASIC_INFORMATION mbi;
+                    for (size_t offset = 0; offset < moduleSize; offset += mbi.RegionSize) {
+                        if (VirtualQuery(baseAddr + offset, &mbi, sizeof(mbi)) == 0) {
                             break;
                         }
-
-                        const uintptr_t regionStart =
-                            reinterpret_cast<uintptr_t>(mbi.BaseAddress);
-                        const uintptr_t regionSizeValue =
-                            static_cast<uintptr_t>(mbi.RegionSize);
-                        if (mbi.RegionSize == 0 ||
-                            regionStart > queryAddress ||
-                            regionSizeValue > maximumAddress - regionStart) {
-                            queryFailed = true;
-                            queryIssue =
-                                "VirtualQuery returned an invalid memory region during runtime scan";
-                            break;
-                        }
-
-                        const uintptr_t regionEnd = regionStart + regionSizeValue;
-                        if (regionEnd <= queryAddress) {
-                            queryFailed = true;
-                            queryIssue =
-                                "VirtualQuery did not advance the runtime memory scan";
-                            break;
-                        }
-
-                        // Limit the scan to the image; the last queried region
-                        // can extend beyond modBaseSize.
-                        const uintptr_t scanEnd = (std::min)(regionEnd, moduleEnd);
-                        const size_t regionSize =
-                            static_cast<size_t>(scanEnd - queryAddress);
-                        uint8_t* regionBase =
-                            reinterpret_cast<uint8_t*>(queryAddress);
 
                         if (mbi.State == MEM_COMMIT && 
                             (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | 
                                           PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) {
                             
+                            uint8_t* regionBase = reinterpret_cast<uint8_t*>(mbi.BaseAddress);
+                            size_t regionSize = mbi.RegionSize;
+
                             // Detect RWX pages (very suspicious)
                             if (DetectSuspiciousMemoryRegion(regionBase, regionSize)) {
                                 // Extract executable filename from path
@@ -1327,39 +1252,12 @@ namespace Oblivion {
                                 }
                             }
                         }
-
-                        offset = static_cast<size_t>(scanEnd - moduleStart);
-                    }
-
-                    if (queryFailed) {
-                        CloseHandle(hSnapshot);
-                        ReportViolationAndExit(
-                            L"", "MEMORY_SCAN_UNAVAILABLE", queryIssue);
-                        return;
                     }
                     break;
                 }
-
-                if (!Module32NextW(hSnapshot, &me32)) {
-                    enumerationError = GetLastError();
-                    break;
-                }
-            } while (true);
+            } while (Module32NextW(hSnapshot, &me32));
         }
 
         CloseHandle(hSnapshot);
-        if (!foundExecutableModule) {
-            if (enumerationError == ERROR_NO_MORE_FILES) {
-                ReportViolationAndExit(
-                    L"", "MODULE_BASE_NOT_FOUND",
-                    "Runtime module snapshot did not contain the executable module");
-            } else {
-                ReportViolationAndExit(
-                    L"", "MODULE_ENUMERATION_UNAVAILABLE",
-                    "Module enumeration failed during runtime memory scan; error=" +
-                        std::to_string(enumerationError));
-            }
-            return;
-        }
     }
 }
