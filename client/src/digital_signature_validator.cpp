@@ -334,7 +334,7 @@ namespace Oblivion {
                 ", ProgramFiles(x86)=" +
                 std::string(haveProgramFilesX86 ? "available" : "unavailable");
             ReportViolationAndExit(
-                L"", "MODULE_TRUST_ROOT_UNAVAILABLE", details);
+                L"", "MODULE_SIGNATURE_UNAVAILABLE", details);
             return;
         }
 
