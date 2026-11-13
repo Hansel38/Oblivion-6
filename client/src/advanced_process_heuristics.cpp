@@ -1165,7 +1165,7 @@ namespace Oblivion {
         const std::wstring lowerPath = ToLowerCopy(fullPath);
 
 #ifdef _DEBUG
-        std::wstring debugMsg = L"[AdvHeuristics] Process path: " + fullPath + L"\\n";
+        std::wstring debugMsg = L"[AdvHeuristics] Process path: " + fullPath + L"\n";
         OutputDebugStringW(debugMsg.c_str());
 #endif
 
@@ -1195,7 +1195,7 @@ namespace Oblivion {
             if (lowerPath.find(keyword) != std::wstring::npos) {
                 matchedPath = L"SUSPICIOUS_PATH: " + fullPath;
 #ifdef _DEBUG
-                std::wstring debugMsg2 = L"[AdvHeuristics] DETECTED SUSPICIOUS PATH with keyword: " + keyword + L"\\n";
+                std::wstring debugMsg2 = L"[AdvHeuristics] DETECTED SUSPICIOUS PATH with keyword: " + keyword + L"\n";
                 OutputDebugStringW(debugMsg2.c_str());
 #endif
                 return true;
