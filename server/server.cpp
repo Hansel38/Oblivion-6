@@ -1041,7 +1041,13 @@ void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbea
                 LogViolation(type, details, hwid);
                 
                 // 2. Cek apakah HWID sudah di-ban (hanya cek, tidak auto-ban)
-                bool isBanned = IsHWIDBanned(hwid);
+                const BanListStatus banStatus = CheckHWIDBanStatus(hwid);
+                if (banStatus == BanListStatus::Unavailable) {
+                    LogViolation("BAN_LIST_UNAVAILABLE", "Ban list could not be read or contains malformed entries", hwid);
+                    closesocket(clientSocket);
+                    return;
+                }
+                const bool isBanned = banStatus == BanListStatus::Banned;
                 
                 // 3. AUTO-BAN DISABLED - Admin melakukan ban manual via bans.txt
                 // bool isSerious = IsSeriousViolation(type);
