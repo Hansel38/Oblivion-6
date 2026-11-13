@@ -918,17 +918,25 @@ namespace Oblivion {
         return false;
     }
 
-    bool MemoryScanner::VerifyRegionIntegrity(uint8_t* memoryBase, size_t regionSize, uintptr_t rva) {
-        if (!m_baselineCreated || !m_baselineVerified) {
-            return false; // Baseline belum valid
+    MemoryScanner::RegionIntegrityResult
+    MemoryScanner::VerifyRegionIntegrity(uint8_t* memoryBase, size_t regionSize, uintptr_t rva) {
+        if (!m_baselineCreated || !m_baselineVerified ||
+            memoryBase == nullptr || regionSize == 0) {
+            return RegionIntegrityResult::Incomplete;
         }
 
         // Cari baseline untuk RVA ini (toleransi ukuran sedikit berbeda karena alignment)
         for (const auto& baseline : m_diskBaseline) {
             // Match RVA dan ukuran harus sama atau sangat dekat (untuk toleransi alignment)
-            long long sizeDiff = (long long)baseline.size - (long long)regionSize;
-            if (baseline.rva == rva && (baseline.size == regionSize || (sizeDiff >= 0 ? sizeDiff : -sizeDiff) < 0x1000)) {
-                size_t sizeToCheck = (baseline.size < regionSize) ? baseline.size : regionSize;
+            const size_t sizeDiff = baseline.size > regionSize
+                ? baseline.size - regionSize
+                : regionSize - baseline.size;
+            if (baseline.rva == rva && sizeDiff < 0x1000) {
+                const size_t sizeToCheck = (std::min)(baseline.size, regionSize);
+                if (sizeToCheck == 0 ||
+                    !IsReadableMemoryRange(memoryBase, sizeToCheck)) {
+                    return RegionIntegrityResult::Incomplete;
+                }
                 uint32_t currentCRC32 = CalculateCRC32(memoryBase, sizeToCheck);
 
                 // CRITICAL: Bandingkan dengan memory baseline (bukan disk baseline)
@@ -936,38 +944,13 @@ namespace Oblivion {
                 bool memoryModified = false;
                 
                 if (baseline.memoryCRC32 != 0) {
-                    // Gunakan memory baseline jika tersedia (setelah relocations)
-                    // baseline.memoryCRC32 dihitung dengan ukuran baseline.size saat baseline dibuat
-                    // Jadi kita harus menggunakan ukuran yang sama untuk perbandingan
-                    
-                    // Gunakan ukuran baseline.size untuk perbandingan (bukan sizeToCheck)
-                    // karena baseline.memoryCRC32 dihitung dengan ukuran baseline.size
-                    size_t sizeForComparison = baseline.size;
-                    if (sizeForComparison > regionSize) {
-                        sizeForComparison = regionSize; // Jangan melebihi region yang tersedia
+                    // A full-region CRC cannot validate a shorter prefix.
+                    // Do not re-read the live module as its own baseline.
+                    if (baseline.size > regionSize) {
+                        return RegionIntegrityResult::Incomplete;
                     }
-                    
-                    uint32_t currentCRC32ForComparison = CalculateCRC32(memoryBase, sizeForComparison);
-                    
-                    // Jika ukuran berbeda dari baseline.size, perlu recalculate baseline memory CRC32
-                    uint32_t baselineMemoryCRC32 = baseline.memoryCRC32;
-                    if (sizeForComparison != baseline.size) {
-                        // Recalculate baseline memory CRC32 dengan ukuran yang sesuai
-                        uint8_t* baselineMemoryAddr = reinterpret_cast<uint8_t*>(m_moduleBaseAddress + baseline.rva);
-                        MEMORY_BASIC_INFORMATION mbi;
-                        if (VirtualQuery(baselineMemoryAddr, &mbi, sizeof(mbi)) > 0 && mbi.State == MEM_COMMIT) {
-                            size_t availableSize = (baseline.size < static_cast<size_t>(mbi.RegionSize)) ? baseline.size : static_cast<size_t>(mbi.RegionSize);
-                            if (availableSize >= sizeForComparison) {
-                                baselineMemoryCRC32 = CalculateCRC32(baselineMemoryAddr, sizeForComparison);
-                            } else {
-                                // Tidak bisa recalculate, gunakan baseline yang ada
-                                sizeForComparison = baseline.size;
-                                currentCRC32ForComparison = CalculateCRC32(memoryBase, sizeForComparison);
-                            }
-                        }
-                    }
-                    
-                    memoryModified = (currentCRC32ForComparison != baselineMemoryCRC32);
+                    memoryModified =
+                        CalculateCRC32(memoryBase, baseline.size) != baseline.memoryCRC32;
                 } else {
                     // Fallback: jika memory baseline tidak tersedia, bandingkan dengan disk
                     // tapi perlu toleransi untuk relocations
@@ -999,10 +982,10 @@ namespace Oblivion {
                                     // Hanya flag jika perbedaannya signifikan
                                     memoryModified = (differentBytes > diffThreshold || diffPercentage > 0.1);
                                 } else {
-                                    memoryModified = true; // Tidak bisa verifikasi, anggap modified
+                                    return RegionIntegrityResult::Incomplete;
                                 }
                             } else {
-                                memoryModified = true; // Tidak bisa verifikasi, anggap modified
+                                return RegionIntegrityResult::Incomplete;
                             }
                         } else {
                             // Untuk non-code sections, gunakan heuristik SHA256
@@ -1015,7 +998,7 @@ namespace Oblivion {
 
                 if (memoryModified) {
                     // Jika memang ada modifikasi, baru lakukan deteksi code cave sebagai konfirmasi tambahan
-                    if (baseline.isCodeSection && DetectCodeCaveInjection(memoryBase, regionSize)) {
+                    if (baseline.isCodeSection && DetectCodeCaveInjection(memoryBase, sizeToCheck)) {
                         // Extract executable filename dari path
                         std::string exeName = "unknown";
                         if (!m_executablePath.empty()) {
@@ -1035,19 +1018,19 @@ namespace Oblivion {
                            << " | Suspicious code pattern detected (NOP sled/code cave) at RVA: 0x" 
                            << std::hex << rva;
                         ReportViolationAndExit(L"", "CODE_CAVE_DETECTED", ss.str());
-                        return true;
+                        return RegionIntegrityResult::Modified;
                     }
 
                     // Jika tidak terdeteksi code cave spesifik, tetap anggap modifikasi
-                    return true;
+                    return RegionIntegrityResult::Modified;
                 }
 
                 // Tidak ada modifikasi terdeteksi
-                return false;
+                return RegionIntegrityResult::Clean;
             }
         }
 
-        return false; // Region tidak dikenal, tidak langsung flag
+        return RegionIntegrityResult::Clean; // Region tidak dikenal, tidak langsung flag
     }
 
     bool MemoryScanner::DetectSuspiciousMemoryRegion(uint8_t* memoryBase, size_t regionSize) {
@@ -1207,7 +1190,19 @@ namespace Oblivion {
                             if (mbi.Protect & (PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)) {
                                 uintptr_t rva = reinterpret_cast<uintptr_t>(regionBase) - m_moduleBaseAddress;
                                 
-                                if (VerifyRegionIntegrity(regionBase, regionSize, rva)) {
+                                const RegionIntegrityResult integrityResult =
+                                    VerifyRegionIntegrity(regionBase, regionSize, rva);
+                                if (integrityResult == RegionIntegrityResult::Incomplete) {
+                                    std::stringstream details;
+                                    details << "Unable to safely compare executable memory region at RVA 0x"
+                                            << std::hex << rva;
+                                    CloseHandle(hSnapshot);
+                                    ReportViolationAndExit(
+                                        L"", "MEMORY_INTEGRITY_UNAVAILABLE", details.str());
+                                    return;
+                                }
+
+                                if (integrityResult == RegionIntegrityResult::Modified) {
                                     // Extract executable filename from path
                                     std::string exeName = "unknown";
                                     if (!m_executablePath.empty()) {
