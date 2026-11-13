@@ -87,6 +87,30 @@ bool ConstantTimeEquals(const std::string& left, const std::string& right) {
     return difference == 0;
 }
 
+static std::string BuildRequestAuthData(
+    const std::string& type, const std::string& details,
+    const std::string& hwid, const std::string& challengeNonce) {
+    return "REQUEST:" + type + ":" + std::to_string(details.size()) + ":" +
+           details + ":" + hwid + ":" + challengeNonce;
+}
+
+static bool ParseHelloFrame(const std::string& frame, std::string& hwid) {
+    static const std::string prefix = "HELLO:";
+    hwid.clear();
+    if (frame.rfind(prefix, 0) != 0 || frame.size() <= prefix.size() ||
+        frame.back() != ';' ||
+        frame.find(':', prefix.size()) != std::string::npos) {
+        return false;
+    }
+
+    hwid = frame.substr(prefix.size(), frame.size() - prefix.size() - 1);
+    if (hwid.empty() || hwid.size() > MAX_HWID_LEN) return false;
+    for (unsigned char c : hwid) {
+        if (!std::isxdigit(c) && c != '-') return false;
+    }
+    return true;
+}
+
 // Cross-platform helper functions
 std::string GetExecutableDirectory() {
 #ifdef _WIN32
