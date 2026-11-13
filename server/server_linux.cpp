@@ -60,7 +60,6 @@
 #define MAX_TYPE_LEN 64
 #define MAX_DETAILS_LEN 2048
 #define MAX_HWID_LEN 128
-#define MAX_SECRET_LEN 128
 
 static std::string SERVER_SECRET = OblivionServer::GetServerSecret();
 #define BAN_LIST_FILE "bans.txt"
@@ -85,6 +84,30 @@ bool ConstantTimeEquals(const std::string& left, const std::string& right) {
         difference |= static_cast<unsigned char>(left[i] ^ right[i]);
     }
     return difference == 0;
+}
+
+static std::string BuildRequestAuthData(
+    const std::string& type, const std::string& details,
+    const std::string& hwid, const std::string& challengeNonce) {
+    return "REQUEST:" + type + ":" + std::to_string(details.size()) + ":" +
+           details + ":" + hwid + ":" + challengeNonce;
+}
+
+static bool ParseHelloFrame(const std::string& frame, std::string& hwid) {
+    static const std::string prefix = "HELLO:";
+    hwid.clear();
+    if (frame.rfind(prefix, 0) != 0 || frame.size() <= prefix.size() ||
+        frame.back() != ';' ||
+        frame.find(':', prefix.size()) != std::string::npos) {
+        return false;
+    }
+
+    hwid = frame.substr(prefix.size(), frame.size() - prefix.size() - 1);
+    if (hwid.empty() || hwid.size() > MAX_HWID_LEN) return false;
+    for (unsigned char c : hwid) {
+        if (!std::isxdigit(c) && c != '-') return false;
+    }
+    return true;
 }
 
 // Cross-platform helper functions
@@ -548,126 +571,91 @@ std::string SanitizeInput(const std::string& input, size_t maxLen) {
 
 struct ParsedReport {
     bool valid = false;
-    std::string type = "";
-    std::string details = "";
-    std::string hwid = "";
-    std::string secret = "";
-    std::string errorMessage = "";
+    std::string type;
+    std::string details;
+    std::string hwid;
+    std::string challengeNonce;
+    std::string mac;
+    std::string errorMessage;
 };
+
+static bool IsValidChallengeNonce(const std::string& nonce) {
+    if (nonce.empty() || nonce.size() > 20 ||
+        !std::all_of(nonce.begin(), nonce.end(),
+            [](unsigned char c) { return c >= '0' && c <= '9'; })) {
+        return false;
+    }
+    try {
+        size_t parsed = 0;
+        std::stoull(nonce, &parsed, 10);
+        return parsed == nonce.size();
+    } catch (...) {
+        return false;
+    }
+}
 
 ParsedReport ParseProtocol(const std::string& report) {
     ParsedReport result;
-    result.valid = false;
-    
-    if (report.length() < 10) {
-        result.errorMessage = "Report too short (minimum 10 characters required)";
+    if (report.length() < 12) {
+        result.errorMessage = "Report too short";
         return result;
     }
-    
     if (report.length() > BUFFER_LEN - 1) {
         result.errorMessage = "Report exceeds maximum length";
         return result;
     }
-    
     if (report.back() != ';') {
         result.errorMessage = "Report must end with semicolon";
         return result;
     }
-    
-    size_t colonCount = std::count(report.begin(), report.end(), ':');
-    if (colonCount != 3) {
-        result.errorMessage = "Invalid format: expected 3 colons, found " + std::to_string(colonCount);
+    if (std::count(report.begin(), report.end(), ':') != 4) {
+        result.errorMessage = "Invalid format: expected 4 colons";
         return result;
     }
-    
-    size_t pos1 = report.find(':');
-    if (pos1 == std::string::npos || pos1 == 0) {
-        result.errorMessage = "Invalid TYPE field position";
+
+    const size_t pos1 = report.find(':');
+    const size_t pos2 = report.find(':', pos1 + 1);
+    const size_t pos3 = report.find(':', pos2 + 1);
+    const size_t pos4 = report.find(':', pos3 + 1);
+    const size_t pos5 = report.find(';', pos4 + 1);
+    if (pos1 == 0 || pos2 == std::string::npos || pos3 == std::string::npos ||
+        pos4 == std::string::npos || pos5 != report.size() - 1 ||
+        pos4 == pos5 - 1) {
+        result.errorMessage = "Invalid request field positions";
         return result;
     }
-    
-    size_t pos2 = report.find(':', pos1 + 1);
-    if (pos2 == std::string::npos) {
-        result.errorMessage = "Invalid DETAILS field position";
+
+    result.type = report.substr(0, pos1);
+    result.details = report.substr(pos1 + 1, pos2 - pos1 - 1);
+    result.hwid = report.substr(pos2 + 1, pos3 - pos2 - 1);
+    result.challengeNonce = report.substr(pos3 + 1, pos4 - pos3 - 1);
+    result.mac = report.substr(pos4 + 1, pos5 - pos4 - 1);
+
+    if (result.type.empty() || result.type.length() > MAX_TYPE_LEN ||
+        result.details.length() > MAX_DETAILS_LEN ||
+        result.hwid.empty() || result.hwid.length() > MAX_HWID_LEN ||
+        !IsValidChallengeNonce(result.challengeNonce) ||
+        result.mac.size() != 64) {
+        result.errorMessage = "Request field length or value is invalid";
         return result;
     }
-    
-    size_t pos3 = report.find(':', pos2 + 1);
-    if (pos3 == std::string::npos) {
-        result.errorMessage = "Invalid HWID field position";
-        return result;
-    }
-    
-    size_t pos4 = report.find(';', pos3 + 1);
-    if (pos4 == std::string::npos || pos4 == pos3 + 1) {
-        result.errorMessage = "Invalid SECRET field position";
-        return result;
-    }
-    
-    try {
-        result.type = report.substr(0, pos1);
-        result.details = report.substr(pos1 + 1, pos2 - pos1 - 1);
-        result.hwid = report.substr(pos2 + 1, pos3 - pos2 - 1);
-        result.secret = report.substr(pos3 + 1, pos4 - pos3 - 1);
-    } catch (const std::out_of_range& e) {
-        result.errorMessage = std::string("Parsing error: ") + e.what();
-        return result;
-    }
-    
-    if (result.type.length() > MAX_TYPE_LEN) {
-        result.errorMessage = "TYPE field exceeds maximum length (" + std::to_string(MAX_TYPE_LEN) + ")";
-        return result;
-    }
-    
-    if (result.details.length() > MAX_DETAILS_LEN) {
-        result.errorMessage = "DETAILS field exceeds maximum length (" + std::to_string(MAX_DETAILS_LEN) + ")";
-        return result;
-    }
-    
-    if (result.hwid.length() > MAX_HWID_LEN) {
-        result.errorMessage = "HWID field exceeds maximum length (" + std::to_string(MAX_HWID_LEN) + ")";
-        return result;
-    }
-    
-    if (result.secret.length() > MAX_SECRET_LEN) {
-        result.errorMessage = "SECRET field exceeds maximum length (" + std::to_string(MAX_SECRET_LEN) + ")";
-        return result;
-    }
-    
-    if (result.type.empty()) {
-        result.errorMessage = "TYPE field cannot be empty";
-        return result;
-    }
-    
-    for (char c : result.type) {
-        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') {
+    for (unsigned char c : result.type) {
+        if (!std::isalnum(c) && c != '_') {
             result.errorMessage = "TYPE field contains invalid characters";
             return result;
         }
     }
-    
-    if (result.hwid.empty()) {
-        result.errorMessage = "HWID field cannot be empty";
-        return result;
-    }
-    
-    for (char c : result.hwid) {
-        if (!std::isxdigit(static_cast<unsigned char>(c)) && c != '-') {
-            result.errorMessage = "HWID field contains invalid characters (expected hex + dash)";
+    for (unsigned char c : result.hwid) {
+        if (!std::isxdigit(c) && c != '-') {
+            result.errorMessage = "HWID field contains invalid characters";
             return result;
         }
     }
-    
-    if (result.secret.empty()) {
-        result.errorMessage = "SECRET field cannot be empty";
-        return result;
-    }
-    
-    result.details = SanitizeInput(result.details, MAX_DETAILS_LEN);
-    
+
     result.valid = true;
     return result;
 }
+
 
 void HandleClient(SocketType clientSocket) {
     const uint32_t activeBefore = g_activeClientCount.fetch_add(1, std::memory_order_relaxed);
@@ -686,27 +674,65 @@ void HandleClient(SocketType clientSocket) {
     try {
         if (!OblivionNet::ReceiveFrame(clientSocket, pendingNetworkData,
                                        report, 5000, BUFFER_LEN - 1)) {
-            LogViolation("FRAME_READ_FAILED", "Timed out or received an oversized/incomplete request", extractedHwid);
+            LogViolation("FRAME_READ_FAILED", "Timed out or received an oversized/incomplete HELLO request", extractedHwid);
             closesocket_impl(clientSocket);
             return;
         }
-        // Only one initial request frame is valid before the server replies.
+
+        std::string helloHwid;
+        if (!ParseHelloFrame(report, helloHwid) || !pendingNetworkData.empty()) {
+            LogViolation("MALFORMED_REQUEST", "Expected one HELLO:<HWID>; frame", extractedHwid);
+            closesocket_impl(clientSocket);
+            return;
+        }
+        extractedHwid = helloHwid;
+
+        uint64_t challengeNonceValue = 0;
+        if (!OblivionNet::GenerateSecureNonce(challengeNonceValue)) {
+            LogViolation("RNG_FAILURE", "Unable to generate request challenge nonce", helloHwid);
+            closesocket_impl(clientSocket);
+            return;
+        }
+        const std::string challengeNonce = std::to_string(challengeNonceValue);
+        const std::string challengeMac =
+            hmacSha256(
+                SERVER_SECRET, "CHALLENGE:" + helloHwid + ":" + challengeNonce);
+        if (challengeMac.size() != 64) {
+            LogViolation("AUTH_CRYPTO_FAILURE", "Unable to authenticate request challenge", helloHwid);
+            closesocket_impl(clientSocket);
+            return;
+        }
+        const std::string challengeResponse =
+            "CHALLENGE:" + challengeNonce + ":" + challengeMac + ";";
+        if (!OblivionNet::SendAll(clientSocket, challengeResponse.data(), challengeResponse.size())) {
+            closesocket_impl(clientSocket);
+            return;
+        }
+
+        report.clear();
+        pendingNetworkData.clear();
+        if (!OblivionNet::ReceiveFrame(clientSocket, pendingNetworkData,
+                                       report, 5000, BUFFER_LEN - 1)) {
+            LogViolation("FRAME_READ_FAILED", "Timed out or received an incomplete authenticated request", helloHwid);
+            closesocket_impl(clientSocket);
+            return;
+        }
         if (!pendingNetworkData.empty()) {
-            LogViolation("MALFORMED_REQUEST", "Unexpected bytes after initial request frame", extractedHwid);
+            LogViolation("MALFORMED_REQUEST", "Unexpected bytes after authenticated request frame", helloHwid);
             closesocket_impl(clientSocket);
             return;
         }
+
         const ssize_t bytesReceived = static_cast<ssize_t>(report.size());
         if (bytesReceived > 0) {
-            extractedHwid = ExtractHWIDFromRawData(report);
-            
-            std::cout << "[DEBUG] Received raw data (" << bytesReceived << " bytes) from HWID: " << extractedHwid << std::endl;
-            
+            std::cout << "[DEBUG] Received authenticated request (" << bytesReceived
+                      << " bytes) from HWID: " << extractedHwid << std::endl;
+
             ParsedReport parsed = ParseProtocol(report);
             
             if (!parsed.valid) {
                 std::cout << "[ERROR] Invalid protocol format: " << parsed.errorMessage << std::endl;
-                std::cout << "[DEBUG] Expected format: TYPE:DETAILS:HWID:SECRET;" << std::endl;
+                std::cout << "[DEBUG] Expected format: TYPE:DETAILS:HWID:NONCE:MAC;" << std::endl;
                 
                 // Never log raw untrusted protocol bytes; they may contain control characters.
                 LogViolation("MALFORMED_REQUEST", parsed.errorMessage, extractedHwid);
@@ -717,22 +743,25 @@ void HandleClient(SocketType clientSocket) {
                 return;
             }
             
-            std::string type = parsed.type;
-            std::string details = parsed.details;
-            std::string hwid = parsed.hwid;
-            std::string secret = parsed.secret;
-            
-            std::cout << "[PARSE] TYPE: " << type << " | HWID: " << hwid << " | DETAILS_LEN: " << details.length() << std::endl;
+            const std::string type = parsed.type;
+            const std::string details = SanitizeInput(parsed.details, MAX_DETAILS_LEN);
+            const std::string hwid = parsed.hwid;
+            const std::string expectedRequestMac = hmacSha256(
+                SERVER_SECRET,
+                BuildRequestAuthData(type, parsed.details, hwid, challengeNonce));
+            const bool requestAuthenticated =
+                hwid == helloHwid && parsed.challengeNonce == challengeNonce &&
+                ConstantTimeEquals(expectedRequestMac, parsed.mac);
 
-            if (!ConstantTimeEquals(secret, SERVER_SECRET)) {
-                std::cout << "[AUTH] Secret key tidak valid dari HWID [" << hwid << "]" << std::endl;
-                // Never write authentication secrets to logs.
+            std::cout << "[PARSE] TYPE: " << type << " | HWID: " << hwid
+                      << " | DETAILS_LEN: " << details.length() << std::endl;
 
-                LogViolation("AUTH_FAILED", "Invalid secret key", hwid);
-
-                const char* kickCommand = "KICK;";
-                OblivionNet::SendAll(clientSocket, kickCommand, strlen(kickCommand));
-                std::cout << "[INFO] KICK dikirim (secret invalid). Review manual untuk ban jika diperlukan." << std::endl;
+            if (!requestAuthenticated) {
+                LogViolation("AUTH_FAILED", "Invalid challenge-response MAC", hwid);
+                const char* authError = "ERROR:AUTH_FAILED;";
+                OblivionNet::SendAll(clientSocket, authError, strlen(authError));
+                closesocket_impl(clientSocket);
+                return;
             }
             else if (type == "CHECKIN") {
                 std::cout << "[CHECKIN] Client check-in dari HWID [" << hwid << "]" << std::endl;
@@ -752,9 +781,20 @@ void HandleClient(SocketType clientSocket) {
                         closesocket_impl(clientSocket);
                         return;
                     }
-                    std::string response = "OK;SESSION_NONCE:" + std::to_string(sessionNonce) +
+                    const std::string sessionNonceText = std::to_string(sessionNonce);
+                    const std::string sessionAuthData =
+                        "SESSION:" + hwid + ":" + challengeNonce + ":" + sessionNonceText + ":" +
+                        std::to_string(cfg.interval_ms) + ":" + std::to_string(cfg.timeout_ms);
+                    const std::string sessionAuthMac = hmacSha256(SERVER_SECRET, sessionAuthData);
+                    if (sessionAuthMac.size() != 64) {
+                        LogViolation("AUTH_CRYPTO_FAILURE", "Unable to authenticate session configuration", hwid);
+                        closesocket_impl(clientSocket);
+                        return;
+                    }
+                    std::string response = "OK;SESSION_NONCE:" + sessionNonceText +
                                            ";HB_CONFIG:" + std::to_string(cfg.interval_ms) +
-                                           ":" + std::to_string(cfg.timeout_ms) + ";";
+                                           ":" + std::to_string(cfg.timeout_ms) +
+                                           ";SESSION_AUTH:" + sessionAuthMac + ";";
                     if (!OblivionNet::SendAll(clientSocket, response.data(), response.size())) {
                         closesocket_impl(clientSocket);
                         return;

@@ -24,6 +24,79 @@ extern void ReportViolationAndExit(const std::wstring& message, const std::strin
 
 namespace Oblivion {
 
+    static bool SendAll(SOCKET socket, const std::string& data);
+    static bool ReceiveFrame(SOCKET socket, std::string& pending,
+                             std::string& frame, DWORD timeoutMs, size_t maxSize);
+
+    static std::string HmacSha256(const std::string& key, const std::string& data);
+
+    static bool ConstantTimeEquals(const std::string& left, const std::string& right) {
+        if (left.size() != 64 || right.size() != 64) return false;
+        unsigned char difference = 0;
+        for (size_t i = 0; i < left.size(); ++i) {
+            difference |= static_cast<unsigned char>(left[i] ^ right[i]);
+        }
+        return difference == 0;
+    }
+
+    static std::string BuildRequestAuthData(
+        const std::string& type, const std::string& details,
+        const std::string& hwid, const std::string& challengeNonce) {
+        return "REQUEST:" + type + ":" + std::to_string(details.size()) + ":" +
+               details + ":" + hwid + ":" + challengeNonce;
+    }
+
+    static bool BeginAuthenticatedRequest(
+        SOCKET socket, const std::string& hwid, const std::string& secret,
+        std::string& pending, std::string& challengeNonce) {
+        challengeNonce.clear();
+        if (hwid.empty() || !SendAll(socket, "HELLO:" + hwid + ";")) {
+            return false;
+        }
+
+        std::string challengeFrame;
+        if (!ReceiveFrame(socket, pending, challengeFrame, 3000, 512) ||
+            !pending.empty() ||
+            challengeFrame.rfind("CHALLENGE:", 0) != 0 ||
+            challengeFrame.back() != ';') {
+            return false;
+        }
+
+        const std::string payload = challengeFrame.substr(
+            strlen("CHALLENGE:"),
+            challengeFrame.size() - strlen("CHALLENGE:") - 1);
+        const size_t separator = payload.find(':');
+        if (separator == std::string::npos ||
+            payload.find(':', separator + 1) != std::string::npos) {
+            return false;
+        }
+
+        const std::string nonceText = payload.substr(0, separator);
+        const std::string serverMac = payload.substr(separator + 1);
+        if (nonceText.empty() || nonceText.size() > 20 ||
+            !std::all_of(nonceText.begin(), nonceText.end(),
+                [](unsigned char c) { return c >= '0' && c <= '9'; })) {
+            return false;
+        }
+
+        try {
+            size_t parsed = 0;
+            std::stoull(nonceText, &parsed, 10);
+            if (parsed != nonceText.size()) return false;
+        } catch (...) {
+            return false;
+        }
+
+        const std::string expectedMac =
+            HmacSha256(secret, "CHALLENGE:" + hwid + ":" + nonceText);
+        if (!ConstantTimeEquals(expectedMac, serverMac)) {
+            return false;
+        }
+
+        challengeNonce = nonceText;
+        return true;
+    }
+
     static bool SendAll(SOCKET socket, const std::string& data) {
         size_t offset = 0;
         while (offset < data.size()) {
@@ -284,7 +357,26 @@ namespace Oblivion {
             ExitProcess(0);
         }
 
-        const std::string checkin = "CHECKIN::" + m_hwid + ":" + m_secretKey + ";";
+        std::string challengeNonce;
+        if (!BeginAuthenticatedRequest(
+                connectSocket, m_hwid, m_secretKey, m_pendingNetworkData, challengeNonce)) {
+            closesocket(connectSocket);
+            MessageBoxW(NULL, L"Autentikasi challenge server tidak valid.",
+                        L"Oblivion Hack Shield - Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
+            ExitProcess(1);
+            return false;
+        }
+
+        const std::string checkinDetails;
+        const std::string checkinMac = HmacSha256(
+            m_secretKey, BuildRequestAuthData("CHECKIN", checkinDetails, m_hwid, challengeNonce));
+        if (checkinMac.size() != 64) {
+            closesocket(connectSocket);
+            ExitProcess(1);
+            return false;
+        }
+        const std::string checkin =
+            "CHECKIN::" + m_hwid + ":" + challengeNonce + ":" + checkinMac + ";";
         if (!SendAll(connectSocket, checkin)) {
             closesocket(connectSocket);
             ExitProcess(1);
@@ -328,7 +420,8 @@ namespace Oblivion {
         }
         const std::string nonceText = response.substr(noncePrefix.size(),
                                                        response.size() - noncePrefix.size() - 1);
-        if (nonceText.empty() || !std::all_of(nonceText.begin(), nonceText.end(),
+        if (nonceText.empty() || nonceText.size() > 20 ||
+            !std::all_of(nonceText.begin(), nonceText.end(),
                 [](unsigned char c) { return c >= '0' && c <= '9'; })) {
             closesocket(connectSocket);
             ExitProcess(1);
@@ -366,9 +459,9 @@ namespace Oblivion {
             return false;
         }
 
+        std::string intervalText = configPayload.substr(0, separator);
+        std::string timeoutText = configPayload.substr(separator + 1);
         try {
-            const std::string intervalText = configPayload.substr(0, separator);
-            const std::string timeoutText = configPayload.substr(separator + 1);
             size_t parsedInterval = 0, parsedTimeout = 0;
             const unsigned long long interval = std::stoull(intervalText, &parsedInterval, 10);
             const unsigned long long timeout = std::stoull(timeoutText, &parsedTimeout, 10);
@@ -381,6 +474,31 @@ namespace Oblivion {
         } catch (...) {
             closesocket(connectSocket);
             MessageBoxW(NULL, L"Nilai konfigurasi heartbeat tidak valid.",
+                        L"Oblivion Hack Shield - Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
+            ExitProcess(1);
+            return false;
+        }
+
+        std::string sessionAuthFrame;
+        const std::string sessionAuthPrefix = "SESSION_AUTH:";
+        if (!ReceiveFrame(connectSocket, m_pendingNetworkData, sessionAuthFrame, 3000, 128) ||
+            sessionAuthFrame.rfind(sessionAuthPrefix, 0) != 0 ||
+            sessionAuthFrame.back() != ';') {
+            closesocket(connectSocket);
+            MessageBoxW(NULL, L"Autentikasi respons sesi server tidak valid.",
+                        L"Oblivion Hack Shield - Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
+            ExitProcess(1);
+            return false;
+        }
+
+        const std::string sessionServerMac = sessionAuthFrame.substr(
+            sessionAuthPrefix.size(), sessionAuthFrame.size() - sessionAuthPrefix.size() - 1);
+        const std::string expectedSessionMac = HmacSha256(
+            m_secretKey, "SESSION:" + m_hwid + ":" + challengeNonce + ":" +
+            nonceText + ":" + intervalText + ":" + timeoutText);
+        if (!ConstantTimeEquals(expectedSessionMac, sessionServerMac)) {
+            closesocket(connectSocket);
+            MessageBoxW(NULL, L"Autentikasi konfigurasi sesi gagal.",
                         L"Oblivion Hack Shield - Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
             ExitProcess(1);
             return false;
@@ -540,7 +658,27 @@ namespace Oblivion {
             if (c == ';') c = ',';  // Replace semicolon dengan comma (delimiter utama)
         }
         
-        std::string report = type + ":" + sanitizedDetails + ":" + m_hwid + ":" + m_secretKey + ";";
+        std::string responsePending;
+        std::string challengeNonce;
+        if (!BeginAuthenticatedRequest(
+                connectSocket, m_hwid, m_secretKey, responsePending, challengeNonce)) {
+            closesocket(connectSocket);
+            MessageBoxW(NULL, L"Autentikasi challenge server tidak valid.",
+                        L"Oblivion Hack Shield - Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
+            ExitProcess(1);
+            return;
+        }
+
+        const std::string reportMac = HmacSha256(
+            m_secretKey, BuildRequestAuthData(type, sanitizedDetails, m_hwid, challengeNonce));
+        if (reportMac.size() != 64) {
+            closesocket(connectSocket);
+            ExitProcess(1);
+            return;
+        }
+        const std::string report =
+            type + ":" + sanitizedDetails + ":" + m_hwid + ":" + challengeNonce + ":" +
+            reportMac + ";";
         if (!SendAll(connectSocket, report)) {
             // Gagal mengirim laporan - Fail-Closed
             closesocket(connectSocket);
@@ -549,7 +687,6 @@ namespace Oblivion {
         }
 
         // The server acknowledges every report with exactly one framed response.
-        std::string responsePending;
         std::string responseFrame;
         if (!ReceiveFrame(connectSocket, responsePending, responseFrame, 3000, 512)) {
             closesocket(connectSocket);
