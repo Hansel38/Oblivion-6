@@ -613,13 +613,17 @@ namespace Oblivion {
                         const std::string expectedPingMac = HmacSha256(sessionKey, pingAuthData);
                         if (!ConstantTimeEquals(expectedPingMac, receivedMac)) break;
 
-                        const std::string pongData = std::to_string(seq) + ":" + timestampText +
-                                                     ":" + nonceText + ":" + m_hwid;
+                        const std::string clientTimestamp =
+                            std::to_string(static_cast<uint64_t>(GetTickCount64()));
+                        const std::string status = "1|1";
+                        // Authenticate every mutable PONG field, including status and
+                        // the client timestamp, under a message-specific versioned label.
+                        const std::string pongData = "PONG:v1:" + std::to_string(seq) + ":" +
+                            clientTimestamp + ":" + std::to_string(nonce) + ":" +
+                            status + ":" + m_hwid;
                         const std::string mac = HmacSha256(sessionKey, pongData);
                         if (mac.size() != 64) break;
-                        const std::string pong = "PONG:" + std::to_string(seq) + ":" +
-                            std::to_string(static_cast<uint64_t>(GetTickCount64())) + ":" +
-                            std::to_string(nonce) + ":1|1:" + m_hwid + ":" + mac + ";";
+                        const std::string pong = pongData + ":" + mac + ";";
                         if (!SendAll(socket, pong)) break;
                     } catch (...) { break; }
                 }
