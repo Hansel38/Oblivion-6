@@ -74,7 +74,13 @@ namespace Oblivion {
                                 const PESectionInfo& section);
         
         // === LAYER 5: Runtime Integrity Verification ===
-        bool VerifyRegionIntegrity(uint8_t* memoryBase, size_t regionSize, uintptr_t rva);
+        enum class RegionIntegrityResult {
+            Clean,
+            Modified,
+            Incomplete
+        };
+        RegionIntegrityResult VerifyRegionIntegrity(
+            uint8_t* memoryBase, size_t regionSize, uintptr_t rva);
         bool DetectSuspiciousMemoryRegion(uint8_t* memoryBase, size_t regionSize);
         bool DetectCodeCaveInjection(const uint8_t* codeSection, size_t size);
         
