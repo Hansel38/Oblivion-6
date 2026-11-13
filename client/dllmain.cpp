@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <stdexcept>
 #include <objidl.h>
 #include <gdiplus.h>
 #pragma comment(lib, "gdiplus.lib")
@@ -48,6 +49,57 @@ namespace {
     LifecycleControl& GetLifecycleControl() {
         static LifecycleControl control;
         return control;
+    }
+}
+
+namespace {
+    // The Release client must be explicitly pointed at its deployed server.
+    // Debug builds retain loopback as a local development default.
+    std::string GetConfiguredServerAddress() {
+        constexpr DWORD kServerNameCapacity = 256;
+        char serverName[kServerNameCapacity] = {};
+        SetLastError(ERROR_SUCCESS);
+        const DWORD length = GetEnvironmentVariableA(
+            "OBLIVION_SERVER", serverName, kServerNameCapacity);
+
+        if (length == 0) {
+            const DWORD error = GetLastError();
+            if (error != ERROR_ENVVAR_NOT_FOUND && error != ERROR_SUCCESS) {
+                throw std::runtime_error(
+                    "Unable to read OBLIVION_SERVER; Win32 error=" + std::to_string(error));
+            }
+#if defined(_DEBUG)
+            return "127.0.0.1";
+#else
+            throw std::runtime_error(
+                "OBLIVION_SERVER must be configured for Release builds");
+#endif
+        }
+
+        if (length >= kServerNameCapacity) {
+            throw std::runtime_error("OBLIVION_SERVER exceeds the supported 253-byte host limit");
+        }
+
+        const std::string host(serverName, length);
+        if (host.empty() || host.size() > 253) {
+            throw std::runtime_error("OBLIVION_SERVER must be a non-empty DNS name or IP address");
+        }
+
+        // Resolver input is intentionally restricted to ASCII DNS/IP characters.
+        // Internationalized names must be supplied in their ASCII IDNA form.
+        for (unsigned char value : host) {
+            const bool alphaNumeric =
+                (value >= 'a' && value <= 'z') ||
+                (value >= 'A' && value <= 'Z') ||
+                (value >= '0' && value <= '9');
+            if (!alphaNumeric && value != '.' && value != '-' &&
+                value != ':' && value != '%') {
+                throw std::runtime_error(
+                    "OBLIVION_SERVER contains an unsupported character");
+            }
+        }
+
+        return host;
     }
 }
 
@@ -378,9 +430,10 @@ void InitializeSecuritySystem() {
     try {
         // Ambil secret yang di-obfuscate (bukan string literal langsung)
         const std::string kClientSecret = Oblivion::GetClientSecret();
-        // TODO: Ganti "127.0.0.1" dengan IP VPS server Anda
-        // Contoh: "192.168.1.100" atau "your-server-ip.com"
-        g_pNetworkReporter = new Oblivion::NetworkReporter("127.0.0.1", 54321, kClientSecret);
+        const std::string serverAddress = GetConfiguredServerAddress();
+        constexpr int kServerPort = 54321;
+        g_pNetworkReporter = new Oblivion::NetworkReporter(
+            serverAddress, kServerPort, kClientSecret);
         std::cout << "[INIT] Network reporter created" << std::endl;
     } catch (const std::exception& e) {
         std::cerr << "[ERROR] Failed to create network reporter: " << e.what() << std::endl;
