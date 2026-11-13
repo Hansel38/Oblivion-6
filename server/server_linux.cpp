@@ -651,27 +651,65 @@ void HandleClient(SocketType clientSocket) {
     try {
         if (!OblivionNet::ReceiveFrame(clientSocket, pendingNetworkData,
                                        report, 5000, BUFFER_LEN - 1)) {
-            LogViolation("FRAME_READ_FAILED", "Timed out or received an oversized/incomplete request", extractedHwid);
+            LogViolation("FRAME_READ_FAILED", "Timed out or received an oversized/incomplete HELLO request", extractedHwid);
             closesocket_impl(clientSocket);
             return;
         }
-        // Only one initial request frame is valid before the server replies.
+
+        std::string helloHwid;
+        if (!ParseHelloFrame(report, helloHwid) || !pendingNetworkData.empty()) {
+            LogViolation("MALFORMED_REQUEST", "Expected one HELLO:<HWID>; frame", extractedHwid);
+            closesocket_impl(clientSocket);
+            return;
+        }
+        extractedHwid = helloHwid;
+
+        uint64_t challengeNonceValue = 0;
+        if (!OblivionNet::GenerateSecureNonce(challengeNonceValue)) {
+            LogViolation("RNG_FAILURE", "Unable to generate request challenge nonce", helloHwid);
+            closesocket_impl(clientSocket);
+            return;
+        }
+        const std::string challengeNonce = std::to_string(challengeNonceValue);
+        const std::string challengeMac =
+            hmacSha256(
+                SERVER_SECRET, "CHALLENGE:" + helloHwid + ":" + challengeNonce);
+        if (challengeMac.size() != 64) {
+            LogViolation("AUTH_CRYPTO_FAILURE", "Unable to authenticate request challenge", helloHwid);
+            closesocket_impl(clientSocket);
+            return;
+        }
+        const std::string challengeResponse =
+            "CHALLENGE:" + challengeNonce + ":" + challengeMac + ";";
+        if (!OblivionNet::SendAll(clientSocket, challengeResponse.data(), challengeResponse.size())) {
+            closesocket_impl(clientSocket);
+            return;
+        }
+
+        report.clear();
+        pendingNetworkData.clear();
+        if (!OblivionNet::ReceiveFrame(clientSocket, pendingNetworkData,
+                                       report, 5000, BUFFER_LEN - 1)) {
+            LogViolation("FRAME_READ_FAILED", "Timed out or received an incomplete authenticated request", helloHwid);
+            closesocket_impl(clientSocket);
+            return;
+        }
         if (!pendingNetworkData.empty()) {
-            LogViolation("MALFORMED_REQUEST", "Unexpected bytes after initial request frame", extractedHwid);
+            LogViolation("MALFORMED_REQUEST", "Unexpected bytes after authenticated request frame", helloHwid);
             closesocket_impl(clientSocket);
             return;
         }
+
         const ssize_t bytesReceived = static_cast<ssize_t>(report.size());
         if (bytesReceived > 0) {
-            extractedHwid = ExtractHWIDFromRawData(report);
-            
-            std::cout << "[DEBUG] Received raw data (" << bytesReceived << " bytes) from HWID: " << extractedHwid << std::endl;
-            
+            std::cout << "[DEBUG] Received authenticated request (" << bytesReceived
+                      << " bytes) from HWID: " << extractedHwid << std::endl;
+
             ParsedReport parsed = ParseProtocol(report);
             
             if (!parsed.valid) {
                 std::cout << "[ERROR] Invalid protocol format: " << parsed.errorMessage << std::endl;
-                std::cout << "[DEBUG] Expected format: TYPE:DETAILS:HWID:SECRET;" << std::endl;
+                std::cout << "[DEBUG] Expected format: TYPE:DETAILS:HWID:NONCE:MAC;" << std::endl;
                 
                 // Never log raw untrusted protocol bytes; they may contain control characters.
                 LogViolation("MALFORMED_REQUEST", parsed.errorMessage, extractedHwid);
@@ -682,22 +720,25 @@ void HandleClient(SocketType clientSocket) {
                 return;
             }
             
-            std::string type = parsed.type;
-            std::string details = parsed.details;
-            std::string hwid = parsed.hwid;
-            std::string secret = parsed.secret;
-            
-            std::cout << "[PARSE] TYPE: " << type << " | HWID: " << hwid << " | DETAILS_LEN: " << details.length() << std::endl;
+            const std::string type = parsed.type;
+            const std::string details = SanitizeInput(parsed.details, MAX_DETAILS_LEN);
+            const std::string hwid = parsed.hwid;
+            const std::string expectedRequestMac = hmacSha256(
+                SERVER_SECRET,
+                BuildRequestAuthData(type, parsed.details, hwid, challengeNonce));
+            const bool requestAuthenticated =
+                hwid == helloHwid && parsed.challengeNonce == challengeNonce &&
+                ConstantTimeEquals(expectedRequestMac, parsed.mac);
 
-            if (!ConstantTimeEquals(secret, SERVER_SECRET)) {
-                std::cout << "[AUTH] Secret key tidak valid dari HWID [" << hwid << "]" << std::endl;
-                // Never write authentication secrets to logs.
+            std::cout << "[PARSE] TYPE: " << type << " | HWID: " << hwid
+                      << " | DETAILS_LEN: " << details.length() << std::endl;
 
-                LogViolation("AUTH_FAILED", "Invalid secret key", hwid);
-
+            if (!requestAuthenticated) {
+                LogViolation("AUTH_FAILED", "Invalid challenge-response MAC", hwid);
                 const char* kickCommand = "KICK;";
                 OblivionNet::SendAll(clientSocket, kickCommand, strlen(kickCommand));
-                std::cout << "[INFO] KICK dikirim (secret invalid). Review manual untuk ban jika diperlukan." << std::endl;
+                closesocket_impl(clientSocket);
+                return;
             }
             else if (type == "CHECKIN") {
                 std::cout << "[CHECKIN] Client check-in dari HWID [" << hwid << "]" << std::endl;
@@ -717,9 +758,20 @@ void HandleClient(SocketType clientSocket) {
                         closesocket_impl(clientSocket);
                         return;
                     }
-                    std::string response = "OK;SESSION_NONCE:" + std::to_string(sessionNonce) +
+                    const std::string sessionNonceText = std::to_string(sessionNonce);
+                    const std::string sessionAuthData =
+                        "SESSION:" + hwid + ":" + challengeNonce + ":" + sessionNonceText + ":" +
+                        std::to_string(cfg.interval_ms) + ":" + std::to_string(cfg.timeout_ms);
+                    const std::string sessionAuthMac = hmacSha256(SERVER_SECRET, sessionAuthData);
+                    if (sessionAuthMac.size() != 64) {
+                        LogViolation("AUTH_CRYPTO_FAILURE", "Unable to authenticate session configuration", hwid);
+                        closesocket_impl(clientSocket);
+                        return;
+                    }
+                    std::string response = "OK;SESSION_NONCE:" + sessionNonceText +
                                            ";HB_CONFIG:" + std::to_string(cfg.interval_ms) +
-                                           ":" + std::to_string(cfg.timeout_ms) + ";";
+                                           ":" + std::to_string(cfg.timeout_ms) +
+                                           ";SESSION_AUTH:" + sessionAuthMac + ";";
                     if (!OblivionNet::SendAll(clientSocket, response.data(), response.size())) {
                         closesocket_impl(clientSocket);
                         return;
