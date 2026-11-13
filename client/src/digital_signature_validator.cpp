@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cwctype>
 #include <map>
+#include <memory>
 #include <sstream>
 
 // Forward declaration
