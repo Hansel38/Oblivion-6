@@ -29,18 +29,19 @@ jobs:
           make -C server
 
   windows-solution:
-    name: Windows solution (${{ matrix.platform }})
+    name: Windows solution (${{ matrix.configuration }} | ${{ matrix.platform }})
     runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
+        configuration: [Debug, Release]
         platform: [x86, x64]
     steps:
       - name: Check out source
         uses: actions/checkout@v4
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@v2
-      - name: Build Release configuration
+      - name: Build ${{ matrix.configuration }} configuration
         shell: pwsh
         run: |
-          msbuild Oblivion.sln /m /p:Configuration=Release /p:Platform=${{ matrix.platform }} /verbosity:minimal
+          msbuild Oblivion.sln /m /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }} /verbosity:minimal
