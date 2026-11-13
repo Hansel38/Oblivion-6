@@ -115,6 +115,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [x] **P1 — Do not silently skip signature module enumeration failures.** Retry `ERROR_BAD_LENGTH`; report snapshot/first/next enumeration errors and module-path or reporting-conversion failures rather than treating an incomplete scan as trusted.
 - [x] **P1 — Do not silently skip process enumeration failures.** Report snapshot creation and `Process32First` failures; accept only `ERROR_NO_MORE_FILES` as normal `Process32Next` completion, while allowing an intentional `Stop()` to end the scan without an error.
 - [x] **P1 — Report incomplete AdvancedProcessHeuristics process enumeration.** Report process snapshot and first-entry failures, and accept only `ERROR_NO_MORE_FILES` as normal completion of `Process32NextW`; an incomplete process list is no longer silently treated as a clean scan.
+- [x] **P1 — Do not treat partial executable-section regions as clean.** When a queried executable region overlaps a recorded section baseline but does not begin at the section RVA, return `Incomplete` instead of skipping the region; invalid range arithmetic also fails closed. Runtime fixtures with `VirtualQuery`-split executable sections and page-protection changes remain required.
 - [x] **P1 — Bound MemoryScanner baseline CRC comparisons.** A stored whole-region CRC is compared only when the complete baseline range is available; a shorter region now returns `MEMORY_INTEGRITY_UNAVAILABLE` rather than re-reading live memory or hashing beyond the region. Failed disk fallback reads and invalid reference ranges also return unavailable instead of being labeled tampering. Runtime page-boundary and short-region fixtures remain required.
 - [x] **P1 — Report incomplete MemoryScanner runtime module enumeration.** Phase 4 reports snapshot/first/next and `VirtualQuery` failures, validates module base and region progress, and limits scans to the intersection with `modBaseSize`. Runtime fault-injection fixtures remain required.
 - [x] **P1 — Distinguish baseline module lookup from incomplete enumeration.** Baseline creation now reports `MODULE_ENUMERATION_UNAVAILABLE` for Toolhelp snapshot/first/next failures and reserves `MODULE_BASE_NOT_FOUND` for a completed enumeration with no matching executable. Runtime API-failure fixtures remain required.
@@ -159,6 +160,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [ ] Runtime test: client handshake and nonce parsing
 - [ ] Runtime test: heartbeat fragmentation/coalescing
 - [ ] Runtime test: ban-list missing, unreadable, malformed, duplicate, and concurrent access cases
+- [ ] Runtime fixture: split an executable baseline section into multiple `VirtualQuery` regions, modify a later page, and verify the scan reports incomplete rather than clean
 - [ ] Runtime test: call `Oblivion_Entry()`, then `Oblivion_Shutdown()`, then unload the DLL across repeated cycles
 - [ ] Runtime test: file integrity pass/fail with known test fixtures
 - [ ] Runtime test: protected-file hashing blocks concurrent write/rename/delete opens and remains compatible with normal read-only access
