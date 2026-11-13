@@ -971,17 +971,44 @@ namespace Oblivion {
             return RegionIntegrityResult::Incomplete;
         }
 
-        // Match only a baseline starting at this region. Compare sizes without
-        // signed narrowing so malformed or large values cannot overflow.
+        // Compare only a region that covers a complete baseline section.
+        // If VirtualQuery splits a baseline section (for example after a page
+        // protection change), a later subregion overlaps the section but cannot
+        // be validated against its whole-section CRC. Treat that as incomplete,
+        // not clean; otherwise modified pages after the first region are skipped.
+        const uintptr_t maximumAddress =
+            (std::numeric_limits<uintptr_t>::max)();
+        if (regionSize > maximumAddress - rva) {
+            return RegionIntegrityResult::Incomplete;
+        }
+        const uintptr_t regionEnd = rva + regionSize;
+
         for (const auto& baseline : m_diskBaseline) {
-            const size_t sizeDiff = baseline.size > regionSize
-                ? baseline.size - regionSize
-                : regionSize - baseline.size;
-            if (baseline.rva != rva || sizeDiff >= 0x1000) {
+            if (baseline.size == 0) {
+                if (baseline.rva == rva) {
+                    return RegionIntegrityResult::Incomplete;
+                }
+                continue;
+            }
+            if (baseline.size > maximumAddress - baseline.rva) {
+                return RegionIntegrityResult::Incomplete;
+            }
+
+            const uintptr_t baselineEnd = baseline.rva + baseline.size;
+            if (rva >= baselineEnd || baseline.rva >= regionEnd) {
                 continue;
             }
 
-            if (baseline.size == 0) {
+            // An overlapping region must begin at the baseline RVA and cover
+            // the complete CRC range. Partial overlaps cannot be called clean.
+            if (baseline.rva != rva) {
+                return RegionIntegrityResult::Incomplete;
+            }
+
+            const size_t sizeDiff = baseline.size > regionSize
+                ? baseline.size - regionSize
+                : regionSize - baseline.size;
+            if (sizeDiff >= 0x1000) {
                 return RegionIntegrityResult::Incomplete;
             }
 
