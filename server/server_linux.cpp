@@ -817,6 +817,7 @@ void HandleClient(SocketType clientSocket) {
 
                     uint32_t seq = 1;
                     uint32_t consecutiveMiss = 0;
+                    std::string lastClientStatus;
                     uint64_t rttSum = 0; uint32_t rttCount = 0; 
                     uint64_t rttSumCumulative = 0; uint64_t rttCountCumulative = 0; 
                     uint32_t totalMisses = 0;
@@ -887,8 +888,14 @@ void HandleClient(SocketType clientSocket) {
                                         const std::string phwid = resp.substr(col[4] + 1, col[5] - col[4] - 1);
                                         const std::string hmac = resp.substr(col[5] + 1);
 
+                                        const bool statusWellFormed =
+                                            status.size() == 3 &&
+                                            (status[0] == '0' || status[0] == '1') &&
+                                            status[1] == '|' &&
+                                            (status[2] == '0' || status[2] == '1');
+
                                         if (pseq != seq || pnonce != ping_nonce || phwid != hwid ||
-                                            status != "1|1") {
+                                            !statusWellFormed) {
                                             ++consecutiveMiss;
                                             ++totalMisses;
                                         } else {
@@ -900,6 +907,22 @@ void HandleClient(SocketType clientSocket) {
                                                 ++consecutiveMiss;
                                                 ++totalMisses;
                                             } else {
+                                                if (status != lastClientStatus) {
+                                                    const std::string healthDetails =
+                                                        "antiSuspendOk=" + status.substr(0, 1) +
+                                                        "; integrityOk=" + status.substr(2, 1);
+                                                    if (status == "1|1") {
+                                                        if (!lastClientStatus.empty()) {
+                                                            LogViolation("HB_CLIENT_HEALTH_RESTORED",
+                                                                healthDetails, hwid);
+                                                        }
+                                                    } else {
+                                                        LogViolation("HB_CLIENT_HEALTH_UNAVAILABLE",
+                                                            healthDetails, hwid);
+                                                    }
+                                                    lastClientStatus = status;
+                                                }
+
                                                 const uint64_t rtt = GetTickCount64_impl() - ping_ts;
                                                 rttSum += rtt;
                                                 ++rttCount;
