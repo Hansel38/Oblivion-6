@@ -385,6 +385,8 @@ namespace Oblivion {
             return false;
         }
 
+        m_challengeNonce = challengeNonce;
+
         const std::string checkinDetails;
         const std::string checkinMac = HmacSha256(
             m_secretKey, BuildRequestAuthData("CHECKIN", checkinDetails, m_hwid, challengeNonce));
@@ -565,7 +567,8 @@ namespace Oblivion {
             m_hbThread = std::thread([this]() {
                 const SOCKET socket = m_hbSocket;
                 const std::string sessionKey =
-                    HmacSha256(m_secretKey, m_hwid + ":" + std::to_string(m_sessionNonce));
+                    HmacSha256(m_secretKey, "SESSION_KEY:v1:" + m_hwid + ":" +
+                               m_challengeNonce + ":" + std::to_string(m_sessionNonce));
                 if (sessionKey.empty()) {
                     m_hbRunning.store(false);
                     ReportViolationAndExit(L"", "HEARTBEAT_CRYPTO_FAILURE",
