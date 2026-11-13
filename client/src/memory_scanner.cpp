@@ -998,7 +998,7 @@ namespace Oblivion {
 
                 if (memoryModified) {
                     // Jika memang ada modifikasi, baru lakukan deteksi code cave sebagai konfirmasi tambahan
-                    if (baseline.isCodeSection && DetectCodeCaveInjection(memoryBase, regionSize)) {
+                    if (baseline.isCodeSection && DetectCodeCaveInjection(memoryBase, sizeToCheck)) {
                         // Extract executable filename dari path
                         std::string exeName = "unknown";
                         if (!m_executablePath.empty()) {
