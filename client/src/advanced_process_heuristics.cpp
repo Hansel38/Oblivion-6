@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "advanced_process_heuristics.h"
 #include "digital_signature_validator.h"
+#include <limits>
 #include <tlhelp32.h>
 #include <vector>
 #include <algorithm>
@@ -275,23 +276,44 @@ namespace {
         // karena sering unsigned (open-source/freeware)
     };
 
-    // Fungsi helper untuk mendapatkan full path dari process
-    std::wstring GetProcessPath(DWORD processId) {
+    // Resolve the complete process image path without assuming MAX_PATH is sufficient.
+    bool GetProcessImagePath(DWORD processId, std::wstring& processPath) {
+        processPath.clear();
+
         HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
         if (hProcess == NULL) {
-            return L"";
+            return false;
         }
 
-        wchar_t processPath[MAX_PATH] = { 0 };
-        DWORD size = MAX_PATH;
-        std::wstring result;
+        constexpr size_t kInitialPathCapacity = 512;
+        constexpr size_t kMaximumPathCapacity = 32768;
+        std::vector<wchar_t> buffer(kInitialPathCapacity);
+        bool resolved = false;
 
-        if (QueryFullProcessImageNameW(hProcess, 0, processPath, &size)) {
-            result = processPath;
+        while (buffer.size() <= kMaximumPathCapacity) {
+            DWORD length = static_cast<DWORD>(buffer.size());
+            if (QueryFullProcessImageNameW(hProcess, 0, buffer.data(), &length)) {
+                processPath.assign(buffer.data(), length);
+                resolved = true;
+                break;
+            }
+
+            const DWORD error = GetLastError();
+            if (error != ERROR_INSUFFICIENT_BUFFER ||
+                buffer.size() == kMaximumPathCapacity) {
+                break;
+            }
+
+            buffer.resize((std::min)(buffer.size() * 2, kMaximumPathCapacity));
         }
 
         CloseHandle(hProcess);
-        return result;
+        return resolved;
+    }
+
+    std::wstring GetProcessPath(DWORD processId) {
+        std::wstring processPath;
+        return GetProcessImagePath(processId, processPath) ? processPath : L"";
     }
 
     bool IsProcessWhitelisted(const std::wstring& processName, DWORD processId = 0) {
@@ -449,33 +471,18 @@ namespace {
         return result;
     }
 
-    // Get process name from PID
+    // Get process name from PID using the dynamically sized image-path helper.
     std::wstring GetProcessName(DWORD processId) {
-        // QueryFullProcessImageNameW only needs query access. Requesting VM_READ
-        // unnecessarily rejects protected/restricted processes before their
-        // process handles can be checked against the game.
-        HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
-        if (hProcess == NULL) {
+        std::wstring fullPath;
+        if (!GetProcessImagePath(processId, fullPath)) {
             return L"";
         }
 
-        wchar_t processName[MAX_PATH] = { 0 };
-        DWORD size = MAX_PATH;
-        std::wstring result;
-
-        if (QueryFullProcessImageNameW(hProcess, 0, processName, &size)) {
-            // Extract filename from full path
-            std::wstring fullPath(processName);
-            size_t lastSlash = fullPath.find_last_of(L"\\/");
-            if (lastSlash != std::wstring::npos) {
-                result = fullPath.substr(lastSlash + 1);
-            } else {
-                result = fullPath;
-            }
+        const size_t lastSlash = fullPath.find_last_of(L"\\/");
+        if (lastSlash != std::wstring::npos) {
+            return fullPath.substr(lastSlash + 1);
         }
-
-        CloseHandle(hProcess);
-        return result;
+        return fullPath;
     }
     
     // Memory signatures - pola byte khas CE di memory (IMPROVED - lebih spesifik)
@@ -1150,64 +1157,52 @@ namespace Oblivion {
     }
 
     bool AdvancedProcessHeuristics::HasSuspiciousPath(DWORD processId, std::wstring& matchedPath) const {
-        // Buka handle ke process untuk query path
-        HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
-        if (hProcess == NULL) {
+        std::wstring fullPath;
+        if (!GetProcessImagePath(processId, fullPath)) {
             return false;
         }
 
-        wchar_t processPath[MAX_PATH * 2] = { 0 };
-        DWORD pathSize = sizeof(processPath) / sizeof(processPath[0]);
-
-        bool detected = false;
-
-        // Get full executable path
-        if (QueryFullProcessImageNameW(hProcess, 0, processPath, &pathSize)) {
-            std::wstring fullPath(processPath);
-            std::wstring lowerPath = ToLowerCopy(fullPath);
+        const std::wstring lowerPath = ToLowerCopy(fullPath);
 
 #ifdef _DEBUG
-            std::wstring debugMsg = L"[AdvHeuristics] Process path: " + fullPath + L"\n";
-            OutputDebugStringW(debugMsg.c_str());
+        std::wstring debugMsg = L"[AdvHeuristics] Process path: " + fullPath + L"\n";
+        OutputDebugStringW(debugMsg.c_str());
 #endif
 
-            // Suspicious path keywords
-            const std::vector<std::wstring> suspiciousPathKeywords = {
-                L"cheat",
-                L"hack",
-                L"\\ce\\",
-                L"\\ce2",
-                L"\\cheatengine",
-                L"\\newce",
-                L"cheatprogram",
-                L"trainer",
-                L"crack",
-                L"keygen",
-                L"patch",
-                L"mod\\",
-                L"inject",
-                L"\\bossb",
-                L"\\ce7",
-                L"\\ce6",
-                L"memory scanner",
-                L"memoryscanner"
-            };
+        // Suspicious path keywords
+        const std::vector<std::wstring> suspiciousPathKeywords = {
+            L"cheat",
+            L"hack",
+            L"\\ce\\",
+            L"\\ce2",
+            L"\\cheatengine",
+            L"\\newce",
+            L"cheatprogram",
+            L"trainer",
+            L"crack",
+            L"keygen",
+            L"patch",
+            L"mod\\",
+            L"inject",
+            L"\\bossb",
+            L"\\ce7",
+            L"\\ce6",
+            L"memory scanner",
+            L"memoryscanner"
+        };
 
-            for (const auto& keyword : suspiciousPathKeywords) {
-                if (lowerPath.find(keyword) != std::wstring::npos) {
-                    matchedPath = L"SUSPICIOUS_PATH: " + fullPath;
-                    detected = true;
+        for (const auto& keyword : suspiciousPathKeywords) {
+            if (lowerPath.find(keyword) != std::wstring::npos) {
+                matchedPath = L"SUSPICIOUS_PATH: " + fullPath;
 #ifdef _DEBUG
-                    std::wstring debugMsg2 = L"[AdvHeuristics] DETECTED SUSPICIOUS PATH with keyword: " + keyword + L"\n";
-                    OutputDebugStringW(debugMsg2.c_str());
+                std::wstring debugMsg2 = L"[AdvHeuristics] DETECTED SUSPICIOUS PATH with keyword: " + keyword + L"\n";
+                OutputDebugStringW(debugMsg2.c_str());
 #endif
-                    break;
-                }
+                return true;
             }
         }
 
-        CloseHandle(hProcess);
-        return detected;
+        return false;
     }
 
     bool AdvancedProcessHeuristics::HasSuspiciousBehavior(DWORD processId, std::wstring& behaviorType) const {
@@ -1275,11 +1270,18 @@ namespace Oblivion {
 
         // Enumerate memory regions
         while (VirtualQueryEx(hProcess, address, &mbi, sizeof(mbi)) == sizeof(mbi)) {
-            // Hanya scan region yang committed, readable, dan bukan guard page
-            bool isExecutable = (mbi.Protect == PAGE_EXECUTE_READ || mbi.Protect == PAGE_EXECUTE_READWRITE);
-            bool isReadable = (mbi.Protect == PAGE_READWRITE ||
-                              mbi.Protect == PAGE_READONLY ||
-                              isExecutable);
+            // Protect may include modifiers such as PAGE_NOCACHE; classify using
+            // the base protection value rather than exact equality.
+            const DWORD protection = mbi.Protect & 0xFF;
+            const bool isExecutable =
+                protection == PAGE_EXECUTE_READ ||
+                protection == PAGE_EXECUTE_READWRITE ||
+                protection == PAGE_EXECUTE_WRITECOPY;
+            const bool isReadable =
+                protection == PAGE_READWRITE ||
+                protection == PAGE_WRITECOPY ||
+                protection == PAGE_READONLY ||
+                isExecutable;
             
             if (mbi.State == MEM_COMMIT &&
                 isReadable &&
@@ -1301,7 +1303,11 @@ namespace Oblivion {
                 std::vector<BYTE> buffer(regionSize);
                 SIZE_T bytesRead = 0;
 
-                if (ReadProcessMemory(hProcess, mbi.BaseAddress, buffer.data(), regionSize, &bytesRead) && bytesRead > 0) {
+                // ReadProcessMemory can report failure after copying a valid prefix
+                // (for example, when a page boundary becomes inaccessible). Scan every
+                // byte the API confirms it copied; never inspect the uninitialized tail.
+                ReadProcessMemory(hProcess, mbi.BaseAddress, buffer.data(), regionSize, &bytesRead);
+                if (bytesRead > 0) {
                     // Scan buffer untuk setiap signature
                     for (const auto& sig : kMemorySignatures) {
                         // Skip signature jika requires executable memory tapi region ini bukan executable
@@ -1365,13 +1371,29 @@ namespace Oblivion {
             return std::string();
         }
 
-        int sizeNeeded = WideCharToMultiByte(CP_UTF8, 0, input.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        if (input.size() > static_cast<size_t>((std::numeric_limits<int>::max)())) {
+            return std::string();
+        }
+
+        const int inputLength = static_cast<int>(input.size());
+        const int sizeNeeded = WideCharToMultiByte(
+            CP_UTF8, WC_ERR_INVALID_CHARS, input.c_str(), inputLength,
+            nullptr, 0, nullptr, nullptr);
         if (sizeNeeded <= 0) {
             return std::string();
         }
 
-        std::string result(static_cast<size_t>(sizeNeeded) - 1, 0);
-        WideCharToMultiByte(CP_UTF8, 0, input.c_str(), -1, &result[0], sizeNeeded, nullptr, nullptr);
+        // The explicit input length excludes a trailing NUL, so allocate exactly
+        // the byte count returned by the sizing call. This avoids writing the
+        // terminator past a sizeNeeded - 1 string allocation.
+        std::string result(static_cast<size_t>(sizeNeeded), '\\0');
+        const int converted = WideCharToMultiByte(
+            CP_UTF8, WC_ERR_INVALID_CHARS, input.c_str(), inputLength,
+            &result[0], sizeNeeded, nullptr, nullptr);
+        if (converted != sizeNeeded) {
+            return std::string();
+        }
+
         return result;
     }
 }
