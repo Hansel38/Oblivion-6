@@ -22,6 +22,7 @@ namespace Oblivion {
         // Heartbeat: start and stop (future use)
         void StartHeartbeat();
         void StopHeartbeat();
+        void SetClientStatus(bool antiSuspendOk, bool integrityOk);
 
     private:
         std::string m_serverIP;
@@ -38,6 +39,8 @@ namespace Oblivion {
         std::string m_challengeNonce; // Challenge nonce yang mengikat sesi heartbeat
         uint32_t m_hbIntervalMs = 3000;
         uint32_t m_hbTimeoutMs = 4000;
+        std::atomic<bool> m_antiSuspendOk{ false };
+        std::atomic<bool> m_integrityOk{ false };
         bool m_winsockInitialized = false;
     };
 }
