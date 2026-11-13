@@ -63,10 +63,25 @@ namespace {
         DWORD targetProcessId = 0;
         std::wstring matchedClass;
         std::wstring matchedTitle;
+        std::wstring scanIssue;
         bool matched = false;
+        bool incomplete = false;
         bool searchingTitle = false; // true = searching for title patterns, false = searching for class
         int suspiciousControlCount = 0; // Count of suspicious child controls (for UI element detection)
     };
+
+    void MarkWindowInspectionIncomplete(
+        WindowSearchContext& context,
+        const wchar_t* operation,
+        DWORD error) {
+        context.incomplete = true;
+        if (context.scanIssue.empty()) {
+            context.scanIssue = operation;
+            if (error != ERROR_SUCCESS) {
+                context.scanIssue += L"; error=" + std::to_wstring(error);
+            }
+        }
+    }
 
     // Cheat Engine DLL signatures - komprehensif untuk berbagai versi CE
     const std::vector<std::wstring> kSuspiciousModules = {
@@ -551,7 +566,11 @@ namespace {
         }
 
         DWORD windowProcessId = 0;
-        GetWindowThreadProcessId(hwnd, &windowProcessId);
+        if (GetWindowThreadProcessId(hwnd, &windowProcessId) == 0) {
+            MarkWindowInspectionIncomplete(
+                *ctx, L"GetWindowThreadProcessId failed", ERROR_SUCCESS);
+            return TRUE;
+        }
         if (windowProcessId != ctx->targetProcessId) {
             return TRUE;
         }
@@ -559,8 +578,18 @@ namespace {
         if (ctx->searchingTitle) {
             // Search for suspicious window titles
             wchar_t windowTitle[512] = { 0 };
-            const int titleLen = GetWindowTextW(hwnd, windowTitle, static_cast<int>(sizeof(windowTitle) / sizeof(windowTitle[0])));
-            
+            SetLastError(ERROR_SUCCESS);
+            const int titleLen = GetWindowTextW(
+                hwnd, windowTitle,
+                static_cast<int>(sizeof(windowTitle) / sizeof(windowTitle[0])));
+            if (titleLen == 0) {
+                const DWORD error = GetLastError();
+                if (error != ERROR_SUCCESS) {
+                    MarkWindowInspectionIncomplete(
+                        *ctx, L"GetWindowTextW failed", error);
+                }
+            }
+
 #ifdef _DEBUG
             if (titleLen > 0) {
                 std::wstring debugMsg = L"[AdvHeuristics] Found window title: " + std::wstring(windowTitle, titleLen) + L"\n";
@@ -643,8 +672,16 @@ namespace {
         } else {
             // Search for suspicious window classes
             wchar_t className[256] = { 0 };
-            const int len = GetClassNameW(hwnd, className, static_cast<int>(sizeof(className) / sizeof(className[0])));
+            SetLastError(ERROR_SUCCESS);
+            const int len = GetClassNameW(
+                hwnd, className,
+                static_cast<int>(sizeof(className) / sizeof(className[0])));
             if (len == 0) {
+                const DWORD error = GetLastError();
+                if (error != ERROR_SUCCESS) {
+                    MarkWindowInspectionIncomplete(
+                        *ctx, L"GetClassNameW failed", error);
+                }
                 return TRUE;
             }
 
@@ -669,8 +706,18 @@ namespace {
         }
         
         wchar_t controlText[256] = { 0 };
-        const int textLen = GetWindowTextW(hwnd, controlText, static_cast<int>(sizeof(controlText) / sizeof(controlText[0])));
-        
+        SetLastError(ERROR_SUCCESS);
+        const int textLen = GetWindowTextW(
+            hwnd, controlText,
+            static_cast<int>(sizeof(controlText) / sizeof(controlText[0])));
+        if (textLen == 0) {
+            const DWORD error = GetLastError();
+            if (error != ERROR_SUCCESS) {
+                MarkWindowInspectionIncomplete(
+                    *ctx, L"GetWindowTextW(child) failed", error);
+            }
+        }
+
         if (textLen > 0) {
             std::wstring text = ToLowerCopy(controlText);
             
@@ -951,20 +998,42 @@ namespace Oblivion {
 
                 indicator.clear();
 
-                // Check 3: Suspicious Window Class Detection
-                if (HasSuspiciousWindowClass(pe32.th32ProcessID, indicator)) {
-                    const auto details = BuildHeuristicDetails(processName, pe32.th32ProcessID, L"WINDOW_CLASS", indicator);
+                // Check 3: Suspicious Window Class Detection.
+                scanIssue.clear();
+                const WindowScanResult windowClassResult =
+                    HasSuspiciousWindowClass(
+                        pe32.th32ProcessID, indicator, scanIssue);
+                if (windowClassResult == WindowScanResult::Suspicious) {
+                    const auto details = BuildHeuristicDetails(
+                        processName, pe32.th32ProcessID, L"WINDOW_CLASS", indicator);
                     ReportViolationAndExit(L"", "ADV_HEURISTIC_DETECTED", details);
+                } else if (windowClassResult == WindowScanResult::Incomplete) {
+                    const std::wstring warning =
+                        L"[AdvHeuristics] Window-class scan incomplete for " + processName +
+                        L" (PID: " + std::to_wstring(pe32.th32ProcessID) +
+                        L"): " + scanIssue;
+                    OutputDebugStringW(warning.c_str());
+                    OutputDebugStringW(L"\\n");
                 }
 
                 indicator.clear();
 
-                // Check 4: Suspicious Window Title Pattern Detection + UI Elements
-                // CRITICAL: Deteksi pattern window title khas CE seperti "00001C0C-Republic-RO"
-                // ATAU deteksi CE-specific UI controls seperti "First Scan", "Next Scan", dll
-                if (HasSuspiciousWindowTitle(pe32.th32ProcessID, indicator)) {
-                    const auto details = BuildHeuristicDetails(processName, pe32.th32ProcessID, L"WINDOW_TITLE", indicator);
+                // Check 4: Suspicious Window Title Pattern Detection + UI Elements.
+                scanIssue.clear();
+                const WindowScanResult windowTitleResult =
+                    HasSuspiciousWindowTitle(
+                        pe32.th32ProcessID, indicator, scanIssue);
+                if (windowTitleResult == WindowScanResult::Suspicious) {
+                    const auto details = BuildHeuristicDetails(
+                        processName, pe32.th32ProcessID, L"WINDOW_TITLE", indicator);
                     ReportViolationAndExit(L"", "ADV_HEURISTIC_DETECTED", details);
+                } else if (windowTitleResult == WindowScanResult::Incomplete) {
+                    const std::wstring warning =
+                        L"[AdvHeuristics] Window-title scan incomplete for " + processName +
+                        L" (PID: " + std::to_wstring(pe32.th32ProcessID) +
+                        L"): " + scanIssue;
+                    OutputDebugStringW(warning.c_str());
+                    OutputDebugStringW(L"\\n");
                 }
 
                 indicator.clear();
@@ -1090,62 +1159,117 @@ namespace Oblivion {
         return ModuleScanResult::Clean;
     }
 
-    bool AdvancedProcessHeuristics::HasSuspiciousWindowClass(DWORD processId, std::wstring& matchedClass) const {
+    AdvancedProcessHeuristics::WindowScanResult
+    AdvancedProcessHeuristics::HasSuspiciousWindowClass(
+        DWORD processId,
+        std::wstring& matchedClass,
+        std::wstring& scanIssue) const {
+        scanIssue.clear();
         WindowSearchContext ctx;
         ctx.targetProcessId = processId;
         ctx.searchingTitle = false;
 
-        EnumWindows(EnumWindowsForProcess, reinterpret_cast<LPARAM>(&ctx));
+        SetLastError(ERROR_SUCCESS);
+        const BOOL enumerationCompleted =
+            EnumWindows(EnumWindowsForProcess, reinterpret_cast<LPARAM>(&ctx));
 
-        if (!ctx.matched) {
-            return false;
+        if (ctx.matched) {
+            matchedClass = ctx.matchedClass;
+            return WindowScanResult::Suspicious;
         }
 
-        matchedClass = ctx.matchedClass;
-        return true;
+        if (!enumerationCompleted) {
+            scanIssue = L"EnumWindows stopped before class enumeration completed; error=" +
+                std::to_wstring(GetLastError());
+            return WindowScanResult::Incomplete;
+        }
+
+        if (ctx.incomplete) {
+            scanIssue = ctx.scanIssue;
+            return WindowScanResult::Incomplete;
+        }
+
+        return WindowScanResult::Clean;
     }
 
-    bool AdvancedProcessHeuristics::HasSuspiciousWindowTitle(DWORD processId, std::wstring& matchedPattern) const {
+    AdvancedProcessHeuristics::WindowScanResult
+    AdvancedProcessHeuristics::HasSuspiciousWindowTitle(
+        DWORD processId,
+        std::wstring& matchedPattern,
+        std::wstring& scanIssue) const {
+        scanIssue.clear();
         WindowSearchContext ctx;
         ctx.targetProcessId = processId;
         ctx.searchingTitle = true;
         ctx.suspiciousControlCount = 0;
 
-        // First, try to detect by window title
-        EnumWindows(EnumWindowsForProcess, reinterpret_cast<LPARAM>(&ctx));
+        SetLastError(ERROR_SUCCESS);
+        const BOOL topLevelEnumerationCompleted =
+            EnumWindows(EnumWindowsForProcess, reinterpret_cast<LPARAM>(&ctx));
 
         if (ctx.matched) {
             matchedPattern = ctx.matchedTitle;
-            return true;
+            return WindowScanResult::Suspicious;
         }
 
-        // If not found by title, enumerate all windows of this process
-        // and check their child controls for CE-specific UI elements
+        if (!topLevelEnumerationCompleted) {
+            scanIssue =
+                L"EnumWindows stopped before title enumeration completed; error=" +
+                std::to_wstring(GetLastError());
+            ctx.incomplete = true;
+        }
+        if (ctx.incomplete && scanIssue.empty()) {
+            scanIssue = ctx.scanIssue;
+        }
+
+        // Also inspect child controls on each window owned by the target process.
         HWND hwnd = NULL;
         do {
             hwnd = FindWindowEx(NULL, hwnd, NULL, NULL);
             if (hwnd != NULL) {
-                DWORD windowPID = 0;
-                GetWindowThreadProcessId(hwnd, &windowPID);
-                
-                if (windowPID == processId) {
-                    // Found a window belonging to target process
-                    // Enumerate its child controls
+                DWORD windowPid = 0;
+                if (GetWindowThreadProcessId(hwnd, &windowPid) == 0) {
+                    ctx.incomplete = true;
+                    if (ctx.scanIssue.empty()) {
+                        ctx.scanIssue = L"GetWindowThreadProcessId failed during child-window search";
+                    }
+                    continue;
+                }
+
+                if (windowPid == processId) {
                     ctx.suspiciousControlCount = 0;
-                    EnumChildWindows(hwnd, EnumChildControlsForCE, reinterpret_cast<LPARAM>(&ctx));
-                    
+                    SetLastError(ERROR_SUCCESS);
+                    const BOOL childEnumerationCompleted = EnumChildWindows(
+                        hwnd, EnumChildControlsForCE, reinterpret_cast<LPARAM>(&ctx));
+
                     if (ctx.matched) {
                         matchedPattern = ctx.matchedTitle;
 #ifdef _DEBUG
                         OutputDebugStringW(L"[AdvHeuristics] DETECTED CE by UI elements!\n");
 #endif
-                        return true;
+                        return WindowScanResult::Suspicious;
+                    }
+
+                    if (!childEnumerationCompleted) {
+                        ctx.incomplete = true;
+                        if (ctx.scanIssue.empty()) {
+                            ctx.scanIssue =
+                                L"EnumChildWindows stopped before child enumeration completed; error=" +
+                                std::to_wstring(GetLastError());
+                        }
                     }
                 }
             }
         } while (hwnd != NULL);
 
-        return false;
+        if (ctx.incomplete) {
+            if (scanIssue.empty()) {
+                scanIssue = ctx.scanIssue;
+            }
+            return WindowScanResult::Incomplete;
+        }
+
+        return WindowScanResult::Clean;
     }
 
     AdvancedProcessHeuristics::HandleScanResult
