@@ -82,7 +82,7 @@ namespace Oblivion {
         try {
             size_t parsed = 0;
             const unsigned long long nonceValue = std::stoull(nonceText, &parsed, 10);
-            if (parsed != nonceText.size() || nonceValue == 0) return false;
+            if (parsed != nonceText.size()) return false;
         } catch (...) {
             return false;
         }
