@@ -38,7 +38,16 @@ namespace Oblivion {
 
     private:
         // Fungsi untuk memeriksa apakah sebuah modul tepercaya
-        bool IsModuleTrusted(HMODULE hModule, std::wstring& moduleName);
+        enum class ModuleTrustResult {
+            Trusted,
+            Untrusted,
+            Incomplete
+        };
+
+        ModuleTrustResult IsModuleTrusted(
+            const std::wstring& modulePath,
+            const std::wstring& moduleName,
+            std::wstring& failureReason);
 
         // Fungsi untuk mendapatkan nama penerbit dari sertifikat
         bool GetCertificateSubjectName(HMODULE hModule, std::wstring& subjectName);
