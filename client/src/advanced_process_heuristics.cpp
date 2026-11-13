@@ -1287,6 +1287,21 @@ namespace Oblivion {
         };
         std::unique_ptr<void, ProcessHandleDeleter> processHandle(hProcess);
 
+        BOOL scannerIsWow64 = FALSE;
+        BOOL targetIsWow64 = FALSE;
+        if (!IsWow64Process(GetCurrentProcess(), &scannerIsWow64)) {
+            scanIssue = L"IsWow64Process failed for scanner; error=" +
+                std::to_wstring(GetLastError());
+            return MemoryScanResult::Incomplete;
+        }
+        if (!IsWow64Process(hProcess, &targetIsWow64)) {
+            scanIssue = L"IsWow64Process failed for target; error=" +
+                std::to_wstring(GetLastError());
+            return MemoryScanResult::Incomplete;
+        }
+        const bool scannerHasNarrowerAddressSpace =
+            scannerIsWow64 && !targetIsWow64;
+
         constexpr size_t kChunkSize = 1024 * 1024;
         constexpr size_t kMaxTotalScan = 100 * 1024 * 1024;
         size_t totalScanned = 0;
@@ -1313,6 +1328,11 @@ namespace Oblivion {
                 if (querySize == 0) {
                     const DWORD error = GetLastError();
                     if (error == ERROR_INVALID_PARAMETER) {
+                        if (scannerHasNarrowerAddressSpace) {
+                            scanIssue =
+                                L"32-bit WOW64 client cannot verify the complete 64-bit target address space";
+                            return MemoryScanResult::Incomplete;
+                        }
                         break;
                     }
 
