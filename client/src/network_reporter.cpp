@@ -560,6 +560,11 @@ namespace Oblivion {
         return out;
     }
 
+    void NetworkReporter::SetClientStatus(bool antiSuspendOk, bool integrityOk) {
+        m_antiSuspendOk.store(antiSuspendOk);
+        m_integrityOk.store(integrityOk);
+    }
+
     void NetworkReporter::StartHeartbeat() {
         // Production heartbeat cannot be disabled by a client-controlled environment variable.
         if (m_hbRunning.load() || m_hbSocket == INVALID_SOCKET) return;
@@ -615,7 +620,9 @@ namespace Oblivion {
 
                         const std::string clientTimestamp =
                             std::to_string(static_cast<uint64_t>(GetTickCount64()));
-                        const std::string status = "1|1";
+                        const std::string status =
+                            std::string(m_antiSuspendOk.load() ? "1" : "0") + "|" +
+                            (m_integrityOk.load() ? "1" : "0");
                         // Authenticate every mutable PONG field, including status and
                         // the client timestamp, under a message-specific versioned label.
                         const std::string pongFields = std::to_string(seq) + ":" +
