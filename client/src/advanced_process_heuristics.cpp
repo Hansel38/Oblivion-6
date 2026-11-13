@@ -1124,9 +1124,10 @@ namespace Oblivion {
                             // authoritative check for a handle targeting this game.
                             const DWORD targetPid = GetProcessId(hDuplicated);
                             if (targetPid == gameProcessId) {
-                                const std::wstring ownerName = processName.empty()
-                                    ? L"UNKNOWN_PROCESS"
-                                    : processName;
+                                std::wstring ownerName = processName;
+                                if (ownerName.empty()) {
+                                    ownerName = L"UNKNOWN_PROCESS";
+                                }
                                 suspiciousProcess = ownerName + L" (PID:" +
                                     std::to_wstring(handle.ProcessId) +
                                     L", Access:0x" + std::to_wstring(handle.GrantedAccess) + L")";
