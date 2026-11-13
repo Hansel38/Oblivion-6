@@ -5,6 +5,8 @@
 #include <thread>
 #include <vector>
 #include <fstream>
+#include <filesystem>
+#include <cctype>
 #include <sstream>
 #include <iomanip>
 #include <ctime>
@@ -134,20 +136,46 @@ static bool ParseHelloFrame(const std::string& frame, std::string& hwid) {
 
 // Fungsi untuk mendapatkan path folder tempat executable berada
 std::string GetExecutableDirectory() {
-    char exePath[MAX_PATH];
-    GetModuleFileNameA(NULL, exePath, MAX_PATH);
-    std::string path(exePath);
-    size_t lastSlash = path.find_last_of("\\/");
-    if (lastSlash != std::string::npos) {
-        return path.substr(0, lastSlash + 1);
+#ifdef _WIN32
+    size_t capacity = 512;
+    while (capacity <= 32768) {
+        std::vector<char> exePath(capacity, '\0');
+        const DWORD length = GetModuleFileNameA(
+            NULL, exePath.data(), static_cast<DWORD>(exePath.size()));
+        if (length == 0) return "";
+        if (length < exePath.size() - 1) {
+            const std::string path(exePath.data(), length);
+            const size_t lastSlash = path.find_last_of("\\/");
+            return lastSlash == std::string::npos
+                ? std::string()
+                : path.substr(0, lastSlash + 1);
+        }
+        capacity *= 2;
     }
     return "";
+#else
+    size_t capacity = 512;
+    while (capacity <= 32768) {
+        std::vector<char> exePath(capacity);
+        const ssize_t length = readlink(
+            "/proc/self/exe", exePath.data(), exePath.size());
+        if (length < 0) return "";
+        if (static_cast<size_t>(length) < exePath.size()) {
+            const std::string path(exePath.data(), static_cast<size_t>(length));
+            const size_t lastSlash = path.find_last_of('/');
+            return lastSlash == std::string::npos
+                ? std::string()
+                : path.substr(0, lastSlash + 1);
+        }
+        capacity *= 2;
+    }
+    return "";
+#endif
 }
-
 // Fungsi untuk mendapatkan path lengkap file (relatif terhadap executable)
 std::string GetFilePath(const std::string& filename) {
-    std::string exeDir = GetExecutableDirectory();
-    return exeDir + filename;
+    const std::string exeDir = GetExecutableDirectory();
+    return exeDir.empty() ? std::string() : exeDir + filename;
 }
 
 // Fungsi helper untuk mendapatkan timestamp saat ini
@@ -163,56 +191,122 @@ std::string GetCurrentTimestamp() {
 // Fungsi untuk mengecek apakah HWID sudah di-ban
 // PENTING: File bans.txt dibaca fresh setiap kali fungsi ini dipanggil (tidak ada caching)
 // Untuk unban HWID, cukup hapus baris HWID dari bans.txt dan restart client
-bool IsHWIDBanned(const std::string& hwid) {
-    std::string banFilePath = GetFilePath(BAN_LIST_FILE);
-    std::ifstream banFile(banFilePath);
-    if (!banFile.is_open()) {
-        return false; // File tidak ada, berarti belum ada yang di-ban
+enum class BanListStatus {
+    NotBanned,
+    Banned,
+    Unavailable
+};
+
+static std::mutex g_banListMutex;
+
+static bool IsSameBanListHwid(
+    const std::string& left, const std::string& right) {
+    if (left.size() != right.size()) return false;
+    for (size_t i = 0; i < left.size(); ++i) {
+        unsigned char a = static_cast<unsigned char>(left[i]);
+        unsigned char b = static_cast<unsigned char>(right[i]);
+        if (a >= 'A' && a <= 'F') a = static_cast<unsigned char>(a + ('a' - 'A'));
+        if (b >= 'A' && b <= 'F') b = static_cast<unsigned char>(b + ('a' - 'A'));
+        if (a != b) return false;
     }
-    
-    std::string line;
-    while (std::getline(banFile, line)) {
-        // Skip empty/whitespace-only lines before trimming to avoid npos arithmetic.
-        const size_t firstNonWhitespace = line.find_first_not_of(" \t\n\r");
-        if (firstNonWhitespace == std::string::npos) {
-            continue;
-        }
-        const size_t lastNonWhitespace = line.find_last_not_of(" \t\n\r");
-        line = line.substr(firstNonWhitespace, lastNonWhitespace - firstNonWhitespace + 1);
-        
-        // Jika line kosong atau komentar (dimulai dengan #), skip
-        if (line.empty() || line[0] == '#') {
-            continue;
-        }
-        
-        // Bandingkan HWID (case-insensitive)
-        if (_stricmp(line.c_str(), hwid.c_str()) == 0) {
-            banFile.close();
-            return true;
-        }
-    }
-    
-    banFile.close();
-    return false;
+    return true;
 }
 
-// Fungsi untuk menambahkan HWID ke ban list
-void AddToBanList(const std::string& hwid) {
-    // Cek dulu apakah sudah di-ban
-    if (IsHWIDBanned(hwid)) {
-        return; // Sudah di-ban, tidak perlu ditambahkan lagi
+static bool IsValidBanListHwid(const std::string& hwid) {
+    if (hwid.size() != 64) return false;
+    for (unsigned char value : hwid) {
+        if (!((value >= '0' && value <= '9') ||
+              (value >= 'a' && value <= 'f') ||
+              (value >= 'A' && value <= 'F'))) {
+            return false;
+        }
     }
-    
-    std::string banFilePath = GetFilePath(BAN_LIST_FILE);
-    std::ofstream banFile(banFilePath, std::ios::app);
-    if (banFile.is_open()) {
-        banFile << hwid << std::endl;
-        banFile.close();
-        std::cout << "[BAN] HWID [" << hwid << "] ditambahkan ke ban list." << std::endl;
-    } else {
-        std::cerr << "[ERROR] Gagal membuka file ban list untuk menulis." << std::endl;
-    }
+    return true;
 }
+
+// Caller must hold g_banListMutex.
+static BanListStatus CheckHWIDBanStatusUnlocked(const std::string& hwid) {
+    if (!IsValidBanListHwid(hwid)) {
+        return BanListStatus::Unavailable;
+    }
+
+    const std::string banFilePath = GetFilePath(BAN_LIST_FILE);
+    if (banFilePath.empty()) return BanListStatus::Unavailable;
+
+    std::error_code filesystemError;
+    const bool fileExists = std::filesystem::exists(banFilePath, filesystemError);
+    if (filesystemError) return BanListStatus::Unavailable;
+    if (!fileExists) return BanListStatus::NotBanned;
+
+    std::ifstream banFile(banFilePath);
+    if (!banFile.is_open()) return BanListStatus::Unavailable;
+
+    bool matched = false;
+    std::string line;
+    while (std::getline(banFile, line)) {
+        const size_t firstNonWhitespace = line.find_first_not_of(" \t\n\r");
+        if (firstNonWhitespace == std::string::npos) continue;
+
+        const size_t lastNonWhitespace = line.find_last_not_of(" \t\n\r");
+        line = line.substr(firstNonWhitespace, lastNonWhitespace - firstNonWhitespace + 1);
+        if (line.empty() || line[0] == '#') continue;
+
+        // A malformed active entry makes the list unreliable. Never treat
+        // a partially valid list as proof that this HWID is not banned.
+        if (!IsValidBanListHwid(line)) return BanListStatus::Unavailable;
+
+        if (IsSameBanListHwid(line, hwid)) {
+            matched = true;
+        }
+    }
+
+    if (banFile.bad() || (banFile.fail() && !banFile.eof())) {
+        return BanListStatus::Unavailable;
+    }
+    return matched ? BanListStatus::Banned : BanListStatus::NotBanned;
+}
+
+static BanListStatus CheckHWIDBanStatus(const std::string& hwid) {
+    std::lock_guard<std::mutex> lock(g_banListMutex);
+    return CheckHWIDBanStatusUnlocked(hwid);
+}
+
+// Append is serialized with checks and other appends in this server process.
+void AddToBanList(const std::string& hwid) {
+    if (!IsValidBanListHwid(hwid)) {
+        std::cerr << "[ERROR] Menolak HWID tidak valid untuk ban list." << std::endl;
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(g_banListMutex);
+    const BanListStatus status = CheckHWIDBanStatusUnlocked(hwid);
+    if (status == BanListStatus::Banned) return;
+    if (status == BanListStatus::Unavailable) {
+        std::cerr << "[ERROR] Ban list tidak dapat dibaca atau berisi entri tidak valid; penulisan dibatalkan." << std::endl;
+        return;
+    }
+
+    const std::string banFilePath = GetFilePath(BAN_LIST_FILE);
+    if (banFilePath.empty()) {
+        std::cerr << "[ERROR] Path ban list tidak tersedia." << std::endl;
+        return;
+    }
+
+    std::ofstream banFile(banFilePath, std::ios::app);
+    if (!banFile.is_open()) {
+        std::cerr << "[ERROR] Gagal membuka file ban list untuk menulis." << std::endl;
+        return;
+    }
+
+    banFile << hwid << '\n';
+    banFile.flush();
+    if (!banFile.good()) {
+        std::cerr << "[ERROR] Gagal menyimpan HWID ke ban list." << std::endl;
+        return;
+    }
+    std::cout << "[BAN] HWID [" << hwid << "] ditambahkan ke ban list." << std::endl;
+}
+
 
 // Helper function untuk extract file/software name dari details
 std::string ExtractDetectedFile(const std::string& type, const std::string& details) {
@@ -697,7 +791,13 @@ void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbea
                 std::cout << "[CHECKIN] Client check-in dari HWID [" << hwid << "]" << std::endl;
                 
                 // Cek apakah HWID sudah di-ban (file dibaca fresh setiap kali, tidak ada cache)
-                bool isBanned = IsHWIDBanned(hwid);
+                const BanListStatus banStatus = CheckHWIDBanStatus(hwid);
+                if (banStatus == BanListStatus::Unavailable) {
+                    LogViolation("BAN_LIST_UNAVAILABLE", "Ban list could not be read or contains malformed entries", hwid);
+                    closesocket(clientSocket);
+                    return;
+                }
+                const bool isBanned = banStatus == BanListStatus::Banned;
                 
                 if (isBanned) {
                     // HWID di-ban, kirim KICK
@@ -967,7 +1067,13 @@ void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbea
                 LogViolation(type, details, hwid);
                 
                 // 2. Cek apakah HWID sudah di-ban (hanya cek, tidak auto-ban)
-                bool isBanned = IsHWIDBanned(hwid);
+                const BanListStatus banStatus = CheckHWIDBanStatus(hwid);
+                if (banStatus == BanListStatus::Unavailable) {
+                    LogViolation("BAN_LIST_UNAVAILABLE", "Ban list could not be read or contains malformed entries", hwid);
+                    closesocket(clientSocket);
+                    return;
+                }
+                const bool isBanned = banStatus == BanListStatus::Banned;
                 
                 // 3. AUTO-BAN DISABLED - Admin melakukan ban manual via bans.txt
                 // bool isSerious = IsSeriousViolation(type);

@@ -116,12 +116,13 @@ namespace Oblivion {
     }
 
     std::string FileIntegrityChecker::CalculateSHA256(const std::wstring& filePath) {
-        // Gunakan CreateFile dengan share mode untuk membaca file yang sedang dieksekusi
-        // Ini penting karena std::ifstream tidak bisa membaca file yang sedang dieksekusi dengan benar
+        // Keep the file stable for the complete hash operation. FILE_SHARE_READ
+        // permits other readers but denies write/delete opens until this handle
+        // is closed, so an updater cannot replace or modify the file mid-hash.
         HANDLE hFile = CreateFileW(
             filePath.c_str(),
             GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, // Penting: allow sharing untuk file yang sedang dieksekusi
+            FILE_SHARE_READ, // Allow readers, but block concurrent writes and rename/delete while hashing.
             NULL,
             OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, // Optimize untuk sequential read

@@ -43,7 +43,7 @@ namespace Oblivion {
         };
 
         void MonitoringLoop();
-        SectionCompareResult CompareSection(const IMAGE_SECTION_HEADER& section) const;
+        SectionCompareResult CompareSection(const IMAGE_SECTION_HEADER& section, bool imageWasRebased) const;
         void ReportTamper(const std::string& sectionName) const;
         void BuildSkipIntervals(DWORD sectionStart, DWORD sectionEnd, std::vector<std::pair<size_t, size_t>>& skips) const;
 

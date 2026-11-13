@@ -4,7 +4,6 @@
 #include <iostream>
 #include <iomanip>
 #include <string>
-#include <fstream>
 #include <algorithm>
 #include <wincrypt.h>
 #include <sstream>
@@ -14,6 +13,22 @@
 #pragma comment(lib, "crypt32.lib")
 
 namespace {
+    class ScopedFileHandle {
+    public:
+        explicit ScopedFileHandle(HANDLE handle) : m_handle(handle) {}
+        ~ScopedFileHandle() {
+            if (m_handle != INVALID_HANDLE_VALUE) {
+                CloseHandle(m_handle);
+            }
+        }
+        ScopedFileHandle(const ScopedFileHandle&) = delete;
+        ScopedFileHandle& operator=(const ScopedFileHandle&) = delete;
+        HANDLE get() const { return m_handle; }
+
+    private:
+        HANDLE m_handle;
+    };
+
     bool IsReadableMemoryRange(const void* address, size_t length) {
         if (length == 0) return true;
         uintptr_t cursor = reinterpret_cast<uintptr_t>(address);
@@ -53,6 +68,34 @@ namespace {
             remaining -= step;
         }
         return true;
+    }
+
+    bool GetExecutablePathDynamic(std::wstring& executablePath) {
+        executablePath.clear();
+        constexpr size_t kMaximumPathLength = 32768;
+        size_t capacity = MAX_PATH;
+
+        while (capacity <= kMaximumPathLength) {
+            std::vector<wchar_t> buffer(capacity, L'\\0');
+            const DWORD length = GetModuleFileNameW(
+                nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+            if (length == 0) {
+                return false;
+            }
+
+            // A return equal to the buffer size means the path may be truncated.
+            if (static_cast<size_t>(length) < buffer.size()) {
+                executablePath.assign(buffer.data(), static_cast<size_t>(length));
+                return !executablePath.empty();
+            }
+
+            if (capacity == kMaximumPathLength) {
+                return false;
+            }
+            capacity = (std::min)(capacity * 2, kMaximumPathLength);
+        }
+
+        return false;
     }
 }
 
@@ -183,35 +226,68 @@ namespace Oblivion {
     }
 
     // === LAYER 1: PE Structure Validation ===\n    
-    bool MemoryScanner::ReadExecutableFile(const std::wstring& filePath, std::vector<uint8_t>& fileData) {
+    bool MemoryScanner::ReadExecutableFile(
+        const std::wstring& filePath, std::vector<uint8_t>& fileData) {
         fileData.clear();
-        std::ifstream file(filePath, std::ios::binary | std::ios::ate);
-        if (!file.is_open()) return false;
 
-        const std::streamoff fileSize = static_cast<std::streamoff>(file.tellg());
+        // Hold a read-only sharing handle for the entire snapshot. This denies
+        // concurrent write/delete opens, so the PE bytes cannot change between
+        // the size query and the final read.
+        ScopedFileHandle file(CreateFileW(
+            filePath.c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+            nullptr));
+        if (file.get() == INVALID_HANDLE_VALUE) return false;
+
+        LARGE_INTEGER fileSize{};
+        if (!GetFileSizeEx(file.get(), &fileSize)) return false;
+
         // This reader is for the anti-cheat/game executable image, not arbitrary archives.
-        constexpr std::streamoff kMaxExecutableImageSize = 512LL * 1024LL * 1024LL;
-        if (fileSize <= 0 || fileSize > kMaxExecutableImageSize ||
-            static_cast<uint64_t>(fileSize) >
+        constexpr uint64_t kMaxExecutableImageSize = 512ULL * 1024ULL * 1024ULL;
+        if (fileSize.QuadPart <= 0 ||
+            static_cast<uint64_t>(fileSize.QuadPart) > kMaxExecutableImageSize ||
+            static_cast<uint64_t>(fileSize.QuadPart) >
                 static_cast<uint64_t>((std::numeric_limits<size_t>::max)())) {
             return false;
         }
 
-        if (!file.seekg(0, std::ios::beg)) return false;
+        const size_t imageSize = static_cast<size_t>(fileSize.QuadPart);
+        std::vector<uint8_t> loadedImage;
+        if (imageSize > loadedImage.max_size()) return false;
+
         try {
-            fileData.resize(static_cast<size_t>(fileSize));
+            loadedImage.resize(imageSize);
         } catch (...) {
-            fileData.clear();
             return false;
         }
 
-        if (!file.read(reinterpret_cast<char*>(fileData.data()),
-                       static_cast<std::streamsize>(fileSize)) ||
-            file.gcount() != static_cast<std::streamsize>(fileSize)) {
-            fileData.clear();
+        size_t totalRead = 0;
+        while (totalRead < imageSize) {
+            const size_t remaining = imageSize - totalRead;
+            const DWORD requestSize = static_cast<DWORD>((std::min)(
+                remaining,
+                static_cast<size_t>((std::numeric_limits<DWORD>::max)())));
+            DWORD bytesRead = 0;
+            if (!ReadFile(file.get(), loadedImage.data() + totalRead,
+                          requestSize, &bytesRead, nullptr) ||
+                bytesRead == 0) {
+                return false;
+            }
+            totalRead += static_cast<size_t>(bytesRead);
+        }
+
+        LARGE_INTEGER finalFileSize{};
+        if (!GetFileSizeEx(file.get(), &finalFileSize) ||
+            finalFileSize.QuadPart != fileSize.QuadPart) {
             return false;
         }
 
+        // Publish only the complete stable snapshot.
+        fileData.swap(loadedImage);
         return true;
     }
 
@@ -665,29 +741,39 @@ namespace Oblivion {
                 // berarti sudah ada injection SEBELUM kita load!
                 // Tapi HANYA untuk .text section (core code)
                 // CATATAN: Relocations (ASLR) dapat menyebabkan perbedaan kecil yang legitimate
-                if (baseline.diskCRC32 != baseline.memoryCRC32 && baseline.isCodeSection) {
-                    // Hitung perbedaan byte-byte untuk membedakan relocations dari injection
-                    // Relocations biasanya hanya mengubah beberapa bytes (< 0.1% dari section)
-                    size_t rawDataSize = section.rawDataSize;
-                    if (rawDataSize > 0 && section.rawDataOffset <= fileData.size() &&
-                        rawDataSize <= fileData.size() - section.rawDataOffset) {
-                        const uint8_t* diskData = fileData.data() + section.rawDataOffset;
-                        size_t differentBytes = 0;
-                        size_t bytesToCompare = (sizeToHash < rawDataSize) ? sizeToHash : rawDataSize;
-                        
-                        // Hitung jumlah byte yang berbeda
-                        for (size_t i = 0; i < bytesToCompare; i++) {
-                            if (diskData[i] != memoryAddr[i]) {
-                                differentBytes++;
-                            }
+                if (baseline.isCodeSection) {
+                    // Compare the same mapped span on both sides. Bytes beyond
+                    // SizeOfRawData are zero-filled by the PE image loader.
+                    const size_t rawDataSize = static_cast<size_t>(section.rawDataSize);
+                    const size_t rawDataOffset = static_cast<size_t>(section.rawDataOffset);
+                    if (rawDataOffset > fileData.size() ||
+                        rawDataSize > fileData.size() - rawDataOffset) {
+                        ReportViolationAndExit(L"", "DISK_SECTION_UNAVAILABLE",
+                                               "Executable section raw data is outside the validated file range");
+                        return;
+                    }
+
+                    const uint8_t* diskData = fileData.data() + rawDataOffset;
+                    size_t differentBytes = 0;
+                    const size_t bytesToCompare = sizeToHash;
+
+                    // Compare initialized bytes and the zero-filled virtual tail.
+                    for (size_t i = 0; i < bytesToCompare; ++i) {
+                        const uint8_t expectedByte = i < rawDataSize ? diskData[i] : 0;
+                        if (expectedByte != memoryAddr[i]) {
+                            ++differentBytes;
                         }
-                        
-                        // Relocations biasanya mengubah < 0.1% dari section (atau < 100 bytes untuk section kecil)
-                        // Jika perbedaannya terlalu besar, kemungkinan ada injection
-                        double diffPercentage = (bytesToCompare > 0) ? (100.0 * differentBytes / bytesToCompare) : 0.0;
-                        size_t diffThreshold = (bytesToCompare > 100000) ? (bytesToCompare / 1000) : 100; // 0.1% atau max 100 bytes
-                        
-                        if (differentBytes > diffThreshold || diffPercentage > 0.1) {
+                    }
+
+                    // Keep the existing tolerance for a small number of relocation changes.
+                    const double diffPercentage = bytesToCompare > 0
+                        ? (100.0 * static_cast<double>(differentBytes) / static_cast<double>(bytesToCompare))
+                        : 0.0;
+                    const size_t diffThreshold = bytesToCompare > 100000
+                        ? (bytesToCompare / 1000)
+                        : 100;
+
+                    if (differentBytes > diffThreshold || diffPercentage > 0.1) {
                             // Extract executable filename from path
                             std::string exeName = "unknown";
                             if (!filePath.empty()) {
@@ -720,7 +806,6 @@ namespace Oblivion {
                         //           << differentBytes << " bytes (" << diffPercentage << "%)" << std::endl;
                     }
                 }
-            }
 
             m_diskBaseline.push_back(baseline);
         }
@@ -786,44 +871,10 @@ namespace Oblivion {
             // baseline.memoryCRC32 adalah snapshot memory saat baseline dibuat (setelah relocations)
             // baseline.diskCRC32 digunakan untuk verifikasi bahwa file disk belum diubah
             
-            bool memoryModified = false;
-            if (baseline.memoryCRC32 != 0) {
-                // Gunakan memory baseline jika tersedia (setelah relocations)
-                memoryModified = (currentMemoryCRC32 != baseline.memoryCRC32);
-            } else {
-                // Fallback: jika memory baseline tidak tersedia, bandingkan dengan disk
-                // tapi perlu toleransi untuk relocations (perbedaan kecil adalah normal)
-                if (currentMemoryCRC32 != baseline.diskCRC32) {
-                    // Hitung perbedaan untuk membedakan relocations dari injection
-                    auto it_section_info = m_sectionMap.find(baseline.rva);
-                    if (it_section_info != m_sectionMap.end() && !fileData.empty()) {
-                        const auto& section = it_section_info->second;
-                        if (section.rawDataOffset <= fileData.size() &&
-                            section.rawDataSize <= fileData.size() - section.rawDataOffset) {
-                            const uint8_t* diskData = fileData.data() + section.rawDataOffset;
-                            size_t differentBytes = 0;
-                            size_t bytesToCompare = (sizeToCheck < section.rawDataSize) ? sizeToCheck : section.rawDataSize;
-                            
-                            for (size_t i = 0; i < bytesToCompare; i++) {
-                                if (diskData[i] != memoryAddr[i]) {
-                                    differentBytes++;
-                                }
-                            }
-                            
-                            // Relocations biasanya < 0.1% atau < 100 bytes
-                            double diffPercentage = (bytesToCompare > 0) ? (100.0 * differentBytes / bytesToCompare) : 0.0;
-                            size_t diffThreshold = (bytesToCompare > 100000) ? (bytesToCompare / 1000) : 100;
-                            
-                            // Hanya flag jika perbedaannya signifikan
-                            memoryModified = (differentBytes > diffThreshold || diffPercentage > 0.1);
-                        } else {
-                            memoryModified = true; // Tidak bisa verifikasi, anggap modified
-                        }
-                    } else {
-                        memoryModified = true; // Tidak bisa verifikasi, anggap modified
-                    }
-                }
-            }
+            // CRC32 value zero is valid data, not an "unavailable" sentinel.
+            // Every disk baseline records this memory snapshot before insertion.
+            const bool memoryModified =
+                currentMemoryCRC32 != baseline.memoryCRC32;
 
             if (memoryModified) {
                 // Code modification detected!
@@ -847,7 +898,7 @@ namespace Oblivion {
                 ss << "File: " << exeName
                    << " | Section: " << sectionName
                    << " | RVA: 0x" << std::hex << baseline.rva
-                   << " | Expected CRC32: 0x" << (baseline.memoryCRC32 != 0 ? baseline.memoryCRC32 : baseline.diskCRC32)
+                   << " | Expected CRC32: 0x" << baseline.memoryCRC32
                    << " | Got CRC32: 0x" << currentMemoryCRC32;
 
                 ReportViolationAndExit(L"", "CODE_MODIFICATION", ss.str());
@@ -962,91 +1013,60 @@ namespace Oblivion {
             return RegionIntegrityResult::Incomplete;
         }
 
-        // Match only a baseline starting at this region. Compare sizes without
-        // signed narrowing so malformed or large values cannot overflow.
+        // Compare only a region that covers a complete baseline section.
+        // If VirtualQuery splits a baseline section (for example after a page
+        // protection change), a later subregion overlaps the section but cannot
+        // be validated against its whole-section CRC. Treat that as incomplete,
+        // not clean; otherwise modified pages after the first region are skipped.
+        const uintptr_t maximumAddress =
+            (std::numeric_limits<uintptr_t>::max)();
+        if (regionSize > maximumAddress - rva) {
+            return RegionIntegrityResult::Incomplete;
+        }
+        const uintptr_t regionEnd = rva + regionSize;
+
         for (const auto& baseline : m_diskBaseline) {
-            const size_t sizeDiff = baseline.size > regionSize
-                ? baseline.size - regionSize
-                : regionSize - baseline.size;
-            if (baseline.rva != rva || sizeDiff >= 0x1000) {
+            if (baseline.size == 0) {
+                if (baseline.rva == rva) {
+                    return RegionIntegrityResult::Incomplete;
+                }
                 continue;
             }
-
-            if (baseline.size == 0) {
+            if (baseline.size > maximumAddress - baseline.rva) {
                 return RegionIntegrityResult::Incomplete;
             }
 
-            const size_t sizeToCheck = (std::min)(baseline.size, regionSize);
+            const uintptr_t baselineEnd = baseline.rva + baseline.size;
+            if (rva >= baselineEnd || baseline.rva >= regionEnd) {
+                continue;
+            }
+
+            // An overlapping region must begin at the baseline RVA and cover
+            // the complete CRC range. Partial overlaps cannot be called clean.
+            if (baseline.rva != rva) {
+                return RegionIntegrityResult::Incomplete;
+            }
+
+            const size_t sizeDiff = baseline.size > regionSize
+                ? baseline.size - regionSize
+                : regionSize - baseline.size;
+            if (sizeDiff >= 0x1000 || baseline.size > regionSize) {
+                // The stored CRC covers the complete section; never compare it
+                // against a shorter VirtualQuery prefix.
+                return RegionIntegrityResult::Incomplete;
+            }
+
+            const size_t sizeToCheck = baseline.size;
             if (!IsReadableMemoryRange(memoryBase, sizeToCheck)) {
                 return RegionIntegrityResult::Incomplete;
             }
 
             const uint32_t currentCRC32 =
                 CalculateCRC32(memoryBase, sizeToCheck);
-            bool memoryModified = false;
-
-            if (baseline.memoryCRC32 != 0) {
-                // A full-region CRC cannot validate a shorter prefix. The old
-                // fallback re-read the live module as its own "baseline" and,
-                // on a short VirtualQuery range, could hash baseline.size bytes
-                // from a buffer that only had regionSize bytes available.
-                if (baseline.size > regionSize) {
-                    return RegionIntegrityResult::Incomplete;
-                }
-                // A larger VirtualQuery region may include alignment padding;
-                // the complete baseline-sized prefix is still safe to compare.
-                memoryModified = currentCRC32 != baseline.memoryCRC32;
-            } else if (currentCRC32 != baseline.diskCRC32) {
-                // Fallback: compare executable bytes against the disk image,
-                // retaining the existing relocation-tolerance threshold.
-                if (baseline.isCodeSection) {
-                    const auto sectionIt = m_sectionMap.find(
-                        static_cast<uint32_t>(baseline.rva));
-                    if (sectionIt == m_sectionMap.end()) {
-                        return RegionIntegrityResult::Incomplete;
-                    }
-
-                    const auto& section = sectionIt->second;
-                    std::vector<uint8_t> fileData;
-                    if (!ReadExecutableFile(m_executablePath, fileData) ||
-                        section.rawDataOffset > fileData.size() ||
-                        section.rawDataSize > fileData.size() - section.rawDataOffset) {
-                        return RegionIntegrityResult::Incomplete;
-                    }
-
-                    const size_t bytesToCompare =
-                        (std::min)(sizeToCheck, static_cast<size_t>(section.rawDataSize));
-                    if (bytesToCompare == 0) {
-                        return RegionIntegrityResult::Incomplete;
-                    }
-
-                    const uint8_t* diskData =
-                        fileData.data() + section.rawDataOffset;
-                    size_t differentBytes = 0;
-                    for (size_t i = 0; i < bytesToCompare; ++i) {
-                        if (diskData[i] != memoryBase[i]) {
-                            ++differentBytes;
-                        }
-                    }
-
-                    const double diffPercentage =
-                        100.0 * static_cast<double>(differentBytes) /
-                        static_cast<double>(bytesToCompare);
-                    const size_t diffThreshold =
-                        bytesToCompare > 100000 ? bytesToCompare / 1000 : 100;
-
-                    memoryModified =
-                        differentBytes > diffThreshold || diffPercentage > 0.1;
-                } else {
-                    // Preserve the existing non-code fallback behavior.
-                    const uint64_t sha32 =
-                        CalculateSHA256_32bit(memoryBase, sizeToCheck);
-                    const uint32_t sha32Lo = static_cast<uint32_t>(sha32);
-                    memoryModified =
-                        sha32Lo != baseline.memoryCRC32 &&
-                        baseline.memoryCRC32 != 0;
-                }
-            }
+            // memoryCRC32 is always populated when a baseline is inserted.
+            // Do not reserve zero as a sentinel: CRC32 can legitimately be zero.
+            const bool memoryModified =
+                currentCRC32 != baseline.memoryCRC32;
 
             if (!memoryModified) {
                 return RegionIntegrityResult::Clean;
@@ -1114,12 +1134,22 @@ namespace Oblivion {
             return 0;
         }
 
-        // Hash semua baseline data
+        // Serialize meaningful fields only. Hashing the raw struct object
+        // representation also included padding bytes, whose values are not
+        // initialized and are not part of the baseline's logical state.
         std::vector<uint8_t> baselineData;
+        const auto appendField = [&baselineData](const auto& value) {
+            const auto* bytes = reinterpret_cast<const uint8_t*>(&value);
+            baselineData.insert(baselineData.end(), bytes, bytes + sizeof(value));
+        };
+
         for (const auto& baseline : m_diskBaseline) {
-            baselineData.insert(baselineData.end(), 
-                              reinterpret_cast<const uint8_t*>(&baseline),
-                              reinterpret_cast<const uint8_t*>(&baseline) + sizeof(ExecutableRegion));
+            appendField(baseline.rva);
+            appendField(baseline.size);
+            appendField(baseline.diskCRC32);
+            appendField(baseline.memoryCRC32);
+            const uint8_t isCodeSection = baseline.isCodeSection ? 1u : 0u;
+            appendField(isCodeSection);
         }
 
         return CalculateCRC32(baselineData.data(), baselineData.size());
@@ -1151,9 +1181,9 @@ namespace Oblivion {
     void MemoryScanner::PerformScan() {
         // === PHASE 1: Baseline Creation (ONCE, at first scan) ===
         if (!m_baselineCreated) {
-            wchar_t exePath[MAX_PATH];
-            if (GetModuleFileNameW(NULL, exePath, MAX_PATH) == 0) {
-                std::string details = "Failed to get executable path";
+            std::wstring exePath;
+            if (!GetExecutablePathDynamic(exePath)) {
+                std::string details = "Failed to resolve the complete executable path";
                 ReportViolationAndExit(L"", "PATH_RETRIEVAL_FAILED", details);
                 return;
             }

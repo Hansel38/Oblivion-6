@@ -308,6 +308,11 @@ namespace Oblivion {
                         ReportViolationAndExit(
                             L"", "SUSPICIOUS_BEHAVIOR", details_utf8);
                     } else if (behaviorResult == Oblivion::BehaviorScanResult::Incomplete) {
+                        // Do not cache an incomplete inspection as completed. The
+                        // process must be retried on a later scan while its identity
+                        // remains the same.
+                        m_scannedProcesses.erase(processId);
+
                         const std::string warning =
                             "[ProcessWatcher] Behavior inspection incomplete for PID " +
                             std::to_string(processId) + ": " + behaviorScanIssue;

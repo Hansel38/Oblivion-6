@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
-#include <fstream>
 #include <limits>
 #include <new>
 #include <stdexcept>
@@ -15,6 +14,22 @@
 extern void ReportViolationAndExit(const std::wstring& message, const std::string& type, const std::string& details);
 
 namespace {
+    class ScopedFileHandle {
+    public:
+        explicit ScopedFileHandle(HANDLE handle) : m_handle(handle) {}
+        ~ScopedFileHandle() {
+            if (m_handle != INVALID_HANDLE_VALUE) {
+                CloseHandle(m_handle);
+            }
+        }
+        ScopedFileHandle(const ScopedFileHandle&) = delete;
+        ScopedFileHandle& operator=(const ScopedFileHandle&) = delete;
+        HANDLE get() const { return m_handle; }
+
+    private:
+        HANDLE m_handle;
+    };
+
     constexpr auto kVerificationInterval = std::chrono::seconds(5);
 
     bool GetModulePath(HMODULE module, std::wstring& path) {
@@ -264,32 +279,33 @@ namespace Oblivion {
             return true;
         }
 
-        std::ifstream file(m_modulePath, std::ios::binary | std::ios::ate);
-        if (!file.is_open()) {
+        // Keep the file stable while taking the disk image snapshot. The
+        // previous ifstream default allowed concurrent write/delete sharing.
+        ScopedFileHandle file(CreateFileW(
+            m_modulePath.c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+            nullptr));
+        if (file.get() == INVALID_HANDLE_VALUE) {
             return false;
         }
 
-        const std::streampos fileEnd = file.tellg();
-        if (fileEnd <= std::streampos(0)) {
+        LARGE_INTEGER fileSize{};
+        if (!GetFileSizeEx(file.get(), &fileSize) || fileSize.QuadPart <= 0) {
             return false;
         }
 
-        const std::streamoff fileSize = static_cast<std::streamoff>(fileEnd);
-        if (fileSize <= 0) {
-            return false;
-        }
-
-        const std::uintmax_t unsignedFileSize =
-            static_cast<std::uintmax_t>(fileSize);
+        const std::uint64_t unsignedFileSize =
+            static_cast<std::uint64_t>(fileSize.QuadPart);
         if (unsignedFileSize >
-                static_cast<std::uintmax_t>((std::numeric_limits<size_t>::max)()) ||
-            unsignedFileSize >
-                static_cast<std::uintmax_t>((std::numeric_limits<std::streamsize>::max)())) {
+            static_cast<std::uint64_t>((std::numeric_limits<size_t>::max)())) {
             return false;
         }
 
-        const size_t imageSize = static_cast<size_t>(fileSize);
-        const std::streamsize readSize = static_cast<std::streamsize>(fileSize);
+        const size_t imageSize = static_cast<size_t>(fileSize.QuadPart);
         std::vector<uint8_t> loadedImage;
         if (imageSize > loadedImage.max_size()) {
             return false;
@@ -303,19 +319,29 @@ namespace Oblivion {
             return false;
         }
 
-        file.seekg(0, std::ios::beg);
-        if (!file) {
+        size_t totalRead = 0;
+        while (totalRead < imageSize) {
+            const size_t remaining = imageSize - totalRead;
+            const DWORD requestSize = static_cast<DWORD>((std::min)(
+                remaining,
+                static_cast<size_t>((std::numeric_limits<DWORD>::max)())));
+            DWORD bytesRead = 0;
+            if (!ReadFile(file.get(), loadedImage.data() + totalRead,
+                          requestSize, &bytesRead, nullptr) ||
+                bytesRead == 0) {
+                return false;
+            }
+            totalRead += static_cast<size_t>(bytesRead);
+        }
+
+        LARGE_INTEGER finalFileSize{};
+        if (!GetFileSizeEx(file.get(), &finalFileSize) ||
+            finalFileSize.QuadPart != fileSize.QuadPart) {
             return false;
         }
 
-        file.read(reinterpret_cast<char*>(loadedImage.data()), readSize);
-        if (!file || file.gcount() != readSize) {
-            // Keep the member image empty; a later Start() must retry the read.
-            return false;
-        }
-
-        // Publish only a complete image. A partial read is discarded with the
-        // local temporary instead of leaving a non-empty member that looks loaded.
+        // Publish only a complete, stable image. A partial read is discarded
+        // with the local temporary so a later Start() can retry.
         m_diskImage.swap(loadedImage);
         return true;
     }
@@ -362,6 +388,10 @@ namespace Oblivion {
             return false;
         }
 
+        const bool imageWasRebased =
+            reinterpret_cast<uintptr_t>(moduleBase) !=
+            static_cast<uintptr_t>(diskNt->OptionalHeader.ImageBase);
+
         const WORD sectionCount = diskNt->FileHeader.NumberOfSections;
         for (WORD i = 0; i < sectionCount; ++i) {
             const IMAGE_SECTION_HEADER& memorySection = memorySections[i];
@@ -388,7 +418,7 @@ namespace Oblivion {
             const std::string sectionName(
                 reinterpret_cast<const char*>(diskSection.Name), nameLength);
 
-            const SectionCompareResult comparison = CompareSection(diskSection);
+            const SectionCompareResult comparison = CompareSection(diskSection, imageWasRebased);
             if (comparison == SectionCompareResult::Incomplete) {
                 ReportViolationAndExit(
                     L"", "SELF_INTEGRITY_UNAVAILABLE",
@@ -406,7 +436,8 @@ namespace Oblivion {
     }
 
     SelfIntegrityGuard::SectionCompareResult
-    SelfIntegrityGuard::CompareSection(const IMAGE_SECTION_HEADER& section) const {
+    SelfIntegrityGuard::CompareSection(
+        const IMAGE_SECTION_HEADER& section, bool imageWasRebased) const {
         const auto* moduleBase = reinterpret_cast<const uint8_t*>(m_module);
         const IMAGE_NT_HEADERS* memoryNt = nullptr;
         const IMAGE_SECTION_HEADER* memorySections = nullptr;
@@ -455,7 +486,12 @@ namespace Oblivion {
             sectionStartRva + static_cast<DWORD>(mappedSize);
 
         std::vector<std::pair<size_t, size_t>> skipIntervals;
-        BuildSkipIntervals(sectionStartRva, sectionEndRva, skipIntervals);
+        // Relocation targets are only different from disk when the loader
+        // applied a nonzero base delta. At the preferred base, compare every
+        // byte, including locations listed in the relocation table.
+        if (imageWasRebased) {
+            BuildSkipIntervals(sectionStartRva, sectionEndRva, skipIntervals);
+        }
 
         const auto rangeMatches = [&](size_t begin, size_t end) {
             if (begin > end || end > mappedSize) return false;
@@ -619,20 +655,32 @@ namespace Oblivion {
         for (WORD i = 0; i < ntHeaders->FileHeader.NumberOfSections; ++i) {
             const IMAGE_SECTION_HEADER& section = sectionHeaders[i];
             const size_t sectionStart = static_cast<size_t>(section.VirtualAddress);
-            const size_t sectionSize = (std::max)(
-                static_cast<size_t>(section.Misc.VirtualSize),
-                static_cast<size_t>(section.SizeOfRawData));
-            if (sectionStart > imageSize || sectionSize > imageSize - sectionStart)
+            // RVA coverage is defined by the section's virtual extent, not
+            // by file-alignment padding. When VirtualSize is zero, retain the
+            // existing raw-size fallback for compatibility with older images.
+            const size_t virtualSize = section.Misc.VirtualSize != 0
+                ? static_cast<size_t>(section.Misc.VirtualSize)
+                : static_cast<size_t>(section.SizeOfRawData);
+            if (sectionStart > imageSize || virtualSize > imageSize - sectionStart)
                 return false;
 
             const size_t requestStart = static_cast<size_t>(rva);
-            if (requestStart < sectionStart || requestStart >= sectionStart + sectionSize)
+            if (requestStart < sectionStart ||
+                requestStart - sectionStart >= virtualSize) {
                 continue;
+            }
 
             const size_t offsetWithinSection = requestStart - sectionStart;
-            if (offsetWithinSection > section.SizeOfRawData ||
-                static_cast<size_t>(size) > static_cast<size_t>(section.SizeOfRawData) - offsetWithinSection)
+            // A data-directory RVA must be both mapped by the loader and
+            // backed by bytes in the file. Do not parse raw padding beyond
+            // VirtualSize as if it were part of the loaded image.
+            if (offsetWithinSection > virtualSize ||
+                static_cast<size_t>(size) > virtualSize - offsetWithinSection ||
+                offsetWithinSection > static_cast<size_t>(section.SizeOfRawData) ||
+                static_cast<size_t>(size) >
+                    static_cast<size_t>(section.SizeOfRawData) - offsetWithinSection) {
                 return false;
+            }
 
             const size_t rawOffset = static_cast<size_t>(section.PointerToRawData);
             if (rawOffset > m_diskImage.size() ||
