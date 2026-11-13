@@ -18,6 +18,33 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
 
+namespace {
+    class ScopedComInitialization final {
+    public:
+        explicit ScopedComInitialization(DWORD coInit) noexcept
+            : result_(CoInitializeEx(nullptr, coInit)),
+              initialized_(result_ == S_OK || result_ == S_FALSE) {
+        }
+
+        ~ScopedComInitialization() {
+            if (initialized_) {
+               
+            }
+        }
+
+        ScopedComInitialization(const ScopedComInitialization&) = delete;
+        ScopedComInitialization& operator=(const ScopedComInitialization&) = delete;
+
+        bool IsInitialized() const noexcept {
+            return initialized_;
+        }
+
+    private:
+        HRESULT result_;
+        bool initialized_;
+    };
+}
+
 namespace Oblivion {
     std::string HWIDGenerator::Generate() {
         std::string cpuBrand = GetCpuBrand();
@@ -56,33 +83,34 @@ namespace Oblivion {
         HRESULT hres;
         std::string result = "UNKNOWN";
 
-        // 1. Inisialisasi COM
-        hres = CoInitializeEx(0, COINIT_MULTITHREADED);
-        if (FAILED(hres)) return result;
+        // 1. Inisialisasi COM. S_FALSE juga menambah reference count COM
+        // dan wajib diimbangi; RPC_E_CHANGED_MODE tidak boleh di-CoUninitialize.
+        ScopedComInitialization comInitialization(COINIT_MULTITHREADED);
+        if (!comInitialization.IsInitialized()) return result;
 
         // 2. Set security levels COM
         hres = CoInitializeSecurity(NULL, -1, NULL, NULL, RPC_C_AUTHN_LEVEL_DEFAULT, RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE, NULL);
-        if (FAILED(hres) && hres != RPC_E_TOO_LATE) { CoUninitialize(); return result; }
+        if (FAILED(hres) && hres != RPC_E_TOO_LATE) { return result; }
 
         // 3. Dapatkan pointer ke WbemLocator
         IWbemLocator* pLoc = NULL;
         hres = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID*)&pLoc);
-        if (FAILED(hres)) { CoUninitialize(); return result; }
+        if (FAILED(hres)) { return result; }
 
         // 4. Hubungkan ke WMI
         IWbemServices* pSvc = NULL;
         hres = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), NULL, NULL, 0, NULL, 0, 0, &pSvc);
-        if (FAILED(hres)) { pLoc->Release(); CoUninitialize(); return result; }
+        if (FAILED(hres)) { pLoc->Release(); return result; }
 
         // 5. Set security levels untuk WMI connection
         hres = CoSetProxyBlanket(pSvc, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, NULL, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE);
-        if (FAILED(hres)) { pSvc->Release(); pLoc->Release(); CoUninitialize(); return result; }
+        if (FAILED(hres)) { pSvc->Release(); pLoc->Release(); return result; }
 
         // 6. Gunakan WMI query
         IEnumWbemClassObject* pEnumerator = NULL;
         std::wstring query = L"SELECT " + std::wstring(wmiProperty.begin(), wmiProperty.end()) + L" FROM " + std::wstring(wmiClass.begin(), wmiClass.end());
         hres = pSvc->ExecQuery(bstr_t("WQL"), bstr_t(query.c_str()), WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnumerator);
-        if (FAILED(hres)) { pSvc->Release(); pLoc->Release(); CoUninitialize(); return result; }
+        if (FAILED(hres)) { pSvc->Release(); pLoc->Release(); return result; }
 
         // 7. Ambil data dari query
         IWbemClassObject* pclsObj = NULL;
@@ -106,7 +134,7 @@ namespace Oblivion {
         pSvc->Release();
         pLoc->Release();
         pEnumerator->Release();
-        CoUninitialize();
+       
 
         return result;
     }
