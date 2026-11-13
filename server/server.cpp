@@ -139,13 +139,13 @@ std::string GetExecutableDirectory() {
 #ifdef _WIN32
     size_t capacity = 512;
     while (capacity <= 32768) {
-        std::vector<char> exePath(capacity, '\\0');
+        std::vector<char> exePath(capacity, '\0');
         const DWORD length = GetModuleFileNameA(
             NULL, exePath.data(), static_cast<DWORD>(exePath.size()));
         if (length == 0) return "";
         if (length < exePath.size() - 1) {
             const std::string path(exePath.data(), length);
-            const size_t lastSlash = path.find_last_of("\\\\/");
+            const size_t lastSlash = path.find_last_of("\\/");
             return lastSlash == std::string::npos
                 ? std::string()
                 : path.substr(0, lastSlash + 1);
