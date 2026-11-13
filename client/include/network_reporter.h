@@ -39,8 +39,8 @@ namespace Oblivion {
         std::string m_challengeNonce; // Challenge nonce yang mengikat sesi heartbeat
         uint32_t m_hbIntervalMs = 3000;
         uint32_t m_hbTimeoutMs = 4000;
-        std::atomic<bool> m_antiSuspendOk{ false };
-        std::atomic<bool> m_integrityOk{ false };
+        // Publish both health bits as one atomic snapshot to avoid mixed states.
+        std::atomic<uint8_t> m_clientStatus{ 0 };
         bool m_winsockInitialized = false;
     };
 }
