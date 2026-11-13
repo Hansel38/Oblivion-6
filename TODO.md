@@ -130,9 +130,9 @@ This checklist tracks findings from a source review. A checked item means the co
 - [x] **P2 — Fix COM apartment handling.** A scoped COM initializer treats both `S_OK` and `S_FALSE` as successful initialization and balances either with exactly one `CoUninitialize`; `RPC_E_CHANGED_MODE` leaves the caller's existing COM apartment untouched. Runtime validation under both apartment models remains required.
 - [ ] **P2 — Avoid leaking hardware identifiers in console output.** Redact or pseudonymize HWID in operational logs.
 - [ ] **P2 — Add log rotation and access controls.** `violations.log` currently grows without bound and may contain sensitive process/path data.
-- [ ] **P2 — Synchronize ban-list writes.** `violations.log` writes are now serialized, but ban-list reads/writes still need an explicit synchronization and atomic update strategy.
+- [ ] **P2 — Cross-process ban-list locking and atomic update.** Ban-list checks and appends are now serialized within one server process; OS-level locking and crash-safe atomic updates across multiple server instances remain open.
 - [x] **P2 — Fix whitespace trimming on empty ban-list lines.** Skip empty/whitespace-only lines before trimming, avoiding `std::string::npos` arithmetic in both Windows and Linux ban-list parsers.
-- [ ] **P2 — Validate ban-list entries.** Reject malformed identifiers and prevent concurrent duplicate writes.
+- [x] **P2 — Validate ban-list entries.** Require the generated 64-character hexadecimal SHA-256 HWID format for active entries and new writes; malformed entries make the list unavailable instead of being silently ignored. Duplicate checks and appends are serialized within one server process. Parser and concurrent runtime fixtures remain required.
 
 ### P2 — Build, repository hygiene, and observability
 
@@ -154,6 +154,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [ ] Static analysis: MSVC Code Analysis / clang-tidy
 - [ ] Runtime test: client handshake and nonce parsing
 - [ ] Runtime test: heartbeat fragmentation/coalescing
+- [ ] Runtime test: ban-list missing, unreadable, malformed, duplicate, and concurrent access cases
 - [ ] Runtime test: call `Oblivion_Entry()`, then `Oblivion_Shutdown()`, then unload the DLL across repeated cycles
 - [ ] Runtime test: file integrity pass/fail with known test fixtures
 - [ ] Security test: invalid/missing secret fails closed
