@@ -4,6 +4,7 @@
 #include <limits>
 #include <tlhelp32.h>
 #include <vector>
+#include <memory>
 #include <algorithm>
 #include <cwctype>
 #include <sstream>
@@ -937,9 +938,19 @@ namespace Oblivion {
                 // Dengan signature yang lebih spesifik (DBK driver, CE Lua, Speedhack code)
                 // dan whitelist yang ketat untuk menghindari false positive
                 if (ShouldPerformMemoryScan(processName)) {
-                    if (HasSuspiciousMemorySignature(pe32.th32ProcessID, indicator)) {
+                    std::wstring scanIssue;
+                    const MemoryScanResult memoryScanResult =
+                        HasSuspiciousMemorySignature(pe32.th32ProcessID, indicator, scanIssue);
+                    if (memoryScanResult == MemoryScanResult::Suspicious) {
                         const auto details = BuildHeuristicDetails(processName, pe32.th32ProcessID, L"MEMORY_PATTERN", indicator);
                         ReportViolationAndExit(L"", "ADV_HEURISTIC_DETECTED", details);
+                    } else if (memoryScanResult == MemoryScanResult::Incomplete) {
+                        const std::wstring warning =
+                            L"[AdvHeuristics] Memory scan incomplete for " + processName +
+                            L" (PID: " + std::to_wstring(pe32.th32ProcessID) +
+                            L"): " + scanIssue;
+                        OutputDebugStringW(warning.c_str());
+                        OutputDebugStringW(L"\n");
                     }
                 }
 
@@ -1253,108 +1264,217 @@ namespace Oblivion {
         */
     }
 
-    bool AdvancedProcessHeuristics::HasSuspiciousMemorySignature(DWORD processId, std::wstring& matchedPattern) const {
-        // Buka handle ke process target dengan akses PROCESS_VM_READ dan PROCESS_QUERY_INFORMATION
-        HANDLE hProcess = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, processId);
+    AdvancedProcessHeuristics::MemoryScanResult
+    AdvancedProcessHeuristics::HasSuspiciousMemorySignature(
+        DWORD processId,
+        std::wstring& matchedPattern,
+        std::wstring& scanIssue) const {
+        scanIssue.clear();
+
+        HANDLE hProcess = OpenProcess(
+            PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, processId);
         if (hProcess == NULL) {
-            // Tidak bisa buka process - mungkin system process atau access denied
-            return false;
+            scanIssue = L"OpenProcess failed; error=" + std::to_wstring(GetLastError());
+            return MemoryScanResult::Incomplete;
         }
 
-        bool detected = false;
-        MEMORY_BASIC_INFORMATION mbi = { 0 };
-        BYTE* address = nullptr;
-        const size_t maxScanSize = 10 * 1024 * 1024; // Limit 10 MB per region untuk performa
+        struct ProcessHandleDeleter {
+            void operator()(HANDLE handle) const noexcept {
+                if (handle != NULL) {
+                    CloseHandle(handle);
+                }
+            }
+        };
+        std::unique_ptr<void, ProcessHandleDeleter> processHandle(hProcess);
+
+        BOOL scannerIsWow64 = FALSE;
+        BOOL targetIsWow64 = FALSE;
+        if (!IsWow64Process(GetCurrentProcess(), &scannerIsWow64)) {
+            scanIssue = L"IsWow64Process failed for scanner; error=" +
+                std::to_wstring(GetLastError());
+            return MemoryScanResult::Incomplete;
+        }
+        if (!IsWow64Process(hProcess, &targetIsWow64)) {
+            scanIssue = L"IsWow64Process failed for target; error=" +
+                std::to_wstring(GetLastError());
+            return MemoryScanResult::Incomplete;
+        }
+        const bool scannerHasNarrowerAddressSpace =
+            scannerIsWow64 && !targetIsWow64;
+
+        constexpr size_t kChunkSize = 1024 * 1024;
+        constexpr size_t kMaxTotalScan = 100 * 1024 * 1024;
         size_t totalScanned = 0;
-        const size_t maxTotalScan = 100 * 1024 * 1024; // Max total 100 MB scan per process
+        size_t maxPatternSize = 0;
+        for (const auto& signature : kMemorySignatures) {
+            maxPatternSize = (std::max)(maxPatternSize, signature.patternSize);
+        }
 
-        // Enumerate memory regions
-        while (VirtualQueryEx(hProcess, address, &mbi, sizeof(mbi)) == sizeof(mbi)) {
-            // Protect may include modifiers such as PAGE_NOCACHE; classify using
-            // the base protection value rather than exact equality.
-            const DWORD protection = mbi.Protect & 0xFF;
-            const bool isExecutable =
-                protection == PAGE_EXECUTE_READ ||
-                protection == PAGE_EXECUTE_READWRITE ||
-                protection == PAGE_EXECUTE_WRITECOPY;
-            const bool isReadable =
-                protection == PAGE_READWRITE ||
-                protection == PAGE_WRITECOPY ||
-                protection == PAGE_READONLY ||
-                isExecutable;
-            
-            if (mbi.State == MEM_COMMIT &&
-                isReadable &&
-                !(mbi.Protect & PAGE_GUARD) &&
-                !(mbi.Protect & PAGE_NOACCESS)) {
+        std::vector<BYTE> carry;
+        ULONG_PTR queryAddress = 0;
 
-                // Limit ukuran region yang di-scan
-                size_t regionSize = mbi.RegionSize;
-                if (regionSize > maxScanSize) {
-                    regionSize = maxScanSize;
+        try {
+            // VirtualQueryEx walks the target address space by complete regions.
+            // ERROR_INVALID_PARAMETER is the documented end-of-address-space result.
+            for (;;) {
+                MEMORY_BASIC_INFORMATION mbi{};
+                SetLastError(ERROR_SUCCESS);
+                const SIZE_T querySize = VirtualQueryEx(
+                    hProcess,
+                    reinterpret_cast<LPCVOID>(queryAddress),
+                    &mbi,
+                    sizeof(mbi));
+
+                if (querySize == 0) {
+                    const DWORD error = GetLastError();
+                    if (error == ERROR_INVALID_PARAMETER) {
+                        if (scannerHasNarrowerAddressSpace) {
+                            scanIssue =
+                                L"32-bit WOW64 client cannot verify the complete 64-bit target address space";
+                            return MemoryScanResult::Incomplete;
+                        }
+                        break;
+                    }
+
+                    scanIssue = L"VirtualQueryEx failed; error=" + std::to_wstring(error);
+                    return MemoryScanResult::Incomplete;
                 }
 
-                // Check total scan limit
-                if (totalScanned + regionSize > maxTotalScan) {
-                    break; // Stop scanning jika sudah terlalu banyak
+                if (querySize != sizeof(mbi) || mbi.RegionSize == 0) {
+                    scanIssue = L"VirtualQueryEx returned an invalid memory region";
+                    return MemoryScanResult::Incomplete;
                 }
 
-                // Allocate buffer untuk membaca memory
-                std::vector<BYTE> buffer(regionSize);
-                SIZE_T bytesRead = 0;
+                const ULONG_PTR regionBase = reinterpret_cast<ULONG_PTR>(mbi.BaseAddress);
+                const ULONG_PTR maxAddress = (std::numeric_limits<ULONG_PTR>::max)();
+                if (regionBase > queryAddress ||
+                    mbi.RegionSize > maxAddress - regionBase) {
+                    scanIssue = L"VirtualQueryEx returned an overflowing or non-progressing region";
+                    return MemoryScanResult::Incomplete;
+                }
 
-                // ReadProcessMemory can report failure after copying a valid prefix
-                // (for example, when a page boundary becomes inaccessible). Scan every
-                // byte the API confirms it copied; never inspect the uninitialized tail.
-                ReadProcessMemory(hProcess, mbi.BaseAddress, buffer.data(), regionSize, &bytesRead);
-                if (bytesRead > 0) {
-                    // Scan buffer untuk setiap signature
-                    for (const auto& sig : kMemorySignatures) {
-                        // Skip signature jika requires executable memory tapi region ini bukan executable
-                        if (sig.requiresExecutableMemory && !isExecutable) {
-                            continue;
-                        }
-                        
-                        if (bytesRead < sig.patternSize) {
-                            continue;
+                const ULONG_PTR regionEnd = regionBase + mbi.RegionSize;
+                if (regionEnd <= queryAddress) {
+                    scanIssue = L"VirtualQueryEx did not advance the address-space cursor";
+                    return MemoryScanResult::Incomplete;
+                }
+
+                const DWORD protection = mbi.Protect & 0xFF;
+                const bool isExecutable =
+                    protection == PAGE_EXECUTE_READ ||
+                    protection == PAGE_EXECUTE_READWRITE ||
+                    protection == PAGE_EXECUTE_WRITECOPY;
+                const bool isReadable =
+                    protection == PAGE_READWRITE ||
+                    protection == PAGE_WRITECOPY ||
+                    protection == PAGE_READONLY ||
+                    isExecutable;
+
+                if (mbi.State == MEM_COMMIT &&
+                    isReadable &&
+                    !(mbi.Protect & PAGE_GUARD) &&
+                    !(mbi.Protect & PAGE_NOACCESS)) {
+                    ULONG_PTR scanAddress = queryAddress;
+                    carry.clear();
+
+                    while (scanAddress < regionEnd) {
+                        if (totalScanned >= kMaxTotalScan) {
+                            scanIssue = L"per-process memory scan budget reached";
+                            return MemoryScanResult::Incomplete;
                         }
 
-                        // Pattern matching dengan mask
-                        for (size_t i = 0; i <= bytesRead - sig.patternSize; ++i) {
-                            bool match = true;
-                            for (size_t j = 0; j < sig.patternSize; ++j) {
-                                if ((buffer[i + j] & sig.mask[j]) != (sig.pattern[j] & sig.mask[j])) {
-                                    match = false;
-                                    break;
+                        const size_t regionRemaining =
+                            static_cast<size_t>(regionEnd - scanAddress);
+                        const size_t budgetRemaining = kMaxTotalScan - totalScanned;
+                        const size_t requestSize = (std::min)(
+                            (std::min)(regionRemaining, kChunkSize),
+                            budgetRemaining);
+                        if (requestSize == 0) {
+                            scanIssue = L"memory scan made no progress";
+                            return MemoryScanResult::Incomplete;
+                        }
+
+                        std::vector<BYTE> buffer(requestSize);
+                        SIZE_T bytesRead = 0;
+                        const BOOL readSucceeded = ReadProcessMemory(
+                            hProcess,
+                            reinterpret_cast<LPCVOID>(scanAddress),
+                            buffer.data(),
+                            requestSize,
+                            &bytesRead);
+                        const DWORD readError =
+                            readSucceeded ? ERROR_SUCCESS : GetLastError();
+
+                        if (bytesRead > requestSize) {
+                            scanIssue = L"ReadProcessMemory returned an invalid byte count";
+                            return MemoryScanResult::Incomplete;
+                        }
+
+                        if (bytesRead > 0) {
+                            // Carry the end of the previous chunk so signatures crossing
+                            // a chunk boundary are not missed.
+                            std::vector<BYTE> scanBuffer;
+                            scanBuffer.reserve(carry.size() + bytesRead);
+                            scanBuffer.insert(scanBuffer.end(), carry.begin(), carry.end());
+                            scanBuffer.insert(
+                                scanBuffer.end(), buffer.begin(), buffer.begin() + bytesRead);
+
+                            for (const auto& signature : kMemorySignatures) {
+                                if (signature.patternSize == 0 ||
+                                    signature.patternSize > scanBuffer.size() ||
+                                    (signature.requiresExecutableMemory && !isExecutable)) {
+                                    continue;
+                                }
+
+                                for (size_t i = 0;
+                                     i <= scanBuffer.size() - signature.patternSize;
+                                     ++i) {
+                                    bool match = true;
+                                    for (size_t j = 0; j < signature.patternSize; ++j) {
+                                        if ((scanBuffer[i + j] & signature.mask[j]) !=
+                                            (signature.pattern[j] & signature.mask[j])) {
+                                            match = false;
+                                            break;
+                                        }
+                                    }
+
+                                    if (match) {
+                                        matchedPattern = signature.name;
+                                        return MemoryScanResult::Suspicious;
+                                    }
                                 }
                             }
 
-                            if (match) {
-                                matchedPattern = sig.name;
-                                detected = true;
-                                break;
+                            if (maxPatternSize > 1) {
+                                const size_t carrySize = (std::min)(
+                                    maxPatternSize - 1, scanBuffer.size());
+                                carry.assign(
+                                    scanBuffer.end() - carrySize, scanBuffer.end());
                             }
+                            totalScanned += bytesRead;
                         }
 
-                        if (detected) {
-                            break;
+                        if (!readSucceeded || bytesRead != requestSize) {
+                            scanIssue =
+                                L"ReadProcessMemory returned an incomplete region read; error=" +
+                                std::to_wstring(readError);
+                            return MemoryScanResult::Incomplete;
                         }
+
+                        scanAddress += static_cast<ULONG_PTR>(requestSize);
                     }
-
-                    totalScanned += bytesRead;
+                } else {
+                    carry.clear();
                 }
 
-                if (detected) {
-                    break;
-                }
+                queryAddress = regionEnd;
             }
-
-            // Move ke region berikutnya
-            address = static_cast<BYTE*>(mbi.BaseAddress) + mbi.RegionSize;
+        } catch (const std::bad_alloc&) {
+            scanIssue = L"memory scan buffer allocation failed";
+            return MemoryScanResult::Incomplete;
         }
 
-        CloseHandle(hProcess);
-        return detected;
+        return MemoryScanResult::Clean;
     }
 
     std::string AdvancedProcessHeuristics::BuildHeuristicDetails(const std::wstring& processName,
