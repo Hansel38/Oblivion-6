@@ -1749,6 +1749,9 @@ namespace Oblivion {
         }
 
         std::vector<BYTE> carry;
+        bool carryRegionValid = false;
+        bool carryRegionExecutable = false;
+        ULONG_PTR carryRegionEnd = 0;
         ULONG_PTR queryAddress = 0;
 
         try {
@@ -1812,9 +1815,15 @@ namespace Oblivion {
                     isReadable &&
                     !(mbi.Protect & PAGE_GUARD) &&
                     !(mbi.Protect & PAGE_NOACCESS)) {
-                    ULONG_PTR scanAddress = queryAddress;
-                    carry.clear();
+                    // Keep signature overlap across adjacent readable regions
+                    // only when their executable classification is unchanged.
+                    if (!carryRegionValid ||
+                        carryRegionEnd != queryAddress ||
+                        carryRegionExecutable != isExecutable) {
+                        carry.clear();
+                    }
 
+                    ULONG_PTR scanAddress = queryAddress;
                     while (scanAddress < regionEnd) {
                         if (totalScanned >= kMaxTotalScan) {
                             scanIssue = L"per-process memory scan budget reached";
@@ -1901,8 +1910,15 @@ namespace Oblivion {
 
                         scanAddress += static_cast<ULONG_PTR>(requestSize);
                     }
+
+                    carryRegionValid = true;
+                    carryRegionExecutable = isExecutable;
+                    carryRegionEnd = regionEnd;
                 } else {
+                    // An unreadable/uncommitted region breaks byte continuity.
                     carry.clear();
+                    carryRegionValid = false;
+                    carryRegionEnd = regionEnd;
                 }
 
                 queryAddress = regionEnd;
