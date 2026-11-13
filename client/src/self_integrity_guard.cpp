@@ -558,15 +558,30 @@ namespace Oblivion {
                 size_t spanSize = 0;
                 switch (type) {
                 case IMAGE_REL_BASED_ABSOLUTE:
+                    // Padding entry; it does not describe a relocated address.
                     continue;
+                case IMAGE_REL_BASED_HIGH:
+                case IMAGE_REL_BASED_LOW:
+                    spanSize = sizeof(WORD);
+                    break;
                 case IMAGE_REL_BASED_HIGHLOW:
                     spanSize = sizeof(DWORD);
+                    break;
+                case IMAGE_REL_BASED_HIGHADJ:
+                    // HIGHADJ consumes the following WORD as the low part of
+                    // its signed addend. It is not a second relocation entry.
+                    if (i + 1 >= entryCount) return false;
+                    ++i;
+                    spanSize = sizeof(WORD);
                     break;
                 case IMAGE_REL_BASED_DIR64:
                     spanSize = sizeof(ULONGLONG);
                     break;
                 default:
-                    continue;
+                    // Unknown relocation types cannot safely be ignored: their
+                    // loader-written bytes would otherwise be misclassified as
+                    // tampering during the disk-vs-memory comparison.
+                    return false;
                 }
 
                 if (block->VirtualAddress > imageSize ||
