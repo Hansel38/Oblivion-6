@@ -173,6 +173,19 @@ enum class BanListStatus {
 
 static std::mutex g_banListMutex;
 
+static bool IsSameBanListHwid(
+    const std::string& left, const std::string& right) {
+    if (left.size() != right.size()) return false;
+    for (size_t i = 0; i < left.size(); ++i) {
+        unsigned char a = static_cast<unsigned char>(left[i]);
+        unsigned char b = static_cast<unsigned char>(right[i]);
+        if (a >= 'A' && a <= 'F') a = static_cast<unsigned char>(a + ('a' - 'A'));
+        if (b >= 'A' && b <= 'F') b = static_cast<unsigned char>(b + ('a' - 'A'));
+        if (a != b) return false;
+    }
+    return true;
+}
+
 static bool IsValidBanListHwid(const std::string& hwid) {
     if (hwid.size() != 64) return false;
     for (unsigned char value : hwid) {
@@ -205,10 +218,10 @@ static BanListStatus CheckHWIDBanStatusUnlocked(const std::string& hwid) {
     bool matched = false;
     std::string line;
     while (std::getline(banFile, line)) {
-        const size_t firstNonWhitespace = line.find_first_not_of(" \\t\\n\\r");
+        const size_t firstNonWhitespace = line.find_first_not_of(" \t\n\r");
         if (firstNonWhitespace == std::string::npos) continue;
 
-        const size_t lastNonWhitespace = line.find_last_not_of(" \\t\\n\\r");
+        const size_t lastNonWhitespace = line.find_last_not_of(" \t\n\r");
         line = line.substr(firstNonWhitespace, lastNonWhitespace - firstNonWhitespace + 1);
         if (line.empty() || line[0] == '#') continue;
 
@@ -216,7 +229,7 @@ static BanListStatus CheckHWIDBanStatusUnlocked(const std::string& hwid) {
         // a partially valid list as proof that this HWID is not banned.
         if (!IsValidBanListHwid(line)) return BanListStatus::Unavailable;
 
-        if (strcasecmp_impl(line.c_str(), hwid.c_str()) == 0) {
+        if (IsSameBanListHwid(line, hwid)) {
             matched = true;
         }
     }
