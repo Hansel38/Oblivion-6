@@ -1065,7 +1065,13 @@ void HandleClient(SocketType clientSocket) {
                 
                 LogViolation(type, details, hwid);
                 
-                bool isBanned = IsHWIDBanned(hwid);
+                const BanListStatus banStatus = CheckHWIDBanStatus(hwid);
+                if (banStatus == BanListStatus::Unavailable) {
+                    LogViolation("BAN_LIST_UNAVAILABLE", "Ban list could not be read or contains malformed entries", hwid);
+                    closesocket_impl(clientSocket);
+                    return;
+                }
+                const bool isBanned = banStatus == BanListStatus::Banned;
                 
                 const std::string responseStatus = isBanned ? "KICK" : "OK";
                 const std::string responseMac = hmacSha256(
