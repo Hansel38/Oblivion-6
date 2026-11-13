@@ -130,7 +130,7 @@ This checklist tracks findings from a source review. A checked item means the co
 
 - [x] **P2 — Remove generated Visual Studio build artifacts from source control.** PR #29 added scoped ignore rules and removed 59 tracked Visual Studio intermediates, build outputs, and generated logs (about 8.3 MB). The root `Release/` runtime assets were preserved.
 - [x] **P2 — Add automated CI workflow.** GitHub Actions builds the Linux server with GCC and the Windows solution in Debug and Release for both x86 and x64. Warnings-as-errors and static analysis remain separate follow-ups.
-- [ ] **P2 — Add unit tests.** Cover frame parser fragmentation/coalescing, malformed messages, maximum lengths, nonce parsing, HMAC verification, config validation, and ban-list parsing.
+- [ ] **P2 — Add unit tests.** The shared heartbeat helper now has CI tests for all client status combinations, malformed status rejection, canonical PONG data, and field-binding mutations. Frame parser fragmentation/coalescing, malformed/maximum-length input, nonce parsing, real HMAC verification, config validation, and ban-list parsing remain open.
 - [ ] **P2 — Add fuzz tests.** Fuzz all protocol parsers and PE parsing routines using bounded input corpora.
 - [ ] **P2 — Add integration tests.** Exercise check-in, banned client, invalid secret, partial send, delayed response, disconnect, heartbeat timeout, and graceful shutdown.
 - [ ] **P2 — Add structured security telemetry.** Use event IDs, severity, session correlation IDs, and redaction. Avoid logging credentials or full hardware identifiers.
