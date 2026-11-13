@@ -416,55 +416,90 @@ namespace Oblivion {
         (void)memoryNt;
         (void)memorySections;
 
-        size_t sectionSize = static_cast<size_t>(section.SizeOfRawData);
+        // VirtualSize is the mapped extent. Bytes beyond SizeOfRawData are
+        // zero-filled by the PE loader; bytes beyond VirtualSize are not part
+        // of this section even when the file stores alignment padding.
+        const size_t rawSize = static_cast<size_t>(section.SizeOfRawData);
         const size_t virtualSize = static_cast<size_t>(section.Misc.VirtualSize);
-        if (virtualSize > 0 && virtualSize < sectionSize) sectionSize = virtualSize;
-        if (sectionSize == 0) return SectionCompareResult::Match;
+        const size_t mappedSize = virtualSize != 0 ? virtualSize : rawSize;
+        if (mappedSize == 0) return SectionCompareResult::Match;
 
+        const size_t fileBackedSize = (std::min)(mappedSize, rawSize);
         const size_t sectionRva = static_cast<size_t>(section.VirtualAddress);
-        if (sectionRva > imageSize || sectionSize > imageSize - sectionRva)
+        if (sectionRva > imageSize || mappedSize > imageSize - sectionRva)
             return SectionCompareResult::Incomplete;
 
         const size_t rawOffset = static_cast<size_t>(section.PointerToRawData);
-        if (rawOffset > m_diskImage.size() ||
-            sectionSize > m_diskImage.size() - rawOffset) {
+        if (fileBackedSize > 0 &&
+            (rawOffset > m_diskImage.size() ||
+             fileBackedSize > m_diskImage.size() - rawOffset)) {
             return SectionCompareResult::Incomplete;
         }
 
         const auto* sectionMemory = moduleBase + sectionRva;
-        if (!IsReadableRange(sectionMemory, sectionSize))
+        if (!IsReadableRange(sectionMemory, mappedSize))
             return SectionCompareResult::Incomplete;
-        const auto* sectionOnDisk = m_diskImage.data() + rawOffset;
 
-        if (sectionRva > (std::numeric_limits<DWORD>::max)() - sectionSize)
+        const uint8_t* sectionOnDisk = fileBackedSize > 0
+            ? m_diskImage.data() + rawOffset
+            : nullptr;
+
+        const size_t maximumRva =
+            static_cast<size_t>((std::numeric_limits<DWORD>::max)());
+        if (mappedSize > maximumRva ||
+            sectionRva > maximumRva - mappedSize) {
             return SectionCompareResult::Incomplete;
+        }
         const DWORD sectionStartRva = section.VirtualAddress;
-        const DWORD sectionEndRva = sectionStartRva + static_cast<DWORD>(sectionSize);
+        const DWORD sectionEndRva =
+            sectionStartRva + static_cast<DWORD>(mappedSize);
 
         std::vector<std::pair<size_t, size_t>> skipIntervals;
         BuildSkipIntervals(sectionStartRva, sectionEndRva, skipIntervals);
 
+        const auto rangeMatches = [&](size_t begin, size_t end) {
+            if (begin > end || end > mappedSize) return false;
+
+            // Compare the file-backed part against the exact raw-file offset.
+            const size_t diskEnd = (std::min)(end, fileBackedSize);
+            if (begin < diskEnd &&
+                std::memcmp(sectionMemory + begin, sectionOnDisk + begin,
+                            diskEnd - begin) != 0) {
+                return false;
+            }
+
+            // The loader zero-fills the virtual tail when VirtualSize is
+            // larger than SizeOfRawData. Any nonzero byte here is a mismatch.
+            const size_t zeroStart = (std::max)(begin, fileBackedSize);
+            for (size_t offset = zeroStart; offset < end; ++offset) {
+                if (sectionMemory[offset] != 0) return false;
+            }
+            return true;
+        };
+
         size_t currentOffset = 0;
         for (const auto& interval : skipIntervals) {
-            const size_t start = interval.first;
-            const size_t end = interval.second;
-            if (start > sectionSize || end > sectionSize || start > end)
+            const size_t intervalStart = interval.first;
+            const size_t intervalEnd = interval.second;
+            if (intervalStart > mappedSize ||
+                intervalEnd > mappedSize ||
+                intervalStart > intervalEnd) {
                 return SectionCompareResult::Incomplete;
-            if (currentOffset < start &&
-                std::memcmp(sectionMemory + currentOffset, sectionOnDisk + currentOffset,
-                            start - currentOffset) != 0) {
+            }
+
+            if (currentOffset < intervalStart &&
+                !rangeMatches(currentOffset, intervalStart)) {
                 return SectionCompareResult::Mismatch;
             }
-            currentOffset = (std::max)(currentOffset, end);
+            currentOffset = (std::max)(currentOffset, intervalEnd);
         }
 
-        const bool matches =
-            currentOffset >= sectionSize ||
-            std::memcmp(sectionMemory + currentOffset, sectionOnDisk + currentOffset,
-                        sectionSize - currentOffset) == 0;
-        return matches
-            ? SectionCompareResult::Match
-            : SectionCompareResult::Mismatch;
+        if (currentOffset < mappedSize &&
+            !rangeMatches(currentOffset, mappedSize)) {
+            return SectionCompareResult::Mismatch;
+        }
+
+        return SectionCompareResult::Match;
     }
 
     void SelfIntegrityGuard::ReportTamper(const std::string& sectionName) const {
