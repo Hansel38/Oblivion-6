@@ -862,32 +862,85 @@ namespace Oblivion {
         return true;
     }
 
-    // Heuristik perilaku: deteksi proses dengan aktivitas mencurigakan
-    bool IsSuspiciousBehavior(DWORD processId) {
-        // Deteksi sederhana: cek apakah proses menggunakan CreateRemoteThread atau WriteProcessMemory
-        // (Biasanya digunakan untuk DLL injection atau manipulasi memory)
-        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId);
-        if (!hProcess) return false;
+    // Heuristic module inspection. Access/enumeration failures are not a clean result.
+    BehaviorScanResult IsSuspiciousBehavior(
+        DWORD processId, std::string& scanIssue) {
+        scanIssue.clear();
 
-        HMODULE hMods[1024];
-        DWORD cbNeeded;
-        bool suspicious = false;
-        if (EnumProcessModules(hProcess, hMods, sizeof(hMods), &cbNeeded)) {
-            for (unsigned int i = 0; i < (cbNeeded / sizeof(HMODULE)); i++) {
-                wchar_t szModName[MAX_PATH];
-                if (GetModuleBaseNameW(hProcess, hMods[i], szModName, sizeof(szModName) / sizeof(wchar_t))) {
-                    std::wstring modName = szModName;
-                    if (modName.find(L"inject") != std::wstring::npos ||
-                        modName.find(L"hook") != std::wstring::npos ||
-                        modName.find(L"cheat") != std::wstring::npos) {
-                        suspicious = true;
-                        break;
-                    }
+        HANDLE hProcess = OpenProcess(
+            PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId);
+        if (hProcess == NULL) {
+            scanIssue =
+                "OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ) failed; error=" +
+                std::to_string(GetLastError());
+            return BehaviorScanResult::Incomplete;
+        }
+
+        struct ProcessHandleDeleter {
+            void operator()(HANDLE handle) const noexcept {
+                if (handle != NULL) {
+                    CloseHandle(handle);
                 }
             }
+        };
+        std::unique_ptr<void, ProcessHandleDeleter> processHandle(hProcess);
+
+        HMODULE modules[1024]{};
+        DWORD requiredBytes = 0;
+        if (!EnumProcessModules(
+                hProcess, modules, static_cast<DWORD>(sizeof(modules)),
+                &requiredBytes)) {
+            scanIssue = "EnumProcessModules failed; error=" +
+                std::to_string(GetLastError());
+            return BehaviorScanResult::Incomplete;
         }
-        CloseHandle(hProcess);
-        return suspicious;
+
+        const size_t reportedModuleCount =
+            static_cast<size_t>(requiredBytes) / sizeof(HMODULE);
+        const size_t availableModuleCount =
+            sizeof(modules) / sizeof(modules[0]);
+        bool incomplete = false;
+
+        if (requiredBytes == 0) {
+            scanIssue = "EnumProcessModules returned an empty module list";
+            return BehaviorScanResult::Incomplete;
+        }
+        if (requiredBytes % sizeof(HMODULE) != 0) {
+            scanIssue = "EnumProcessModules returned a misaligned module byte count";
+            incomplete = true;
+        }
+        if (reportedModuleCount > availableModuleCount) {
+            scanIssue = "EnumProcessModules module list exceeds the fixed inspection buffer";
+            incomplete = true;
+        }
+
+        const size_t modulesToInspect =
+            (std::min)(reportedModuleCount, availableModuleCount);
+        for (size_t i = 0; i < modulesToInspect; ++i) {
+            wchar_t moduleName[MAX_PATH]{};
+            if (GetModuleBaseNameW(
+                    hProcess, modules[i], moduleName,
+                    static_cast<DWORD>(sizeof(moduleName) / sizeof(moduleName[0]))) == 0) {
+                if (scanIssue.empty()) {
+                    scanIssue =
+                        "GetModuleBaseNameW failed for an enumerated module; error=" +
+                        std::to_string(GetLastError());
+                }
+                incomplete = true;
+                continue;
+            }
+
+            const std::wstring name = moduleName;
+            if (name.find(L"inject") != std::wstring::npos ||
+                name.find(L"hook") != std::wstring::npos ||
+                name.find(L"cheat") != std::wstring::npos) {
+                return BehaviorScanResult::Suspicious;
+            }
+        }
+
+        return incomplete
+            ? BehaviorScanResult::Incomplete
+            : BehaviorScanResult::Clean;
     }
 
     void LogSuspiciousProcess(const std::wstring& processName, DWORD processId, const std::string& reason) {
