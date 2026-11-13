@@ -28,7 +28,7 @@ namespace {
 
         ~ScopedComInitialization() {
             if (initialized_) {
-               
+                CoUninitialize();
             }
         }
 
