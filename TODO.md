@@ -95,6 +95,7 @@ This checklist tracks findings from a source review. A checked item means the co
 
 ### P1 — Integrity and detection correctness
 
+- [x] **P1 — Prevent integrity targets changing during hashing.** Open protected files with read sharing only so concurrent write/rename/delete opens are denied for the lifetime of the hash handle. A conflicting updater causes the hash open to fail closed; runtime sharing-compatibility/contention tests remain required.
 - [ ] **P1 — Replace placeholder/example file hashes.** `RRO.exe`, `Republic.grf`, and `DATA.ini` hashes must be generated from an approved clean release and signed in a trusted manifest. The repository currently labels some values as examples.
 - [ ] **P1 — Protect the integrity manifest.** A hash list stored only in the client binary is not a trust anchor if the binary and comparison logic can both be patched. Verify a signed manifest using a pinned public key.
 - [x] **P1 — Discard incomplete SelfIntegrityGuard disk images.** Validate file-size conversions against `size_t` and `streamsize`, handle allocation failures, verify the exact read byte count, and publish the disk image only after a complete successful read so a later `Start()` cannot mistake a partial buffer for initialized data. Runtime short-read/retry fixtures remain required.
@@ -157,6 +158,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [ ] Runtime test: ban-list missing, unreadable, malformed, duplicate, and concurrent access cases
 - [ ] Runtime test: call `Oblivion_Entry()`, then `Oblivion_Shutdown()`, then unload the DLL across repeated cycles
 - [ ] Runtime test: file integrity pass/fail with known test fixtures
+- [ ] Runtime test: protected-file hashing blocks concurrent write/rename/delete opens and remains compatible with normal read-only access
 - [ ] Security test: invalid/missing secret fails closed
 - [ ] Security test: malformed/oversized protocol messages rejected
 
