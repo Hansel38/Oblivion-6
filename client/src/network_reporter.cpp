@@ -39,6 +39,24 @@ namespace Oblivion {
         return difference == 0;
     }
 
+    static bool VerifyControlFrame(
+        const std::string& frame, const std::string& status,
+        const std::string& secret, const std::string& hwid,
+        const std::string& challengeNonce) {
+        const std::string prefix = status + ":";
+        if (frame.size() != prefix.size() + 65 ||
+            frame.compare(0, prefix.size(), prefix) != 0 ||
+            frame.back() != ';') {
+            return false;
+        }
+
+        const std::string receivedMac =
+            frame.substr(prefix.size(), frame.size() - prefix.size() - 1);
+        const std::string expectedMac = HmacSha256(
+            secret, "RESPONSE:" + status + ":" + hwid + ":" + challengeNonce);
+        return ConstantTimeEquals(expectedMac, receivedMac);
+    }
+
     static std::string BuildRequestAuthData(
         const std::string& type, const std::string& details,
         const std::string& hwid, const std::string& challengeNonce) {
@@ -383,43 +401,44 @@ namespace Oblivion {
             return false;
         }
 
-        std::string response;
-        if (!ReceiveFrame(connectSocket, m_pendingNetworkData, response, 3000, 512)) {
+        std::string statusFrame;
+        if (!ReceiveFrame(connectSocket, m_pendingNetworkData, statusFrame, 3000, 512)) {
             closesocket(connectSocket);
             MessageBoxW(NULL, L"Respons autentikasi server tidak lengkap.", L"Oblivion Hack Shield - Error",
                         MB_OK | MB_ICONERROR | MB_TOPMOST);
             ExitProcess(1);
             return false;
         }
-        // Server sends "OK;" followed by "SESSION_NONCE:...;" on the same TCP stream.
-        if (response == "OK;") {
-            std::string nonceFrame;
-            if (!ReceiveFrame(connectSocket, m_pendingNetworkData, nonceFrame, 3000, 512)) {
-                closesocket(connectSocket);
-                ExitProcess(1);
-                return false;
-            }
-            response += nonceFrame;
-        }
 
-        if (response == "KICK;") {
+        if (VerifyControlFrame(statusFrame, "KICK", m_secretKey, m_hwid, challengeNonce)) {
             closesocket(connectSocket);
             MessageBoxW(NULL, L"HWID Anda telah di-ban dari server.", L"Oblivion Hack Shield - Banned",
                         MB_OK | MB_ICONERROR | MB_TOPMOST);
             ExitProcess(0);
             return false;
         }
-
-        const std::string noncePrefix = "OK;SESSION_NONCE:";
-        if (response.rfind(noncePrefix, 0) != 0 || response.back() != ';') {
+        if (!VerifyControlFrame(statusFrame, "OK", m_secretKey, m_hwid, challengeNonce)) {
             closesocket(connectSocket);
             MessageBoxW(NULL, L"Respons autentikasi server tidak valid.", L"Oblivion Hack Shield - Error",
                         MB_OK | MB_ICONERROR | MB_TOPMOST);
             ExitProcess(1);
             return false;
         }
-        const std::string nonceText = response.substr(noncePrefix.size(),
-                                                       response.size() - noncePrefix.size() - 1);
+
+        std::string nonceFrame;
+        const std::string noncePrefix = "SESSION_NONCE:";
+        if (!ReceiveFrame(connectSocket, m_pendingNetworkData, nonceFrame, 3000, 128) ||
+            nonceFrame.rfind(noncePrefix, 0) != 0 || nonceFrame.back() != ';') {
+            closesocket(connectSocket);
+            MessageBoxW(NULL, L"Nonce sesi dari server tidak valid.", L"Oblivion Hack Shield - Error",
+                        MB_OK | MB_ICONERROR | MB_TOPMOST);
+            ExitProcess(1);
+            return false;
+        }
+
+        const std::string nonceText = nonceFrame.substr(
+            noncePrefix.size(), nonceFrame.size() - noncePrefix.size() - 1);
+        // Server sends its active heartbeat interval/timeout as a separate frame.
         if (nonceText.empty() || nonceText.size() > 20 ||
             !std::all_of(nonceText.begin(), nonceText.end(),
                 [](unsigned char c) { return c >= '0' && c <= '9'; })) {
@@ -566,18 +585,33 @@ namespace Oblivion {
                     const size_t p1 = payload.find(':');
                     const size_t p2 = payload.find(':', p1 == std::string::npos ? p1 : p1 + 1);
                     const size_t p3 = payload.find(':', p2 == std::string::npos ? p2 : p2 + 1);
+                    const size_t p4 = payload.find(':', p3 == std::string::npos ? p3 : p3 + 1);
                     if (p1 == std::string::npos || p2 == std::string::npos ||
-                        p3 == std::string::npos || payload.find(':', p3 + 1) != std::string::npos) break;
+                        p3 == std::string::npos || p4 == std::string::npos ||
+                        payload.find(':', p4 + 1) != std::string::npos) break;
                     try {
-                        const auto seq64 = std::stoull(payload.substr(p1 + 1, p2 - p1 - 1));
-                        if (seq64 > (std::numeric_limits<uint32_t>::max)()) break;
+                        const std::string seqText = payload.substr(p1 + 1, p2 - p1 - 1);
+                        const std::string timestampText = payload.substr(p2 + 1, p3 - p2 - 1);
+                        const std::string nonceText = payload.substr(p3 + 1, p4 - p3 - 1);
+                        const std::string receivedMac = payload.substr(p4 + 1);
+                        size_t parsedSeq = 0, parsedTimestamp = 0, parsedNonce = 0;
+                        const unsigned long long seq64 = std::stoull(seqText, &parsedSeq, 10);
+                        const unsigned long long timestamp = std::stoull(timestampText, &parsedTimestamp, 10);
+                        const unsigned long long nonce = std::stoull(nonceText, &parsedNonce, 10);
+                        if (parsedSeq != seqText.size() || parsedTimestamp != timestampText.size() ||
+                            parsedNonce != nonceText.size() ||
+                            seq64 > (std::numeric_limits<uint32_t>::max)()) break;
+
                         const uint32_t seq = static_cast<uint32_t>(seq64);
-                        const uint64_t ts = std::stoull(payload.substr(p2 + 1, p3 - p2 - 1));
-                        const uint64_t nonce = std::stoull(payload.substr(p3 + 1));
-                        const std::string data = std::to_string(seq) + ":" + std::to_string(ts) +
-                                                 ":" + std::to_string(nonce) + ":" + m_hwid;
-                        const std::string mac = HmacSha256(sessionKey, data);
-                        if (mac.empty()) break;
+                        const std::string pingAuthData =
+                            "PING:" + seqText + ":" + timestampText + ":" + nonceText + ":" + m_hwid;
+                        const std::string expectedPingMac = HmacSha256(sessionKey, pingAuthData);
+                        if (!ConstantTimeEquals(expectedPingMac, receivedMac)) break;
+
+                        const std::string pongData = std::to_string(seq) + ":" + timestampText +
+                                                     ":" + nonceText + ":" + m_hwid;
+                        const std::string mac = HmacSha256(sessionKey, pongData);
+                        if (mac.size() != 64) break;
                         const std::string pong = "PONG:" + std::to_string(seq) + ":" +
                             std::to_string(static_cast<uint64_t>(GetTickCount64())) + ":" +
                             std::to_string(nonce) + ":1|1:" + m_hwid + ":" + mac + ";";
@@ -696,14 +730,14 @@ namespace Oblivion {
             return;
         }
 
-        if (responseFrame == "KICK;") {
+        if (VerifyControlFrame(responseFrame, "KICK", m_secretKey, m_hwid, challengeNonce)) {
             closesocket(connectSocket);
             MessageBoxW(NULL, L"Server mendeteksi pelanggaran.\n\nClient akan ditutup.",
                         L"Oblivion Hack Shield - Violation", MB_OK | MB_ICONERROR | MB_TOPMOST);
             ExitProcess(0);
             return;
         }
-        if (responseFrame != "OK;") {
+        if (!VerifyControlFrame(responseFrame, "OK", m_secretKey, m_hwid, challengeNonce)) {
             closesocket(connectSocket);
             MessageBoxW(NULL, L"Respons server tidak valid saat mengirim laporan.",
                         L"Oblivion Hack Shield - Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
