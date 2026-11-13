@@ -298,25 +298,26 @@ namespace Oblivion {
     NetworkReporter::NetworkReporter(const std::string& serverIP, int serverPort, const std::string& secretKey)
         : m_serverIP(serverIP), m_serverPort(serverPort), m_secretKey(secretKey), m_hbSocket(INVALID_SOCKET) {
         if (m_secretKey.empty()) throw std::invalid_argument("Client secret is not configured");
-        // Inisialisasi Winsock sekali saja untuk seluruh aplikasi
-        // Catatan: WSAStartup bisa dipanggil beberapa kali, setiap panggilan harus diikuti WSACleanup
-        WSADATA wsaData;
-        int iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
-        if (iResult != 0) throw std::runtime_error("WSAStartup failed");
-        m_winsockInitialized = true;
-        
-        // --- GENERATE HWID SAAT PEMBUATAN OBJEK ---
-        // Gunakan try-catch untuk menangani error dari WMI atau hashing
+        // Generate HWID before acquiring Winsock state. These WMI/string operations
+        // may allocate or throw; a constructor that fails must not leak a WSAStartup
+        // reference because its destructor will not run.
         try {
             m_hwid = HWIDGenerator::Generate();
-            // Jika Generate() mengembalikan string kosong, gunakan fallback
             if (m_hwid.empty()) {
                 m_hwid = "UNKNOWN";
             }
         } catch (...) {
-            // Jika ada exception (misalnya dari WMI), gunakan fallback
             m_hwid = "UNKNOWN";
         }
+
+        // Acquire Winsock only after all potentially throwing HWID initialization.
+        // From this point, construction only records the successful startup state.
+        WSADATA wsaData{};
+        const int startupResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+        if (startupResult != 0) {
+            throw std::runtime_error("WSAStartup failed: " + std::to_string(startupResult));
+        }
+        m_winsockInitialized = true;
     }
 
     NetworkReporter::~NetworkReporter() {
