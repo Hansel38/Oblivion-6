@@ -81,6 +81,29 @@ namespace {
         }
         return false;
     }
+    bool IsDefinitivelyUntrustedSignatureStatus(LONG status) {
+        switch (status) {
+        case TRUST_E_NOSIGNATURE:
+        case TRUST_E_BAD_DIGEST:
+        case TRUST_E_EXPLICIT_DISTRUST:
+        case TRUST_E_SUBJECT_NOT_TRUSTED:
+        case TRUST_E_CERT_SIGNATURE:
+        case TRUST_E_NO_SIGNER_CERT:
+        case TRUST_E_COUNTER_SIGNER:
+        case TRUST_E_TIME_STAMP:
+        case CERT_E_UNTRUSTEDROOT:
+        case CERT_E_CHAINING:
+        case CERT_E_REVOKED:
+        case CERT_E_EXPIRED:
+        case CERT_E_WRONG_USAGE:
+            return true;
+        default:
+            // Provider, system, I/O, and unknown statuses do not prove
+            // that the executable itself is malicious or has been modified.
+            return false;
+        }
+    }
+
 }
 
 
@@ -490,7 +513,9 @@ namespace Oblivion {
     }
 
     // Static function untuk verifikasi file signature (untuk process verification)
-    bool DigitalSignatureValidator::VerifyFileSignature(const std::wstring& filePath) {
+    bool DigitalSignatureValidator::VerifyFileSignature(
+        const std::wstring& filePath,
+        LONG* trustStatus) {
         WINTRUST_FILE_INFO fileInfo = { 0 };
         fileInfo.cbStruct = sizeof(WINTRUST_FILE_INFO);
         fileInfo.pcwszFilePath = filePath.c_str();
@@ -513,13 +538,16 @@ namespace Oblivion {
 
         GUID policyGUID = WINTRUST_ACTION_GENERIC_VERIFY_V2;
 
-        LONG result = WinVerifyTrust(NULL, &policyGUID, &winTrustData);
+        // WinVerifyTrust returns a LONG status code; only zero means trusted.
+        const LONG result = WinVerifyTrust(NULL, &policyGUID, &winTrustData);
+        if (trustStatus != nullptr) {
+            *trustStatus = result;
+        }
 
-        // Cleanup
         winTrustData.dwStateAction = WTD_STATEACTION_CLOSE;
         WinVerifyTrust(NULL, &policyGUID, &winTrustData);
 
-        return (result == ERROR_SUCCESS);
+        return result == ERROR_SUCCESS;
     }
 
     // Static function untuk mendapatkan publisher dari file
@@ -577,33 +605,59 @@ namespace Oblivion {
         return result;
     }
 
-    // Static function untuk verifikasi process signature dengan expected publisher
-    bool DigitalSignatureValidator::VerifyProcessSignature(const std::wstring& processPath, const std::wstring& expectedPublisher) {
-        // Step 1: Verify digital signature
-        if (!VerifyFileSignature(processPath)) {
-            // Signature tidak valid atau tidak ada
-            return false;
+    // Separate definitive trust failures from provider or publisher-extraction failures.
+    DigitalSignatureValidator::ProcessSignatureResult
+    DigitalSignatureValidator::VerifyProcessSignatureDetailed(
+        const std::wstring& processPath,
+        const std::wstring& expectedPublisher,
+        std::wstring& failureReason) {
+        failureReason.clear();
+
+        LONG trustStatus = ERROR_SUCCESS;
+        if (!VerifyFileSignature(processPath, &trustStatus)) {
+            failureReason =
+                L"WinVerifyTrust failed; status=" +
+                std::to_wstring(static_cast<unsigned long>(trustStatus));
+            return IsDefinitivelyUntrustedSignatureStatus(trustStatus)
+                ? ProcessSignatureResult::Untrusted
+                : ProcessSignatureResult::Incomplete;
         }
 
-        // Step 2: Get publisher name
         std::wstring actualPublisher;
+        SetLastError(ERROR_SUCCESS);
         if (!GetFilePublisher(processPath, actualPublisher)) {
-            // Tidak bisa mendapatkan publisher
-            return false;
+            const DWORD error = GetLastError();
+            failureReason =
+                L"publisher extraction failed after trust verification; error=" +
+                std::to_wstring(error);
+            return ProcessSignatureResult::Incomplete;
         }
 
-        // Step 3: Compare with expected publisher (case-insensitive contains check)
         std::wstring lowerActual = actualPublisher;
         std::wstring lowerExpected = expectedPublisher;
-        std::transform(lowerActual.begin(), lowerActual.end(), lowerActual.begin(), ::towlower);
-        std::transform(lowerExpected.begin(), lowerExpected.end(), lowerExpected.begin(), ::towlower);
+        std::transform(
+            lowerActual.begin(), lowerActual.end(), lowerActual.begin(),
+            [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
+        std::transform(
+            lowerExpected.begin(), lowerExpected.end(), lowerExpected.begin(),
+            [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
 
-        // Check if actual publisher contains expected publisher name
+        // Keep the existing comparison semantics unchanged in this bug fix.
         if (lowerActual.find(lowerExpected) != std::wstring::npos) {
-            return true;
+            return ProcessSignatureResult::Trusted;
         }
 
-        // Publisher mismatch
-        return false;
+        failureReason = L"Authenticode publisher did not match the expected publisher";
+        return ProcessSignatureResult::Untrusted;
     }
+
+    bool DigitalSignatureValidator::VerifyProcessSignature(
+        const std::wstring& processPath,
+        const std::wstring& expectedPublisher) {
+        std::wstring failureReason;
+        return VerifyProcessSignatureDetailed(
+            processPath, expectedPublisher, failureReason) ==
+            ProcessSignatureResult::Trusted;
+    }
+
 }
