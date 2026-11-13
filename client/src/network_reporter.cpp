@@ -561,8 +561,10 @@ namespace Oblivion {
     }
 
     void NetworkReporter::SetClientStatus(bool antiSuspendOk, bool integrityOk) {
-        m_antiSuspendOk.store(antiSuspendOk);
-        m_integrityOk.store(integrityOk);
+        const uint8_t status =
+            (antiSuspendOk ? 0x01 : 0x00) |
+            (integrityOk ? 0x02 : 0x00);
+        m_clientStatus.store(status);
     }
 
     void NetworkReporter::StartHeartbeat() {
@@ -620,9 +622,10 @@ namespace Oblivion {
 
                         const std::string clientTimestamp =
                             std::to_string(static_cast<uint64_t>(GetTickCount64()));
+                        const uint8_t clientStatus = m_clientStatus.load();
                         const std::string status =
-                            std::string(m_antiSuspendOk.load() ? "1" : "0") + "|" +
-                            (m_integrityOk.load() ? "1" : "0");
+                            std::string((clientStatus & 0x01) ? "1" : "0") + "|" +
+                            ((clientStatus & 0x02) ? "1" : "0");
                         // Authenticate every mutable PONG field, including status and
                         // the client timestamp, under a message-specific versioned label.
                         const std::string pongFields = std::to_string(seq) + ":" +
