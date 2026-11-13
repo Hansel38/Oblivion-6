@@ -80,6 +80,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [x] **P1 — Bound client TCP connection attempts.** Use nonblocking `connect()` plus `select()` / `SO_ERROR` with a single five-second deadline shared across all resolved addresses in both check-in and violation-report paths.
 - [x] **P1 — Bound DNS resolution duration.** Replace both synchronous `getaddrinfo()` calls with cancellable `GetAddrInfoExW()` completion-event resolution; cancel after five seconds and wait for cancellation completion before releasing query state.
 - [x] **P1 — Require an explicit production server endpoint.** Release builds now require a valid ASCII DNS name or IP address in `OBLIVION_SERVER`; only Debug builds default to loopback. The TCP port remains `54321`. Deployment/runtime endpoint validation remains required.
+- [x] **P1 — Resolve secret files only beside the executable.** Client/server Windows loaders now use bounded dynamic `GetModuleFileNameW` buffers and skip file fallback when the executable directory cannot be resolved; they no longer search the current working directory. The client also reads `OBLIVION_SECRET` dynamically with a size limit and validates UTF-8 conversion. Runtime path/long-secret tests remain required.
 
 ### P1 — Client lifecycle and stability
 
