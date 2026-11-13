@@ -362,6 +362,10 @@ namespace Oblivion {
             return false;
         }
 
+        const bool imageWasRebased =
+            reinterpret_cast<uintptr_t>(moduleBase) !=
+            static_cast<uintptr_t>(diskNt->OptionalHeader.ImageBase);
+
         const WORD sectionCount = diskNt->FileHeader.NumberOfSections;
         for (WORD i = 0; i < sectionCount; ++i) {
             const IMAGE_SECTION_HEADER& memorySection = memorySections[i];
@@ -388,7 +392,7 @@ namespace Oblivion {
             const std::string sectionName(
                 reinterpret_cast<const char*>(diskSection.Name), nameLength);
 
-            const SectionCompareResult comparison = CompareSection(diskSection);
+            const SectionCompareResult comparison = CompareSection(diskSection, imageWasRebased);
             if (comparison == SectionCompareResult::Incomplete) {
                 ReportViolationAndExit(
                     L"", "SELF_INTEGRITY_UNAVAILABLE",
@@ -406,7 +410,8 @@ namespace Oblivion {
     }
 
     SelfIntegrityGuard::SectionCompareResult
-    SelfIntegrityGuard::CompareSection(const IMAGE_SECTION_HEADER& section) const {
+    SelfIntegrityGuard::CompareSection(
+        const IMAGE_SECTION_HEADER& section, bool imageWasRebased) const {
         const auto* moduleBase = reinterpret_cast<const uint8_t*>(m_module);
         const IMAGE_NT_HEADERS* memoryNt = nullptr;
         const IMAGE_SECTION_HEADER* memorySections = nullptr;
@@ -455,7 +460,12 @@ namespace Oblivion {
             sectionStartRva + static_cast<DWORD>(mappedSize);
 
         std::vector<std::pair<size_t, size_t>> skipIntervals;
-        BuildSkipIntervals(sectionStartRva, sectionEndRva, skipIntervals);
+        // Relocation targets are only different from disk when the loader
+        // applied a nonzero base delta. At the preferred base, compare every
+        // byte, including locations listed in the relocation table.
+        if (imageWasRebased) {
+            BuildSkipIntervals(sectionStartRva, sectionEndRva, skipIntervals);
+        }
 
         const auto rangeMatches = [&](size_t begin, size_t end) {
             if (begin > end || end > mappedSize) return false;
