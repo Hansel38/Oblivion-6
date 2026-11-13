@@ -58,6 +58,79 @@ bool ConstantTimeEquals(const std::string& left, const std::string& right) {
     return difference == 0;
 }
 
+static std::string HmacSha256(const std::string& key, const std::string& data) {
+    BCRYPT_ALG_HANDLE hAlg = NULL;
+    BCRYPT_HASH_HANDLE hHash = NULL;
+    NTSTATUS status = BCryptOpenAlgorithmProvider(
+        &hAlg, BCRYPT_SHA256_ALGORITHM, NULL, BCRYPT_ALG_HANDLE_HMAC);
+    if (status != 0) return std::string();
+
+    DWORD objectLength = 0;
+    DWORD resultLength = 0;
+    status = BCryptGetProperty(
+        hAlg, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&objectLength),
+        sizeof(objectLength), &resultLength, 0);
+    if (status != 0 || objectLength == 0 ||
+        key.size() > (std::numeric_limits<ULONG>::max)() ||
+        data.size() > (std::numeric_limits<ULONG>::max)()) {
+        BCryptCloseAlgorithmProvider(hAlg, 0);
+        return std::string();
+    }
+
+    std::vector<UCHAR> hashObject(objectLength);
+    status = BCryptCreateHash(
+        hAlg, &hHash, hashObject.data(), objectLength,
+        reinterpret_cast<PUCHAR>(const_cast<char*>(key.data())),
+        static_cast<ULONG>(key.size()), 0);
+    if (status == 0) {
+        status = BCryptHashData(
+            hHash, reinterpret_cast<PUCHAR>(const_cast<char*>(data.data())),
+            static_cast<ULONG>(data.size()), 0);
+    }
+
+    UCHAR digest[32]{};
+    if (status == 0) {
+        status = BCryptFinishHash(hHash, digest, sizeof(digest), 0);
+    }
+    if (hHash) BCryptDestroyHash(hHash);
+    BCryptCloseAlgorithmProvider(hAlg, 0);
+    if (status != 0) return std::string();
+
+    static const char* hex = "0123456789abcdef";
+    std::string output;
+    output.reserve(64);
+    for (unsigned char value : digest) {
+        output.push_back(hex[(value >> 4) & 0x0F]);
+        output.push_back(hex[value & 0x0F]);
+    }
+    return output;
+}
+
+static std::string BuildRequestAuthData(
+    const std::string& type, const std::string& details,
+    const std::string& hwid, const std::string& challengeNonce) {
+    return "REQUEST:" + type + ":" + std::to_string(details.size()) + ":" +
+           details + ":" + hwid + ":" + challengeNonce;
+}
+
+static bool ParseHelloFrame(const std::string& frame, std::string& hwid) {
+    static const std::string prefix = "HELLO:";
+    hwid.clear();
+    if (frame.rfind(prefix, 0) != 0 || frame.size() <= prefix.size() ||
+        frame.back() != ';' ||
+        frame.find(':', prefix.size()) != std::string::npos) {
+        return false;
+    }
+
+    hwid = frame.substr(prefix.size(), frame.size() - prefix.size() - 1);
+    if (hwid.empty() || hwid.size() > MAX_HWID_LEN) return false;
+    for (unsigned char c : hwid) {
+        if (!std::isxdigit(c) && c != '-') return false;
+    }
+    return true;
+}
+
+
 
 // Fungsi untuk mendapatkan path folder tempat executable berada
 std::string GetExecutableDirectory() {
@@ -438,138 +511,91 @@ std::string SanitizeInput(const std::string& input, size_t maxLen) {
 // Struktur untuk hasil parsing protokol
 struct ParsedReport {
     bool valid = false;
-    std::string type = "";
-    std::string details = "";
-    std::string hwid = "";
-    std::string secret = "";
-    std::string errorMessage = "";
+    std::string type;
+    std::string details;
+    std::string hwid;
+    std::string challengeNonce;
+    std::string mac;
+    std::string errorMessage;
 };
 
-// Fungsi untuk validasi format protokol dan parsing yang aman
+static bool IsValidChallengeNonce(const std::string& nonce) {
+    if (nonce.empty() || nonce.size() > 20 ||
+        !std::all_of(nonce.begin(), nonce.end(),
+            [](unsigned char c) { return c >= '0' && c <= '9'; })) {
+        return false;
+    }
+    try {
+        size_t parsed = 0;
+        const unsigned long long value = std::stoull(nonce, &parsed, 10);
+        return parsed == nonce.size() && value != 0;
+    } catch (...) {
+        return false;
+    }
+}
+
 ParsedReport ParseProtocol(const std::string& report) {
     ParsedReport result;
-    result.valid = false;
-    
-    // Validasi panjang minimum
-    if (report.length() < 10) { // Minimal TYPE::HWID:SECRET;
-        result.errorMessage = "Report too short (minimum 10 characters required)";
+    if (report.length() < 12) {
+        result.errorMessage = "Report too short";
         return result;
     }
-    
-    // Validasi panjang maksimum
     if (report.length() > BUFFER_LEN - 1) {
         result.errorMessage = "Report exceeds maximum length";
         return result;
     }
-    
-    // Validasi format: harus diakhiri dengan semicolon
     if (report.back() != ';') {
         result.errorMessage = "Report must end with semicolon";
         return result;
     }
-    
-    // Hitung jumlah delimiter
-    size_t colonCount = std::count(report.begin(), report.end(), ':');
-    if (colonCount != 3) {
-        result.errorMessage = "Invalid format: expected 3 colons, found " + std::to_string(colonCount);
+    if (std::count(report.begin(), report.end(), ':') != 4) {
+        result.errorMessage = "Invalid format: expected 4 colons";
         return result;
     }
-    
-    // Parse dengan validasi posisi
-    size_t pos1 = report.find(':');
-    if (pos1 == std::string::npos || pos1 == 0) {
-        result.errorMessage = "Invalid TYPE field position";
+
+    const size_t pos1 = report.find(':');
+    const size_t pos2 = report.find(':', pos1 + 1);
+    const size_t pos3 = report.find(':', pos2 + 1);
+    const size_t pos4 = report.find(':', pos3 + 1);
+    const size_t pos5 = report.find(';', pos4 + 1);
+    if (pos1 == 0 || pos2 == std::string::npos || pos3 == std::string::npos ||
+        pos4 == std::string::npos || pos5 != report.size() - 1 ||
+        pos4 == pos5 - 1) {
+        result.errorMessage = "Invalid request field positions";
         return result;
     }
-    
-    size_t pos2 = report.find(':', pos1 + 1);
-    if (pos2 == std::string::npos) {
-        result.errorMessage = "Invalid DETAILS field position";
+
+    result.type = report.substr(0, pos1);
+    result.details = report.substr(pos1 + 1, pos2 - pos1 - 1);
+    result.hwid = report.substr(pos2 + 1, pos3 - pos2 - 1);
+    result.challengeNonce = report.substr(pos3 + 1, pos4 - pos3 - 1);
+    result.mac = report.substr(pos4 + 1, pos5 - pos4 - 1);
+
+    if (result.type.empty() || result.type.length() > MAX_TYPE_LEN ||
+        result.details.length() > MAX_DETAILS_LEN ||
+        result.hwid.empty() || result.hwid.length() > MAX_HWID_LEN ||
+        !IsValidChallengeNonce(result.challengeNonce) ||
+        result.mac.size() != 64) {
+        result.errorMessage = "Request field length or value is invalid";
         return result;
     }
-    
-    size_t pos3 = report.find(':', pos2 + 1);
-    if (pos3 == std::string::npos) {
-        result.errorMessage = "Invalid HWID field position";
-        return result;
-    }
-    
-    size_t pos4 = report.find(';', pos3 + 1);
-    if (pos4 == std::string::npos || pos4 == pos3 + 1) {
-        result.errorMessage = "Invalid SECRET field position";
-        return result;
-    }
-    
-    // Extract fields dengan boundary checking
-    try {
-        result.type = report.substr(0, pos1);
-        result.details = report.substr(pos1 + 1, pos2 - pos1 - 1);
-        result.hwid = report.substr(pos2 + 1, pos3 - pos2 - 1);
-        result.secret = report.substr(pos3 + 1, pos4 - pos3 - 1);
-    } catch (const std::out_of_range& e) {
-        result.errorMessage = std::string("Parsing error: ") + e.what();
-        return result;
-    }
-    
-    // Validasi panjang setiap field
-    if (result.type.length() > MAX_TYPE_LEN) {
-        result.errorMessage = "TYPE field exceeds maximum length (" + std::to_string(MAX_TYPE_LEN) + ")";
-        return result;
-    }
-    
-    if (result.details.length() > MAX_DETAILS_LEN) {
-        result.errorMessage = "DETAILS field exceeds maximum length (" + std::to_string(MAX_DETAILS_LEN) + ")";
-        return result;
-    }
-    
-    if (result.hwid.length() > MAX_HWID_LEN) {
-        result.errorMessage = "HWID field exceeds maximum length (" + std::to_string(MAX_HWID_LEN) + ")";
-        return result;
-    }
-    
-    if (result.secret.length() > MAX_SECRET_LEN) {
-        result.errorMessage = "SECRET field exceeds maximum length (" + std::to_string(MAX_SECRET_LEN) + ")";
-        return result;
-    }
-    
-    // Validasi TYPE tidak kosong dan hanya berisi karakter alphanumeric + underscore
-    if (result.type.empty()) {
-        result.errorMessage = "TYPE field cannot be empty";
-        return result;
-    }
-    
-    for (char c : result.type) {
-        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') {
+    for (unsigned char c : result.type) {
+        if (!std::isalnum(c) && c != '_') {
             result.errorMessage = "TYPE field contains invalid characters";
             return result;
         }
     }
-    
-    // Validasi HWID tidak kosong dan hanya berisi karakter hexadecimal + dash
-    if (result.hwid.empty()) {
-        result.errorMessage = "HWID field cannot be empty";
-        return result;
-    }
-    
-    for (char c : result.hwid) {
-        if (!std::isxdigit(static_cast<unsigned char>(c)) && c != '-') {
-            result.errorMessage = "HWID field contains invalid characters (expected hex + dash)";
+    for (unsigned char c : result.hwid) {
+        if (!std::isxdigit(c) && c != '-') {
+            result.errorMessage = "HWID field contains invalid characters";
             return result;
         }
     }
-    
-    // Validasi SECRET tidak kosong
-    if (result.secret.empty()) {
-        result.errorMessage = "SECRET field cannot be empty";
-        return result;
-    }
-    
-    // Sanitasi DETAILS (bisa kosong untuk CHECKIN)
-    result.details = SanitizeInput(result.details, MAX_DETAILS_LEN);
-    
+
     result.valid = true;
     return result;
 }
+
 
 // Fungsi untuk menangani setiap client yang terhubung
 void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbeatConfig) {
