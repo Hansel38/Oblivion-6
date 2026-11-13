@@ -1058,12 +1058,22 @@ namespace Oblivion {
             return 0;
         }
 
-        // Hash semua baseline data
+        // Serialize meaningful fields only. Hashing the raw struct object
+        // representation also included padding bytes, whose values are not
+        // initialized and are not part of the baseline's logical state.
         std::vector<uint8_t> baselineData;
+        const auto appendField = [&baselineData](const auto& value) {
+            const auto* bytes = reinterpret_cast<const uint8_t*>(&value);
+            baselineData.insert(baselineData.end(), bytes, bytes + sizeof(value));
+        };
+
         for (const auto& baseline : m_diskBaseline) {
-            baselineData.insert(baselineData.end(), 
-                              reinterpret_cast<const uint8_t*>(&baseline),
-                              reinterpret_cast<const uint8_t*>(&baseline) + sizeof(ExecutableRegion));
+            appendField(baseline.rva);
+            appendField(baseline.size);
+            appendField(baseline.diskCRC32);
+            appendField(baseline.memoryCRC32);
+            const uint8_t isCodeSection = baseline.isCodeSection ? 1u : 0u;
+            appendField(isCodeSection);
         }
 
         return CalculateCRC32(baselineData.data(), baselineData.size());
