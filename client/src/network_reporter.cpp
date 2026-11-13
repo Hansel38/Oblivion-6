@@ -601,6 +601,7 @@ namespace Oblivion {
                         if (parsedSeq != seqText.size() || parsedTimestamp != timestampText.size() ||
                             parsedNonce != nonceText.size() ||
                             seq64 > (std::numeric_limits<uint32_t>::max)()) break;
+                        (void)timestamp;
 
                         const uint32_t seq = static_cast<uint32_t>(seq64);
                         const std::string pingAuthData =
