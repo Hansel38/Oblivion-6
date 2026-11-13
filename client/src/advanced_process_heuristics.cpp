@@ -49,9 +49,10 @@ namespace {
         Incomplete
     };
 
-    // Cache untuk signature verification - menghindari re-verify proses yang sama
-    // Key: Process Path (lowercase), Value: Is Verified (true/false)
-    std::map<std::wstring, bool> g_signatureCache;
+    // Signature decisions are reused only during one scan phase. The explicit
+    // limit keeps a process-heavy machine from growing the cache without bound.
+    using ProcessSignatureCache = std::map<std::wstring, bool>;
+    constexpr size_t kMaximumSignatureCacheEntries = 256;
     
     DWORD GetProtectedProcessId() {
         return GetCurrentProcessId();
@@ -354,7 +355,8 @@ namespace {
 
     ProcessWhitelistResult IsProcessWhitelisted(
         const std::wstring& processName,
-        DWORD processId = 0,
+        DWORD processId,
+        ProcessSignatureCache& signatureCache,
         std::wstring* scanIssue = nullptr) {
         if (scanIssue != nullptr) {
             scanIssue->clear();
@@ -415,8 +417,8 @@ namespace {
         std::transform(cacheKey.begin(), cacheKey.end(), cacheKey.begin(), ::towlower);
         
         // Cek cache terlebih dahulu untuk menghindari re-verification
-        auto cacheIt = g_signatureCache.find(cacheKey);
-        if (cacheIt != g_signatureCache.end()) {
+        auto cacheIt = signatureCache.find(cacheKey);
+        if (cacheIt != signatureCache.end()) {
             // Cache hit! Return hasil yang sudah pernah diverifikasi (SILENT - no log spam)
             bool cachedResult = cacheIt->second;
             
@@ -465,8 +467,12 @@ namespace {
             signatureResult ==
             Oblivion::DigitalSignatureValidator::ProcessSignatureResult::Trusted;
 
-        // Cache only definitive trust decisions.
-        g_signatureCache[cacheKey] = isVerified;
+        // Cache only definitive trust decisions, and only while this scan
+        // phase remains below its fixed entry limit. Overflow simply causes
+        // later processes to be verified again rather than growing memory.
+        if (signatureCache.size() < kMaximumSignatureCacheEntries) {
+            signatureCache.emplace(cacheKey, isVerified);
+        }
 
         if (!isVerified) {
             // SPOOFING DETECTED!
@@ -911,6 +917,10 @@ namespace Oblivion {
     }
 
     void AdvancedProcessHeuristics::PerformScan() {
+        // This cache cannot outlive the current process snapshot. In particular,
+        // a later scan or watcher restart must re-check the executable on disk.
+        ProcessSignatureCache signatureCache;
+
         // Update heartbeat di awal scan
         if (m_heartbeatCallback) {
             m_heartbeatCallback();
@@ -988,7 +998,7 @@ namespace Oblivion {
                 std::wstring whitelistIssue;
                 const ProcessWhitelistResult whitelistResult =
                     IsProcessWhitelisted(
-                        processName, pe32.th32ProcessID, &whitelistIssue);
+                        processName, pe32.th32ProcessID, signatureCache, &whitelistIssue);
                 if (whitelistResult == ProcessWhitelistResult::Whitelisted) {
                     continue;
                 }
@@ -1330,6 +1340,7 @@ namespace Oblivion {
         std::wstring& scanIssue) const {
         scanIssue.clear();
         bool incomplete = false;
+        ProcessSignatureCache signatureCache;
 
         struct ProcessHandleDeleter {
             void operator()(HANDLE handle) const noexcept {
@@ -1519,7 +1530,7 @@ namespace Oblivion {
                 std::wstring whitelistIssue;
                 const ProcessWhitelistResult whitelistResult =
                     IsProcessWhitelisted(
-                        processName, handle.ProcessId, &whitelistIssue);
+                        processName, handle.ProcessId, signatureCache, &whitelistIssue);
                 if (whitelistResult == ProcessWhitelistResult::Whitelisted) {
                     continue;
                 }
