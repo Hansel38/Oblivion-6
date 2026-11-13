@@ -54,6 +54,34 @@ namespace {
         }
         return true;
     }
+
+    bool GetExecutablePathDynamic(std::wstring& executablePath) {
+        executablePath.clear();
+        constexpr size_t kMaximumPathLength = 32768;
+        size_t capacity = MAX_PATH;
+
+        while (capacity <= kMaximumPathLength) {
+            std::vector<wchar_t> buffer(capacity, L'\\0');
+            const DWORD length = GetModuleFileNameW(
+                nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+            if (length == 0) {
+                return false;
+            }
+
+            // A return equal to the buffer size means the path may be truncated.
+            if (static_cast<size_t>(length) < buffer.size()) {
+                executablePath.assign(buffer.data(), static_cast<size_t>(length));
+                return !executablePath.empty();
+            }
+
+            if (capacity == kMaximumPathLength) {
+                return false;
+            }
+            capacity = (std::min)(capacity * 2, kMaximumPathLength);
+        }
+
+        return false;
+    }
 }
 
 
@@ -1105,9 +1133,9 @@ namespace Oblivion {
     void MemoryScanner::PerformScan() {
         // === PHASE 1: Baseline Creation (ONCE, at first scan) ===
         if (!m_baselineCreated) {
-            wchar_t exePath[MAX_PATH];
-            if (GetModuleFileNameW(NULL, exePath, MAX_PATH) == 0) {
-                std::string details = "Failed to get executable path";
+            std::wstring exePath;
+            if (!GetExecutablePathDynamic(exePath)) {
+                std::string details = "Failed to resolve the complete executable path";
                 ReportViolationAndExit(L"", "PATH_RETRIEVAL_FAILED", details);
                 return;
             }
