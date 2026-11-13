@@ -45,7 +45,7 @@ namespace Oblivion {
                 return {};
             }
 
-            cached = std::move(envSecret);
+            cached = envSecret;
             return cached;
         }
 
