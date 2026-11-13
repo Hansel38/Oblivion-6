@@ -116,31 +116,44 @@ static bool ParseHelloFrame(const std::string& frame, std::string& hwid) {
 // Cross-platform helper functions
 std::string GetExecutableDirectory() {
 #ifdef _WIN32
-    char exePath[MAX_PATH];
-    GetModuleFileNameA(NULL, exePath, MAX_PATH);
-    std::string path(exePath);
-    size_t lastSlash = path.find_last_of("\\/");
-    if (lastSlash != std::string::npos) {
-        return path.substr(0, lastSlash + 1);
+    size_t capacity = 512;
+    while (capacity <= 32768) {
+        std::vector<char> exePath(capacity, '\\0');
+        const DWORD length = GetModuleFileNameA(
+            NULL, exePath.data(), static_cast<DWORD>(exePath.size()));
+        if (length == 0) return "";
+        if (length < exePath.size() - 1) {
+            const std::string path(exePath.data(), length);
+            const size_t lastSlash = path.find_last_of("\\\\/");
+            return lastSlash == std::string::npos
+                ? std::string()
+                : path.substr(0, lastSlash + 1);
+        }
+        capacity *= 2;
     }
     return "";
 #else
-    char exePath[PATH_MAX];
-    ssize_t count = readlink("/proc/self/exe", exePath, PATH_MAX);
-    if (count != -1) {
-        std::string path(exePath, count);
-        size_t lastSlash = path.find_last_of("/");
-        if (lastSlash != std::string::npos) {
-            return path.substr(0, lastSlash + 1);
+    size_t capacity = 512;
+    while (capacity <= 32768) {
+        std::vector<char> exePath(capacity);
+        const ssize_t length = readlink(
+            "/proc/self/exe", exePath.data(), exePath.size());
+        if (length < 0) return "";
+        if (static_cast<size_t>(length) < exePath.size()) {
+            const std::string path(exePath.data(), static_cast<size_t>(length));
+            const size_t lastSlash = path.find_last_of('/');
+            return lastSlash == std::string::npos
+                ? std::string()
+                : path.substr(0, lastSlash + 1);
         }
+        capacity *= 2;
     }
-    return "./";
+    return "";
 #endif
 }
-
 std::string GetFilePath(const std::string& filename) {
-    std::string exeDir = GetExecutableDirectory();
-    return exeDir + filename;
+    const std::string exeDir = GetExecutableDirectory();
+    return exeDir.empty() ? std::string() : exeDir + filename;
 }
 
 std::string GetCurrentTimestamp() {
