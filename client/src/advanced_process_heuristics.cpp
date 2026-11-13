@@ -453,7 +453,10 @@ namespace {
 
     // Get process name from PID
     std::wstring GetProcessName(DWORD processId) {
-        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId);
+        // QueryFullProcessImageNameW only needs query access. Requesting VM_READ
+        // unnecessarily rejects protected/restricted processes before their
+        // process handles can be checked against the game.
+        HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
         if (hProcess == NULL) {
             return L"";
         }
@@ -1098,15 +1101,16 @@ namespace Oblivion {
             // AND has dangerous access rights
             if (handle.ObjectTypeNumber == 7 && (handle.GrantedAccess & dangerousMasks) != 0) {
                 // Get process name that owns this suspicious handle
-                std::wstring processName = GetProcessName(handle.ProcessId);
-                
-                if (!processName.empty() && !IsProcessWhitelisted(processName, handle.ProcessId)) {
-                    // Verify: Try to duplicate the handle and check if it points to our game
+                const std::wstring processName = GetProcessName(handle.ProcessId);
+
+                // Trust the whitelist only when the owner name can be resolved.
+                // An inaccessible/vanished image path must not suppress the
+                // definitive duplicate-handle target check.
+                if (processName.empty() || !IsProcessWhitelisted(processName, handle.ProcessId)) {
                     HANDLE hOwnerProcess = OpenProcess(PROCESS_DUP_HANDLE, FALSE, handle.ProcessId);
                     if (hOwnerProcess != NULL) {
                         HANDLE hDuplicated = NULL;
-                        
-                        // Try to duplicate the handle
+
                         if (DuplicateHandle(
                             hOwnerProcess,
                             (HANDLE)(ULONG_PTR)handle.Handle,
@@ -1116,12 +1120,17 @@ namespace Oblivion {
                             FALSE,
                             DUPLICATE_SAME_ACCESS)) {
 
-                            // Check if duplicated handle points to our game process
-                            DWORD targetPid = GetProcessId(hDuplicated);
+                            // The target PID, not the owner's image path, is the
+                            // authoritative check for a handle targeting this game.
+                            const DWORD targetPid = GetProcessId(hDuplicated);
                             if (targetPid == gameProcessId) {
-                                // CONFIRMED: This handle points to our game with dangerous access!
-                                suspiciousProcess = processName + L" (PID:" + std::to_wstring(handle.ProcessId) + 
-                                                   L", Access:0x" + std::to_wstring(handle.GrantedAccess) + L")";
+                                std::wstring ownerName = processName;
+                                if (ownerName.empty()) {
+                                    ownerName = L"UNKNOWN_PROCESS";
+                                }
+                                suspiciousProcess = ownerName + L" (PID:" +
+                                    std::to_wstring(handle.ProcessId) +
+                                    L", Access:0x" + std::to_wstring(handle.GrantedAccess) + L")";
 #ifdef _DEBUG
                                 std::wstring debugMsg = L"[AdvHeuristics] DETECTED SUSPICIOUS HANDLE to game: " + suspiciousProcess + L"\n";
                                 OutputDebugStringW(debugMsg.c_str());
@@ -1130,7 +1139,7 @@ namespace Oblivion {
                                 CloseHandle(hOwnerProcess);
                                 return true;
                             }
-                            
+
                             CloseHandle(hDuplicated);
                         }
                         CloseHandle(hOwnerProcess);
