@@ -336,11 +336,19 @@ namespace Oblivion {
             return;
         }
 
+        struct SnapshotHandleDeleter {
+            void operator()(HANDLE handle) const noexcept {
+                if (handle != INVALID_HANDLE_VALUE && handle != NULL) {
+                    CloseHandle(handle);
+                }
+            }
+        };
+        std::unique_ptr<void, SnapshotHandleDeleter> snapshotHandle(snapshot);
+
         MODULEENTRY32W moduleEntry{};
         moduleEntry.dwSize = sizeof(moduleEntry);
         if (!Module32FirstW(snapshot, &moduleEntry)) {
             const DWORD error = GetLastError();
-            CloseHandle(snapshot);
             const std::string details =
                 "Module32FirstW failed; error=" + std::to_string(error);
             ReportViolationAndExit(L"", "MODULE_ENUMERATION_UNAVAILABLE", details);
@@ -348,30 +356,80 @@ namespace Oblivion {
         }
 
         do {
-            if (moduleEntry.hModule == GetModuleHandleW(nullptr)) continue;
+            if (moduleEntry.hModule == GetModuleHandleW(nullptr)) {
+                SetLastError(ERROR_SUCCESS);
+                continue;
+            }
 
             std::wstring modulePath;
             if (!GetModulePathDynamic(GetCurrentProcess(), moduleEntry.hModule, modulePath)) {
-                const std::string details = "Unable to resolve a loaded module path";
+                const DWORD error = GetLastError();
+                const std::string details =
+                    "Unable to resolve a loaded module path; error=" +
+                    std::to_string(error);
                 ReportViolationAndExit(L"", "MODULE_PATH_UNAVAILABLE", details);
                 return;
             }
 
-            const std::wstring normalizedModulePath = NormalizePathForComparison(modulePath);
+            const std::wstring normalizedModulePath =
+                NormalizePathForComparison(modulePath);
 
-            // System/Program Files folders are not trusted by name alone.
-            // Only allow modules from those roots when their Authenticode signature validates.
+            // Preserve the existing policy: files under Windows/Program Files need
+            // a valid Authenticode signature; other modules also require a trusted publisher.
             const bool isWindowsModule = haveWindowsDirectory &&
                 IsWithinDirectory(normalizedModulePath, windowsDirectory);
             const bool isProgramFilesModule =
                 (haveProgramFiles && IsWithinDirectory(normalizedModulePath, programFiles)) ||
                 (haveProgramFilesX86 && IsWithinDirectory(normalizedModulePath, programFilesX86));
 
-            std::wstring moduleName(moduleEntry.szModule);
-            const bool isTrusted = (isWindowsModule || isProgramFilesModule)
-                ? VerifyFileSignature(modulePath)
-                : IsModuleTrusted(moduleEntry.hModule, moduleName);
-            if (!isTrusted) {
+            const std::wstring moduleName(moduleEntry.szModule);
+            ModuleTrustResult trustResult = ModuleTrustResult::Incomplete;
+            std::wstring trustIssue;
+
+            if (isWindowsModule || isProgramFilesModule) {
+                LONG trustStatus = ERROR_SUCCESS;
+                if (VerifyFileSignature(modulePath, &trustStatus)) {
+                    trustResult = ModuleTrustResult::Trusted;
+                } else {
+                    trustIssue =
+                        L"WinVerifyTrust failed; status=" +
+                        std::to_wstring(static_cast<unsigned long>(trustStatus));
+                    trustResult = IsDefinitivelyUntrustedSignatureStatus(trustStatus)
+                        ? ModuleTrustResult::Untrusted
+                        : ModuleTrustResult::Incomplete;
+                }
+            } else {
+                trustResult = IsModuleTrusted(modulePath, moduleName, trustIssue);
+            }
+
+            if (trustResult == ModuleTrustResult::Incomplete) {
+                std::wstringstream detailsStream;
+                detailsStream << L"Module: " << moduleName
+                              << L" | Path: " << modulePath
+                              << L" | Reason: " << trustIssue;
+                const std::wstring detailsWide = detailsStream.str();
+
+                std::string details = "Module signature verification incomplete";
+                const int required = WideCharToMultiByte(
+                    CP_UTF8, 0, detailsWide.c_str(),
+                    static_cast<int>(detailsWide.size()), nullptr, 0, nullptr, nullptr);
+                if (required > 0) {
+                    std::string converted(static_cast<size_t>(required), '\0');
+                    if (WideCharToMultiByte(
+                            CP_UTF8, 0, detailsWide.c_str(),
+                            static_cast<int>(detailsWide.size()), &converted[0],
+                            required, nullptr, nullptr) == required) {
+                        details.swap(converted);
+                    }
+                }
+
+                // Keep startup fail-closed, but do not classify an API/provider
+                // failure as an untrusted or malicious module.
+                ReportViolationAndExit(L"", "MODULE_SIGNATURE_UNAVAILABLE", details);
+                return;
+            }
+
+            if (trustResult == ModuleTrustResult::Untrusted) {
                 std::wstring message =
                     L"Modul tidak tepercaya (tidak ditandatangani atau penerbit tidak dikenal) terdeteksi: ";
                 message += moduleEntry.szModule;
@@ -381,15 +439,18 @@ namespace Oblivion {
 
                 std::wstringstream detailsStream;
                 detailsStream << L"Module: " << moduleEntry.szModule
-                              << L" | Path: " << modulePath;
+                              << L" | Path: " << modulePath
+                              << L" | Reason: " << trustIssue;
                 const std::wstring detailsWide = detailsStream.str();
 
                 std::string detailsUtf8;
-                const int required = WideCharToMultiByte(CP_UTF8, 0, detailsWide.c_str(),
+                const int required = WideCharToMultiByte(
+                    CP_UTF8, 0, detailsWide.c_str(),
                     static_cast<int>(detailsWide.size()), nullptr, 0, nullptr, nullptr);
                 if (required > 0) {
                     detailsUtf8.resize(static_cast<size_t>(required));
-                    if (WideCharToMultiByte(CP_UTF8, 0, detailsWide.c_str(),
+                    if (WideCharToMultiByte(
+                            CP_UTF8, 0, detailsWide.c_str(),
                             static_cast<int>(detailsWide.size()), &detailsUtf8[0],
                             required, nullptr, nullptr) == required) {
                         ReportViolationAndExit(message, "UNTRUSTED_MODULE", detailsUtf8);
@@ -397,15 +458,17 @@ namespace Oblivion {
                     }
                 }
 
-                // Do not skip an already-untrusted module if its path cannot be converted.
-                ReportViolationAndExit(message, "UNTRUSTED_MODULE",
-                                       "Module signature or publisher is not trusted");
+                ReportViolationAndExit(
+                    message,
+                    "UNTRUSTED_MODULE",
+                    "Module signature or publisher is not trusted");
                 return;
             }
+
+            SetLastError(ERROR_SUCCESS);
         } while (Module32NextW(snapshot, &moduleEntry));
 
         const DWORD enumerationError = GetLastError();
-        CloseHandle(snapshot);
         if (enumerationError != ERROR_NO_MORE_FILES) {
             const std::string details =
                 "Module32NextW failed before enumeration completed; error=" +
@@ -415,40 +478,65 @@ namespace Oblivion {
         }
     }
 
-    bool DigitalSignatureValidator::IsModuleTrusted(HMODULE hModule, std::wstring& moduleName) {
+    DigitalSignatureValidator::ModuleTrustResult
+    DigitalSignatureValidator::IsModuleTrusted(
+        const std::wstring& filePath,
+        const std::wstring& moduleName,
+        std::wstring& failureReason) {
+        failureReason.clear();
         std::wstring moduleNameLower = moduleName;
-        std::transform(moduleNameLower.begin(), moduleNameLower.end(), moduleNameLower.begin(),
+        std::transform(
+            moduleNameLower.begin(), moduleNameLower.end(), moduleNameLower.begin(),
             [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
 
-        // Legacy game modules may be unsigned. Keep the explicit filename allowlist
-        // for compatibility, but track path/hash pinning as a required follow-up.
+        // Preserve the existing compatibility allowlist for legacy unsigned DLLs.
         for (const auto& allowedDll : m_allowedUnsignedDlls) {
             std::wstring allowedLower = allowedDll;
-            std::transform(allowedLower.begin(), allowedLower.end(), allowedLower.begin(),
+            std::transform(
+                allowedLower.begin(), allowedLower.end(), allowedLower.begin(),
                 [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
-            if (moduleNameLower == allowedLower) return true;
+            if (moduleNameLower == allowedLower) {
+                return ModuleTrustResult::Trusted;
+            }
         }
 
-        // Resolve the full module path dynamically so long paths are not truncated
-        // and accidentally passed to the signature verifier as a different file.
-        std::wstring filePath;
-        if (!GetModulePathDynamic(GetCurrentProcess(), hModule, filePath)) return false;
-        if (!VerifyFileSignature(filePath)) return false;
+        LONG trustStatus = ERROR_SUCCESS;
+        if (!VerifyFileSignature(filePath, &trustStatus)) {
+            failureReason =
+                L"WinVerifyTrust failed; status=" +
+                std::to_wstring(static_cast<unsigned long>(trustStatus));
+            return IsDefinitivelyUntrustedSignatureStatus(trustStatus)
+                ? ModuleTrustResult::Untrusted
+                : ModuleTrustResult::Incomplete;
+        }
 
         std::wstring publisherName;
-        if (!GetFilePublisher(filePath, publisherName)) return false;
+        SetLastError(ERROR_SUCCESS);
+        if (!GetFilePublisher(filePath, publisherName)) {
+            const DWORD error = GetLastError();
+            failureReason =
+                L"publisher extraction failed after trust verification; error=" +
+                std::to_wstring(error);
+            return ModuleTrustResult::Incomplete;
+        }
 
-        std::transform(publisherName.begin(), publisherName.end(), publisherName.begin(),
+        std::transform(
+            publisherName.begin(), publisherName.end(), publisherName.begin(),
             [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
 
         for (const auto& trustedName : m_trustedPublishers) {
             std::wstring trustedLower = trustedName;
-            std::transform(trustedLower.begin(), trustedLower.end(), trustedLower.begin(),
+            std::transform(
+                trustedLower.begin(), trustedLower.end(), trustedLower.begin(),
                 [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
-            if (publisherName.find(trustedLower) != std::wstring::npos) return true;
+            if (publisherName.find(trustedLower) != std::wstring::npos) {
+                return ModuleTrustResult::Trusted;
+            }
         }
 
-        return false;
+        failureReason = L"Authenticode publisher is not in the trusted publisher list: " +
+            publisherName;
+        return ModuleTrustResult::Untrusted;
     }
 
     bool DigitalSignatureValidator::GetCertificateSubjectName(HMODULE hModule, std::wstring& subjectName) {
