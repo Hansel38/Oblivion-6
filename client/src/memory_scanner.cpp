@@ -552,32 +552,65 @@ namespace Oblivion {
         }
 
         // STEP 5: Get module base address from memory
-        HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
+        HANDLE hSnapshot = CreateToolhelp32Snapshot(
+            TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
         if (hSnapshot == INVALID_HANDLE_VALUE) {
-            std::string details = "Failed to enumerate modules";
-            ReportViolationAndExit(L"", "MODULE_ENUM_FAILED", details);
+            const DWORD error = GetLastError();
+            ReportViolationAndExit(
+                L"", "MODULE_ENUMERATION_UNAVAILABLE",
+                "CreateToolhelp32Snapshot failed during baseline creation; error=" +
+                    std::to_string(error));
             return;
         }
 
-        MODULEENTRY32W me32;
+        MODULEENTRY32W me32{};
         me32.dwSize = sizeof(MODULEENTRY32W);
 
-        if (Module32FirstW(hSnapshot, &me32)) {
+        uintptr_t moduleBaseAddress = 0;
+        bool foundExecutableModule = false;
+        DWORD enumerationError = ERROR_SUCCESS;
+        if (!Module32FirstW(hSnapshot, &me32)) {
+            enumerationError = GetLastError();
+        } else {
             do {
                 if (_wcsicmp(me32.szExePath, filePath.c_str()) == 0) {
-                    m_moduleBaseAddress = reinterpret_cast<uintptr_t>(me32.modBaseAddr);
+                    moduleBaseAddress =
+                        reinterpret_cast<uintptr_t>(me32.modBaseAddr);
+                    foundExecutableModule = true;
                     break;
                 }
-            } while (Module32NextW(hSnapshot, &me32));
+
+                if (!Module32NextW(hSnapshot, &me32)) {
+                    enumerationError = GetLastError();
+                    break;
+                }
+            } while (true);
         }
 
         CloseHandle(hSnapshot);
 
-        if (m_moduleBaseAddress == 0) {
-            std::string details = "Failed to find module base address";
-            ReportViolationAndExit(L"", "MODULE_BASE_NOT_FOUND", details);
+        if (!foundExecutableModule) {
+            if (enumerationError == ERROR_NO_MORE_FILES) {
+                ReportViolationAndExit(
+                    L"", "MODULE_BASE_NOT_FOUND",
+                    "Module snapshot did not contain the executable during baseline creation");
+            } else {
+                ReportViolationAndExit(
+                    L"", "MODULE_ENUMERATION_UNAVAILABLE",
+                    "Module enumeration failed during baseline creation; error=" +
+                        std::to_string(enumerationError));
+            }
             return;
         }
+
+        if (moduleBaseAddress == 0) {
+            ReportViolationAndExit(
+                L"", "MODULE_ENUMERATION_UNAVAILABLE",
+                "Executable module entry was found without a valid base address");
+            return;
+        }
+
+        m_moduleBaseAddress = moduleBaseAddress;
 
         // STEP 6: Create baseline untuk setiap executable section
         for (const auto& section : sections) {
@@ -1162,31 +1195,99 @@ namespace Oblivion {
         
         HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
         if (hSnapshot == INVALID_HANDLE_VALUE) {
+            const DWORD error = GetLastError();
+            ReportViolationAndExit(
+                L"", "MODULE_ENUMERATION_UNAVAILABLE",
+                "CreateToolhelp32Snapshot failed during runtime memory scan; error=" +
+                    std::to_string(error));
             return;
         }
 
-        MODULEENTRY32W me32;
+        MODULEENTRY32W me32{};
         me32.dwSize = sizeof(MODULEENTRY32W);
 
-        if (Module32FirstW(hSnapshot, &me32)) {
+        bool foundExecutableModule = false;
+        DWORD enumerationError = ERROR_SUCCESS;
+        if (!Module32FirstW(hSnapshot, &me32)) {
+            enumerationError = GetLastError();
+        } else {
             do {
                 if (_wcsicmp(me32.szExePath, m_executablePath.c_str()) == 0) {
+                    foundExecutableModule = true;
                     uint8_t* baseAddr = reinterpret_cast<uint8_t*>(me32.modBaseAddr);
                     SIZE_T moduleSize = me32.modBaseSize;
 
-                    MEMORY_BASIC_INFORMATION mbi;
-                    for (size_t offset = 0; offset < moduleSize; offset += mbi.RegionSize) {
-                        if (VirtualQuery(baseAddr + offset, &mbi, sizeof(mbi)) == 0) {
+                    const uintptr_t moduleStart = reinterpret_cast<uintptr_t>(baseAddr);
+                    const uintptr_t maximumAddress =
+                        (std::numeric_limits<uintptr_t>::max)();
+                    if (baseAddr == nullptr || moduleSize == 0 ||
+                        moduleStart > maximumAddress - static_cast<uintptr_t>(moduleSize)) {
+                        CloseHandle(hSnapshot);
+                        ReportViolationAndExit(
+                            L"", "MEMORY_SCAN_UNAVAILABLE",
+                            "Runtime executable module has an invalid base address or image size");
+                        return;
+                    }
+                    if (moduleStart != m_moduleBaseAddress) {
+                        CloseHandle(hSnapshot);
+                        ReportViolationAndExit(
+                            L"", "MEMORY_SCAN_UNAVAILABLE",
+                            "Executable module base changed after the memory baseline was created");
+                        return;
+                    }
+
+                    const uintptr_t moduleEnd =
+                        moduleStart + static_cast<uintptr_t>(moduleSize);
+                    bool queryFailed = false;
+                    std::string queryIssue;
+                    for (size_t offset = 0; offset < moduleSize;) {
+                        const uintptr_t queryAddress = moduleStart + offset;
+                        MEMORY_BASIC_INFORMATION mbi{};
+                        if (VirtualQuery(
+                                reinterpret_cast<const void*>(queryAddress),
+                                &mbi, sizeof(mbi)) == 0) {
+                            const DWORD error = GetLastError();
+                            queryFailed = true;
+                            queryIssue =
+                                "VirtualQuery failed during runtime memory scan; address=" +
+                                std::to_string(queryAddress) + "; error=" +
+                                std::to_string(error);
                             break;
                         }
+
+                        const uintptr_t regionStart =
+                            reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+                        const uintptr_t regionSizeValue =
+                            static_cast<uintptr_t>(mbi.RegionSize);
+                        if (mbi.RegionSize == 0 ||
+                            regionStart > queryAddress ||
+                            regionSizeValue > maximumAddress - regionStart) {
+                            queryFailed = true;
+                            queryIssue =
+                                "VirtualQuery returned an invalid memory region during runtime scan";
+                            break;
+                        }
+
+                        const uintptr_t regionEnd = regionStart + regionSizeValue;
+                        if (regionEnd <= queryAddress) {
+                            queryFailed = true;
+                            queryIssue =
+                                "VirtualQuery did not advance the runtime memory scan";
+                            break;
+                        }
+
+                        // Limit the scan to the image; the last queried region
+                        // can extend beyond modBaseSize.
+                        const uintptr_t scanEnd = (std::min)(regionEnd, moduleEnd);
+                        const size_t regionSize =
+                            static_cast<size_t>(scanEnd - queryAddress);
+                        uint8_t* regionBase =
+                            reinterpret_cast<uint8_t*>(queryAddress);
 
                         if (mbi.State == MEM_COMMIT && 
                             (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | 
                                           PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) {
                             
-                            uint8_t* regionBase = reinterpret_cast<uint8_t*>(mbi.BaseAddress);
-                            size_t regionSize = mbi.RegionSize;
-
                             // Detect RWX pages (very suspicious)
                             if (DetectSuspiciousMemoryRegion(regionBase, regionSize)) {
                                 // Extract executable filename from path
@@ -1252,12 +1353,39 @@ namespace Oblivion {
                                 }
                             }
                         }
+
+                        offset = static_cast<size_t>(scanEnd - moduleStart);
+                    }
+
+                    if (queryFailed) {
+                        CloseHandle(hSnapshot);
+                        ReportViolationAndExit(
+                            L"", "MEMORY_SCAN_UNAVAILABLE", queryIssue);
+                        return;
                     }
                     break;
                 }
-            } while (Module32NextW(hSnapshot, &me32));
+
+                if (!Module32NextW(hSnapshot, &me32)) {
+                    enumerationError = GetLastError();
+                    break;
+                }
+            } while (true);
         }
 
         CloseHandle(hSnapshot);
+        if (!foundExecutableModule) {
+            if (enumerationError == ERROR_NO_MORE_FILES) {
+                ReportViolationAndExit(
+                    L"", "MODULE_BASE_NOT_FOUND",
+                    "Runtime module snapshot did not contain the executable module");
+            } else {
+                ReportViolationAndExit(
+                    L"", "MODULE_ENUMERATION_UNAVAILABLE",
+                    "Module enumeration failed during runtime memory scan; error=" +
+                        std::to_string(enumerationError));
+            }
+            return;
+        }
     }
 }
