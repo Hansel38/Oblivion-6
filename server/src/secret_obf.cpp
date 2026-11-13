@@ -43,33 +43,60 @@ namespace OblivionServer {
         //    Lokasi: berdampingan dengan server executable
         std::string secret;
 #if defined(_WIN32)
-        wchar_t pathBuf[MAX_PATH] = {0};
-        DWORD sz = GetModuleFileNameW(NULL, pathBuf, MAX_PATH);
-        std::wstring exeDir;
-        if (sz > 0) {
-            exeDir.assign(pathBuf, sz);
-            size_t lastSlash = exeDir.find_last_of(L"\\/");
-            if (lastSlash != std::wstring::npos) exeDir = exeDir.substr(0, lastSlash + 1);
-        }
-        std::wstring secretPathW = exeDir + L"secret.dat";
-        HANDLE hFile = CreateFileW(secretPathW.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile != INVALID_HANDLE_VALUE) {
-            DWORD fileSize = GetFileSize(hFile, NULL);
-            if (fileSize > 0 && fileSize < 1024) {
-                std::vector<unsigned char> encoded(fileSize);
-                DWORD readBytes = 0;
-                if (ReadFile(hFile, encoded.data(), fileSize, &readBytes, NULL) && readBytes == fileSize) {
-                    secret.reserve(fileSize);
-                    for (size_t i = 0; i < encoded.size(); ++i) {
-                        unsigned char key = (unsigned char)(0x5A + ((i * 7) % 0x3F));
-                        secret += (char)(encoded[i] ^ key);
-                    }
-                    CloseHandle(hFile);
-                    cached = secret;
-                    return cached;
-                }
+        // Resolve the executable directory with a bounded dynamic buffer.
+        // Never fall back to the process working directory for a secret file.
+        std::wstring executableDirectory;
+        std::vector<wchar_t> pathBuffer(MAX_PATH);
+        constexpr size_t kMaximumPathCapacity = 32768;
+        while (pathBuffer.size() <= kMaximumPathCapacity) {
+            const DWORD pathLength = GetModuleFileNameW(
+                nullptr, pathBuffer.data(), static_cast<DWORD>(pathBuffer.size()));
+            if (pathLength == 0) {
+                break;
             }
-            CloseHandle(hFile);
+
+            if (pathLength < pathBuffer.size()) {
+                const std::wstring executablePath(pathBuffer.data(), pathLength);
+                const size_t lastSlash = executablePath.find_last_of(L"\\/");
+                if (lastSlash != std::wstring::npos) {
+                    executableDirectory = executablePath.substr(0, lastSlash + 1);
+                }
+                break;
+            }
+
+            if (pathBuffer.size() == kMaximumPathCapacity) {
+                break;
+            }
+            const size_t nextCapacity =
+                pathBuffer.size() > kMaximumPathCapacity / 2
+                    ? kMaximumPathCapacity : pathBuffer.size() * 2;
+            pathBuffer.resize(nextCapacity);
+        }
+
+        if (!executableDirectory.empty()) {
+            const std::wstring secretPathW = executableDirectory + L"secret.dat";
+            HANDLE hFile = CreateFileW(secretPathW.c_str(), GENERIC_READ,
+                FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (hFile != INVALID_HANDLE_VALUE) {
+                const DWORD fileSize = GetFileSize(hFile, NULL);
+                if (fileSize > 0 && fileSize < 1024) {
+                    std::vector<unsigned char> encoded(fileSize);
+                    DWORD readBytes = 0;
+                    if (ReadFile(hFile, encoded.data(), fileSize, &readBytes, NULL) &&
+                        readBytes == fileSize) {
+                        secret.reserve(fileSize);
+                        for (size_t i = 0; i < encoded.size(); ++i) {
+                            const unsigned char key =
+                                static_cast<unsigned char>(0x5A + ((i * 7) % 0x3F));
+                            secret += static_cast<char>(encoded[i] ^ key);
+                        }
+                        CloseHandle(hFile);
+                        cached = secret;
+                        return cached;
+                    }
+                }
+                CloseHandle(hFile);
+            }
         }
 #else
         // Linux: resolve secret.dat relative to the executable, not the process CWD.
