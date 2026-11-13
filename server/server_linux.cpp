@@ -759,8 +759,8 @@ void HandleClient(SocketType clientSocket) {
 
             if (!requestAuthenticated) {
                 LogViolation("AUTH_FAILED", "Invalid challenge-response MAC", hwid);
-                const char* kickCommand = "KICK;";
-                OblivionNet::SendAll(clientSocket, kickCommand, strlen(kickCommand));
+                const char* authError = "ERROR:AUTH_FAILED;";
+                OblivionNet::SendAll(clientSocket, authError, strlen(authError));
                 closesocket_impl(clientSocket);
                 return;
             }
