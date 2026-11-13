@@ -6,6 +6,8 @@
 #include <thread>
 #include <vector>
 #include <fstream>
+#include <filesystem>
+#include <cctype>
 #include <sstream>
 #include <iomanip>
 #include <ctime>
@@ -244,52 +246,109 @@ std::string hmacSha256(const std::string& key, const std::string& data) {
 #endif
 }
 
-bool IsHWIDBanned(const std::string& hwid) {
-    std::string banFilePath = GetFilePath(BAN_LIST_FILE);
-    std::ifstream banFile(banFilePath);
-    if (!banFile.is_open()) {
-        return false;
-    }
-    
-    std::string line;
-    while (std::getline(banFile, line)) {
-        // Skip empty/whitespace-only lines before trimming to avoid npos arithmetic.
-        const size_t firstNonWhitespace = line.find_first_not_of(" \t\n\r");
-        if (firstNonWhitespace == std::string::npos) {
-            continue;
-        }
-        const size_t lastNonWhitespace = line.find_last_not_of(" \t\n\r");
-        line = line.substr(firstNonWhitespace, lastNonWhitespace - firstNonWhitespace + 1);
-        
-        if (line.empty() || line[0] == '#') {
-            continue;
-        }
-        
-        if (strcasecmp_impl(line.c_str(), hwid.c_str()) == 0) {
-            banFile.close();
-            return true;
+enum class BanListStatus {
+    NotBanned,
+    Banned,
+    Unavailable
+};
+
+static std::mutex g_banListMutex;
+
+static bool IsValidBanListHwid(const std::string& hwid) {
+    if (hwid.size() != 64) return false;
+    for (unsigned char value : hwid) {
+        if (!((value >= '0' && value <= '9') ||
+              (value >= 'a' && value <= 'f') ||
+              (value >= 'A' && value <= 'F'))) {
+            return false;
         }
     }
-    
-    banFile.close();
-    return false;
+    return true;
 }
 
+// Caller must hold g_banListMutex.
+static BanListStatus CheckHWIDBanStatusUnlocked(const std::string& hwid) {
+    if (!IsValidBanListHwid(hwid)) {
+        return BanListStatus::Unavailable;
+    }
+
+    const std::string banFilePath = GetFilePath(BAN_LIST_FILE);
+    if (banFilePath.empty()) return BanListStatus::Unavailable;
+
+    std::error_code filesystemError;
+    const bool fileExists = std::filesystem::exists(banFilePath, filesystemError);
+    if (filesystemError) return BanListStatus::Unavailable;
+    if (!fileExists) return BanListStatus::NotBanned;
+
+    std::ifstream banFile(banFilePath);
+    if (!banFile.is_open()) return BanListStatus::Unavailable;
+
+    bool matched = false;
+    std::string line;
+    while (std::getline(banFile, line)) {
+        const size_t firstNonWhitespace = line.find_first_not_of(" \\t\\n\\r");
+        if (firstNonWhitespace == std::string::npos) continue;
+
+        const size_t lastNonWhitespace = line.find_last_not_of(" \\t\\n\\r");
+        line = line.substr(firstNonWhitespace, lastNonWhitespace - firstNonWhitespace + 1);
+        if (line.empty() || line[0] == '#') continue;
+
+        // A malformed active entry makes the list unreliable. Never treat
+        // a partially valid list as proof that this HWID is not banned.
+        if (!IsValidBanListHwid(line)) return BanListStatus::Unavailable;
+
+        if (strcasecmp_impl(line.c_str(), hwid.c_str()) == 0) {
+            matched = true;
+        }
+    }
+
+    if (banFile.bad() || (banFile.fail() && !banFile.eof())) {
+        return BanListStatus::Unavailable;
+    }
+    return matched ? BanListStatus::Banned : BanListStatus::NotBanned;
+}
+
+static BanListStatus CheckHWIDBanStatus(const std::string& hwid) {
+    std::lock_guard<std::mutex> lock(g_banListMutex);
+    return CheckHWIDBanStatusUnlocked(hwid);
+}
+
+// Append is serialized with checks and other appends in this server process.
 void AddToBanList(const std::string& hwid) {
-    if (IsHWIDBanned(hwid)) {
+    if (!IsValidBanListHwid(hwid)) {
+        std::cerr << "[ERROR] Menolak HWID tidak valid untuk ban list." << std::endl;
         return;
     }
-    
-    std::string banFilePath = GetFilePath(BAN_LIST_FILE);
-    std::ofstream banFile(banFilePath, std::ios::app);
-    if (banFile.is_open()) {
-        banFile << hwid << std::endl;
-        banFile.close();
-        std::cout << "[BAN] HWID [" << hwid << "] ditambahkan ke ban list." << std::endl;
-    } else {
-        std::cerr << "[ERROR] Gagal membuka file ban list untuk menulis." << std::endl;
+
+    std::lock_guard<std::mutex> lock(g_banListMutex);
+    const BanListStatus status = CheckHWIDBanStatusUnlocked(hwid);
+    if (status == BanListStatus::Banned) return;
+    if (status == BanListStatus::Unavailable) {
+        std::cerr << "[ERROR] Ban list tidak dapat dibaca atau berisi entri tidak valid; penulisan dibatalkan." << std::endl;
+        return;
     }
+
+    const std::string banFilePath = GetFilePath(BAN_LIST_FILE);
+    if (banFilePath.empty()) {
+        std::cerr << "[ERROR] Path ban list tidak tersedia." << std::endl;
+        return;
+    }
+
+    std::ofstream banFile(banFilePath, std::ios::app);
+    if (!banFile.is_open()) {
+        std::cerr << "[ERROR] Gagal membuka file ban list untuk menulis." << std::endl;
+        return;
+    }
+
+    banFile << hwid << '\\n';
+    banFile.flush();
+    if (!banFile.good()) {
+        std::cerr << "[ERROR] Gagal menyimpan HWID ke ban list." << std::endl;
+        return;
+    }
+    std::cout << "[BAN] HWID [" << hwid << "] ditambahkan ke ban list." << std::endl;
 }
+
 
 // Helper function untuk extract file/software name dari details
 std::string ExtractDetectedFile(const std::string& type, const std::string& details) {
@@ -752,7 +811,13 @@ void HandleClient(SocketType clientSocket) {
             else if (type == "CHECKIN") {
                 std::cout << "[CHECKIN] Client check-in dari HWID [" << hwid << "]" << std::endl;
                 
-                bool isBanned = IsHWIDBanned(hwid);
+                const BanListStatus banStatus = CheckHWIDBanStatus(hwid);
+                if (banStatus == BanListStatus::Unavailable) {
+                    LogViolation("BAN_LIST_UNAVAILABLE", "Ban list could not be read or contains malformed entries", hwid);
+                    closesocket_impl(clientSocket);
+                    return;
+                }
+                const bool isBanned = banStatus == BanListStatus::Banned;
                 
                 if (isBanned) {
                     const std::string kickMac = hmacSha256(
