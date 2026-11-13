@@ -1229,9 +1229,6 @@ namespace Oblivion {
                             (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | 
                                           PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) {
                             
-                            uint8_t* regionBase = reinterpret_cast<uint8_t*>(mbi.BaseAddress);
-                            size_t regionSize = mbi.RegionSize;
-
                             // Detect RWX pages (very suspicious)
                             if (DetectSuspiciousMemoryRegion(regionBase, regionSize)) {
                                 // Extract executable filename from path
