@@ -35,6 +35,7 @@ namespace Oblivion {
         std::string m_pendingNetworkData; // Buffer untuk byte TCP yang belum membentuk frame
         SOCKET m_hbSocket = INVALID_SOCKET; // Socket untuk heartbeat
         uint64_t m_sessionNonce = 0; // Session nonce dari server
+        std::string m_challengeNonce; // Challenge nonce yang mengikat sesi heartbeat
         uint32_t m_hbIntervalMs = 3000;
         uint32_t m_hbTimeoutMs = 4000;
         bool m_winsockInitialized = false;

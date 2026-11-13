@@ -822,7 +822,8 @@ void HandleClient(SocketType clientSocket) {
                     uint32_t totalMisses = 0;
                     enum class HbState { Healthy, Warning, Flagged } state = HbState::Healthy;
 
-                    std::string sessionKey = hmacSha256(SERVER_SECRET, hwid + ":" + std::to_string(sessionNonce));
+                    std::string sessionKey = hmacSha256(SERVER_SECRET, "SESSION_KEY:v1:" + hwid + ":" +
+                        challengeNonce + ":" + std::to_string(sessionNonce));
                     if (sessionKey.size() != 64) {
                         LogViolation("HB_CRYPTO_FAILURE", "Unable to derive heartbeat session key", hwid);
                         closesocket_impl(clientSocket);

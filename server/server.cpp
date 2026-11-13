@@ -792,7 +792,8 @@ void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbea
                         std::string out; out.reserve(64); for(int i=0;i<32;++i){ out.push_back(hex[(hash[i]>>4)&0xF]); out.push_back(hex[hash[i]&0xF]); }
                         return out;
                     };
-                    std::string sessionKey = hmacSha256(SERVER_SECRET, hwid + ":" + std::to_string(sessionNonce));
+                    std::string sessionKey = hmacSha256(SERVER_SECRET, "SESSION_KEY:v1:" + hwid + ":" +
+                        challengeNonce + ":" + std::to_string(sessionNonce));
                     if (sessionKey.size() != 64) {
                         LogViolation("HB_CRYPTO_FAILURE", "Unable to derive heartbeat session key", hwid);
                         closesocket(clientSocket);
