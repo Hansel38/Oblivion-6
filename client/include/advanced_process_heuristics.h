@@ -32,10 +32,22 @@ namespace Oblivion {
             std::wstring& scanIssue) const;
         
         // Window class detection
-        bool HasSuspiciousWindowClass(DWORD processId, std::wstring& matchedClass) const;
+        enum class WindowScanResult {
+            Clean,
+            Suspicious,
+            Incomplete
+        };
+
+        WindowScanResult HasSuspiciousWindowClass(
+            DWORD processId,
+            std::wstring& matchedClass,
+            std::wstring& scanIssue) const;
         
         // Window title pattern detection
-        bool HasSuspiciousWindowTitle(DWORD processId, std::wstring& matchedPattern) const;
+        WindowScanResult HasSuspiciousWindowTitle(
+            DWORD processId,
+            std::wstring& matchedPattern,
+            std::wstring& scanIssue) const;
         
         // Path-based detection
         enum class PathScanResult {
