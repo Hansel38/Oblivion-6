@@ -821,16 +821,32 @@ namespace Oblivion {
         // Continue with traditional detection methods
         HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if (hSnapshot == INVALID_HANDLE_VALUE) {
+            const DWORD error = GetLastError();
+            ReportViolationAndExit(
+                L"", "PROCESS_ENUMERATION_UNAVAILABLE",
+                "AdvancedProcessHeuristics: CreateToolhelp32Snapshot failed; error=" +
+                    std::to_string(error));
             return;
         }
 
-        PROCESSENTRY32W pe32;
+        PROCESSENTRY32W pe32{};
         pe32.dwSize = sizeof(PROCESSENTRY32W);
 
         const DWORD selfPid = GetCurrentProcessId();
 
-        if (Process32FirstW(hSnapshot, &pe32)) {
-            do {
+        if (!Process32FirstW(hSnapshot, &pe32)) {
+            const DWORD error = GetLastError();
+            CloseHandle(hSnapshot);
+            if (error != ERROR_NO_MORE_FILES) {
+                ReportViolationAndExit(
+                    L"", "PROCESS_ENUMERATION_UNAVAILABLE",
+                    "AdvancedProcessHeuristics: Process32FirstW failed; error=" +
+                        std::to_string(error));
+            }
+            return;
+        }
+
+        do {
                 // Update heartbeat setiap iterasi untuk mencegah timeout
                 if (m_heartbeatCallback) {
                     m_heartbeatCallback();
@@ -919,10 +935,17 @@ namespace Oblivion {
                     }
                 }
 
-            } while (Process32NextW(hSnapshot, &pe32));
-        }
+        } while (Process32NextW(hSnapshot, &pe32));
 
+        const DWORD enumerationError = GetLastError();
         CloseHandle(hSnapshot);
+
+        if (enumerationError != ERROR_NO_MORE_FILES) {
+            ReportViolationAndExit(
+                L"", "PROCESS_ENUMERATION_UNAVAILABLE",
+                "AdvancedProcessHeuristics: Process32NextW failed before enumeration completed; error=" +
+                    std::to_string(enumerationError));
+        }
     }
 
     bool AdvancedProcessHeuristics::ContainsSuspiciousModule(DWORD processId, std::wstring& matchedModule) const {
