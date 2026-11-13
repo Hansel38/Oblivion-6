@@ -89,7 +89,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [x] **P1 — Avoid blocking joins during loader-lock detach.** `DllMain` no longer joins workers. The host calls `Oblivion_Shutdown()` before `FreeLibrary`; repeated load/unload validation remains open in the verification checklist.
 - [x] **P1 — SelfIntegrityGuard module path length.** Resolve the module path with a dynamically sized buffer and fail explicitly if the Windows path cannot be retrieved within the supported buffer limit.
 - [x] **P1 — DllMain splash-image module path length.** Resolve the module path with a dynamically sized buffer, detect API failure/truncation, and skip splash loading safely when the path cannot be resolved.
-- [ ] **P1 — Handle Winsock startup failure consistently.** Ensure every successful `WSAStartup` is balanced exactly once and no socket operation proceeds after failed initialization.
+- [x] **P1 — Handle Winsock startup failure consistently.** `NetworkReporter` performs all potentially throwing HWID/WMI initialization before `WSAStartup`, records the successful startup only after success, and balances it once in its destructor. Windows server startup checks `WSAStartup` before socket use and calls `WSACleanup` on every reachable startup-error exit. Runtime failure-path checks remain required.
 
 ### P1 — Integrity and detection correctness
 
