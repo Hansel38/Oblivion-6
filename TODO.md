@@ -79,6 +79,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [x] **P1 — Do not accept empty/unknown client status as healthy.** The client now reports separate anti-suspend and self-integrity states, initially unavailable and marked healthy only after both monitors start. Both servers require the exact `0|0`, `0|1`, `1|0`, or `1|1` bit format, authenticate it in the PONG MAC, and log transitions to/from unavailable without misclassifying a valid transport heartbeat as packet loss. Runtime initialization, shutdown, and server log-transition tests remain required.
 - [x] **P1 — Bound client TCP connection attempts.** Use nonblocking `connect()` plus `select()` / `SO_ERROR` with a single five-second deadline shared across all resolved addresses in both check-in and violation-report paths.
 - [x] **P1 — Bound DNS resolution duration.** Replace both synchronous `getaddrinfo()` calls with cancellable `GetAddrInfoExW()` completion-event resolution; cancel after five seconds and wait for cancellation completion before releasing query state.
+- [x] **P1 — Require an explicit production server endpoint.** Release builds now require a valid ASCII DNS name or IP address in `OBLIVION_SERVER`; only Debug builds default to loopback. The TCP port remains `54321`. Deployment/runtime endpoint validation remains required.
 
 ### P1 — Client lifecycle and stability
 
@@ -126,21 +127,21 @@ This checklist tracks findings from a source review. A checked item means the co
 
 ### P2 — Build, repository hygiene, and observability
 
-- [ ] **P2 — Remove generated Visual Studio build artifacts from source control.** Repository currently includes `Debug`, `Release`, `.tlog`, `.iobj`, `.ipdb`, and `.pdb` artifacts. Add appropriate ignore rules and remove generated files from Git history as appropriate.
+- [x] **P2 — Remove generated Visual Studio build artifacts from source control.** PR #29 added scoped ignore rules and removed 59 tracked Visual Studio intermediates, build outputs, and generated logs (about 8.3 MB). The root `Release/` runtime assets were preserved.
 - [x] **P2 — Add automated CI workflow.** GitHub Actions builds the Linux server with GCC and the Windows solution in Debug and Release for both x86 and x64. Warnings-as-errors and static analysis remain separate follow-ups.
 - [ ] **P2 — Add unit tests.** Cover frame parser fragmentation/coalescing, malformed messages, maximum lengths, nonce parsing, HMAC verification, config validation, and ban-list parsing.
 - [ ] **P2 — Add fuzz tests.** Fuzz all protocol parsers and PE parsing routines using bounded input corpora.
 - [ ] **P2 — Add integration tests.** Exercise check-in, banned client, invalid secret, partial send, delayed response, disconnect, heartbeat timeout, and graceful shutdown.
 - [ ] **P2 — Add structured security telemetry.** Use event IDs, severity, session correlation IDs, and redaction. Avoid logging credentials or full hardware identifiers.
-- [ ] **P2 — Document deployment.** Define plain-TCP network exposure, firewall/IP restrictions, secret provisioning and rotation, backup, ban review, and incident response. Do not add TLS to this deployment.
+- [x] **P2 — Document deployment.** `DEPLOYMENT.md` documents the plain-TCP endpoint, firewall restrictions, secret handling/rotation limitations, backups, ban review, incident response, and remaining release blockers. TLS remains intentionally out of scope.
 
 ## Verification checklist
 
-- [ ] Windows Visual Studio build: Debug x86
-- [ ] Windows Visual Studio build: Release x86
-- [ ] Windows Visual Studio build: Debug x64
-- [ ] Windows Visual Studio build: Release x64
-- [ ] Linux build: `make clean && make`
+- [x] Windows Visual Studio build: Debug x86
+- [x] Windows Visual Studio build: Release x86
+- [x] Windows Visual Studio build: Debug x64
+- [x] Windows Visual Studio build: Release x64
+- [x] Linux build: `make clean && make`
 - [ ] Static analysis: MSVC Code Analysis / clang-tidy
 - [ ] Runtime test: client handshake and nonce parsing
 - [ ] Runtime test: heartbeat fragmentation/coalescing
