@@ -983,7 +983,7 @@ namespace Oblivion {
                         processName + L" (PID: " +
                         std::to_wstring(pe32.th32ProcessID) + L"): " + whitelistIssue;
                     OutputDebugStringW(warning.c_str());
-                    OutputDebugStringW(L"\\n");
+                    OutputDebugStringW(L"\n");
                 }
 
 #ifdef _DEBUG
