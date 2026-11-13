@@ -948,8 +948,9 @@ namespace Oblivion {
                         const std::wstring warning =
                             L"[AdvHeuristics] Memory scan incomplete for " + processName +
                             L" (PID: " + std::to_wstring(pe32.th32ProcessID) +
-                            L"): " + scanIssue + L"\\n";
+                            L"): " + scanIssue;
                         OutputDebugStringW(warning.c_str());
+                        OutputDebugStringW(L"\\n");
                     }
                 }
 
