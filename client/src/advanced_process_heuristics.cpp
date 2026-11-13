@@ -4,6 +4,7 @@
 #include <limits>
 #include <tlhelp32.h>
 #include <vector>
+#include <memory>
 #include <algorithm>
 #include <cwctype>
 #include <sstream>
@@ -1276,10 +1277,14 @@ namespace Oblivion {
             return MemoryScanResult::Incomplete;
         }
 
-        const auto finishScan = [hProcess](MemoryScanResult result) {
-            CloseHandle(hProcess);
-            return result;
+        struct ProcessHandleDeleter {
+            void operator()(HANDLE handle) const noexcept {
+                if (handle != NULL) {
+                    CloseHandle(handle);
+                }
+            }
         };
+        std::unique_ptr<void, ProcessHandleDeleter> processHandle(hProcess);
 
         constexpr size_t kChunkSize = 1024 * 1024;
         constexpr size_t kMaxTotalScan = 100 * 1024 * 1024;
@@ -1292,158 +1297,163 @@ namespace Oblivion {
         std::vector<BYTE> carry;
         ULONG_PTR queryAddress = 0;
 
-        // VirtualQueryEx walks the target address space by complete regions.
-        // ERROR_INVALID_PARAMETER is the documented end-of-address-space result.
-        for (;;) {
-            MEMORY_BASIC_INFORMATION mbi{};
-            SetLastError(ERROR_SUCCESS);
-            const SIZE_T querySize = VirtualQueryEx(
-                hProcess,
-                reinterpret_cast<LPCVOID>(queryAddress),
-                &mbi,
-                sizeof(mbi));
+        try {
+            // VirtualQueryEx walks the target address space by complete regions.
+            // ERROR_INVALID_PARAMETER is the documented end-of-address-space result.
+            for (;;) {
+                MEMORY_BASIC_INFORMATION mbi{};
+                SetLastError(ERROR_SUCCESS);
+                const SIZE_T querySize = VirtualQueryEx(
+                    hProcess,
+                    reinterpret_cast<LPCVOID>(queryAddress),
+                    &mbi,
+                    sizeof(mbi));
 
-            if (querySize == 0) {
-                const DWORD error = GetLastError();
-                if (error == ERROR_INVALID_PARAMETER) {
-                    break;
+                if (querySize == 0) {
+                    const DWORD error = GetLastError();
+                    if (error == ERROR_INVALID_PARAMETER) {
+                        break;
+                    }
+
+                    scanIssue = L"VirtualQueryEx failed; error=" + std::to_wstring(error);
+                    return MemoryScanResult::Incomplete;
                 }
 
-                scanIssue = L"VirtualQueryEx failed; error=" + std::to_wstring(error);
-                return finishScan(MemoryScanResult::Incomplete);
-            }
+                if (querySize != sizeof(mbi) || mbi.RegionSize == 0) {
+                    scanIssue = L"VirtualQueryEx returned an invalid memory region";
+                    return MemoryScanResult::Incomplete;
+                }
 
-            if (querySize != sizeof(mbi) || mbi.RegionSize == 0) {
-                scanIssue = L"VirtualQueryEx returned an invalid memory region";
-                return finishScan(MemoryScanResult::Incomplete);
-            }
+                const ULONG_PTR regionBase = reinterpret_cast<ULONG_PTR>(mbi.BaseAddress);
+                const ULONG_PTR maxAddress = (std::numeric_limits<ULONG_PTR>::max)();
+                if (regionBase > queryAddress ||
+                    mbi.RegionSize > maxAddress - regionBase) {
+                    scanIssue = L"VirtualQueryEx returned an overflowing or non-progressing region";
+                    return MemoryScanResult::Incomplete;
+                }
 
-            const ULONG_PTR regionBase = reinterpret_cast<ULONG_PTR>(mbi.BaseAddress);
-            const ULONG_PTR maxAddress = (std::numeric_limits<ULONG_PTR>::max)();
-            if (regionBase > queryAddress ||
-                mbi.RegionSize > maxAddress - regionBase) {
-                scanIssue = L"VirtualQueryEx returned an overflowing or non-progressing region";
-                return finishScan(MemoryScanResult::Incomplete);
-            }
+                const ULONG_PTR regionEnd = regionBase + mbi.RegionSize;
+                if (regionEnd <= queryAddress) {
+                    scanIssue = L"VirtualQueryEx did not advance the address-space cursor";
+                    return MemoryScanResult::Incomplete;
+                }
 
-            const ULONG_PTR regionEnd = regionBase + mbi.RegionSize;
-            if (regionEnd <= queryAddress) {
-                scanIssue = L"VirtualQueryEx did not advance the address-space cursor";
-                return finishScan(MemoryScanResult::Incomplete);
-            }
+                const DWORD protection = mbi.Protect & 0xFF;
+                const bool isExecutable =
+                    protection == PAGE_EXECUTE_READ ||
+                    protection == PAGE_EXECUTE_READWRITE ||
+                    protection == PAGE_EXECUTE_WRITECOPY;
+                const bool isReadable =
+                    protection == PAGE_READWRITE ||
+                    protection == PAGE_WRITECOPY ||
+                    protection == PAGE_READONLY ||
+                    isExecutable;
 
-            const DWORD protection = mbi.Protect & 0xFF;
-            const bool isExecutable =
-                protection == PAGE_EXECUTE_READ ||
-                protection == PAGE_EXECUTE_READWRITE ||
-                protection == PAGE_EXECUTE_WRITECOPY;
-            const bool isReadable =
-                protection == PAGE_READWRITE ||
-                protection == PAGE_WRITECOPY ||
-                protection == PAGE_READONLY ||
-                isExecutable;
+                if (mbi.State == MEM_COMMIT &&
+                    isReadable &&
+                    !(mbi.Protect & PAGE_GUARD) &&
+                    !(mbi.Protect & PAGE_NOACCESS)) {
+                    ULONG_PTR scanAddress = queryAddress;
+                    carry.clear();
 
-            if (mbi.State == MEM_COMMIT &&
-                isReadable &&
-                !(mbi.Protect & PAGE_GUARD) &&
-                !(mbi.Protect & PAGE_NOACCESS)) {
-                ULONG_PTR scanAddress = queryAddress;
-                carry.clear();
+                    while (scanAddress < regionEnd) {
+                        if (totalScanned >= kMaxTotalScan) {
+                            scanIssue = L"per-process memory scan budget reached";
+                            return MemoryScanResult::Incomplete;
+                        }
 
-                while (scanAddress < regionEnd) {
-                    if (totalScanned >= kMaxTotalScan) {
-                        scanIssue = L"per-process memory scan budget reached";
-                        return finishScan(MemoryScanResult::Incomplete);
-                    }
+                        const size_t regionRemaining =
+                            static_cast<size_t>(regionEnd - scanAddress);
+                        const size_t budgetRemaining = kMaxTotalScan - totalScanned;
+                        const size_t requestSize = (std::min)(
+                            (std::min)(regionRemaining, kChunkSize),
+                            budgetRemaining);
+                        if (requestSize == 0) {
+                            scanIssue = L"memory scan made no progress";
+                            return MemoryScanResult::Incomplete;
+                        }
 
-                    const size_t regionRemaining =
-                        static_cast<size_t>(regionEnd - scanAddress);
-                    const size_t budgetRemaining = kMaxTotalScan - totalScanned;
-                    const size_t requestSize = (std::min)(
-                        (std::min)(regionRemaining, kChunkSize),
-                        budgetRemaining);
-                    if (requestSize == 0) {
-                        scanIssue = L"memory scan made no progress";
-                        return finishScan(MemoryScanResult::Incomplete);
-                    }
+                        std::vector<BYTE> buffer(requestSize);
+                        SIZE_T bytesRead = 0;
+                        const BOOL readSucceeded = ReadProcessMemory(
+                            hProcess,
+                            reinterpret_cast<LPCVOID>(scanAddress),
+                            buffer.data(),
+                            requestSize,
+                            &bytesRead);
+                        const DWORD readError =
+                            readSucceeded ? ERROR_SUCCESS : GetLastError();
 
-                    std::vector<BYTE> buffer(requestSize);
-                    SIZE_T bytesRead = 0;
-                    const BOOL readSucceeded = ReadProcessMemory(
-                        hProcess,
-                        reinterpret_cast<LPCVOID>(scanAddress),
-                        buffer.data(),
-                        requestSize,
-                        &bytesRead);
-                    const DWORD readError =
-                        readSucceeded ? ERROR_SUCCESS : GetLastError();
+                        if (bytesRead > requestSize) {
+                            scanIssue = L"ReadProcessMemory returned an invalid byte count";
+                            return MemoryScanResult::Incomplete;
+                        }
 
-                    if (bytesRead > requestSize) {
-                        scanIssue = L"ReadProcessMemory returned an invalid byte count";
-                        return finishScan(MemoryScanResult::Incomplete);
-                    }
+                        if (bytesRead > 0) {
+                            // Carry the end of the previous chunk so signatures crossing
+                            // a chunk boundary are not missed.
+                            std::vector<BYTE> scanBuffer;
+                            scanBuffer.reserve(carry.size() + bytesRead);
+                            scanBuffer.insert(scanBuffer.end(), carry.begin(), carry.end());
+                            scanBuffer.insert(
+                                scanBuffer.end(), buffer.begin(), buffer.begin() + bytesRead);
 
-                    if (bytesRead > 0) {
-                        // Carry the end of the previous chunk so signatures crossing
-                        // a chunk boundary are not missed.
-                        std::vector<BYTE> scanBuffer;
-                        scanBuffer.reserve(carry.size() + bytesRead);
-                        scanBuffer.insert(scanBuffer.end(), carry.begin(), carry.end());
-                        scanBuffer.insert(
-                            scanBuffer.end(), buffer.begin(), buffer.begin() + bytesRead);
+                            for (const auto& signature : kMemorySignatures) {
+                                if (signature.patternSize == 0 ||
+                                    signature.patternSize > scanBuffer.size() ||
+                                    (signature.requiresExecutableMemory && !isExecutable)) {
+                                    continue;
+                                }
 
-                        for (const auto& signature : kMemorySignatures) {
-                            if (signature.patternSize == 0 ||
-                                signature.patternSize > scanBuffer.size() ||
-                                (signature.requiresExecutableMemory && !isExecutable)) {
-                                continue;
-                            }
+                                for (size_t i = 0;
+                                     i <= scanBuffer.size() - signature.patternSize;
+                                     ++i) {
+                                    bool match = true;
+                                    for (size_t j = 0; j < signature.patternSize; ++j) {
+                                        if ((scanBuffer[i + j] & signature.mask[j]) !=
+                                            (signature.pattern[j] & signature.mask[j])) {
+                                            match = false;
+                                            break;
+                                        }
+                                    }
 
-                            for (size_t i = 0;
-                                 i <= scanBuffer.size() - signature.patternSize;
-                                 ++i) {
-                                bool match = true;
-                                for (size_t j = 0; j < signature.patternSize; ++j) {
-                                    if ((scanBuffer[i + j] & signature.mask[j]) !=
-                                        (signature.pattern[j] & signature.mask[j])) {
-                                        match = false;
-                                        break;
+                                    if (match) {
+                                        matchedPattern = signature.name;
+                                        return MemoryScanResult::Suspicious;
                                     }
                                 }
-
-                                if (match) {
-                                    matchedPattern = signature.name;
-                                    return finishScan(MemoryScanResult::Suspicious);
-                                }
                             }
+
+                            if (maxPatternSize > 1) {
+                                const size_t carrySize = (std::min)(
+                                    maxPatternSize - 1, scanBuffer.size());
+                                carry.assign(
+                                    scanBuffer.end() - carrySize, scanBuffer.end());
+                            }
+                            totalScanned += bytesRead;
                         }
 
-                        if (maxPatternSize > 1) {
-                            const size_t carrySize = (std::min)(
-                                maxPatternSize - 1, scanBuffer.size());
-                            carry.assign(
-                                scanBuffer.end() - carrySize, scanBuffer.end());
+                        if (!readSucceeded || bytesRead != requestSize) {
+                            scanIssue =
+                                L"ReadProcessMemory returned an incomplete region read; error=" +
+                                std::to_wstring(readError);
+                            return MemoryScanResult::Incomplete;
                         }
-                        totalScanned += bytesRead;
-                    }
 
-                    if (!readSucceeded || bytesRead != requestSize) {
-                        scanIssue =
-                            L"ReadProcessMemory returned an incomplete region read; error=" +
-                            std::to_wstring(readError);
-                        return finishScan(MemoryScanResult::Incomplete);
+                        scanAddress += static_cast<ULONG_PTR>(requestSize);
                     }
-
-                    scanAddress += static_cast<ULONG_PTR>(requestSize);
+                } else {
+                    carry.clear();
                 }
-            } else {
-                carry.clear();
-            }
 
-            queryAddress = regionEnd;
+                queryAddress = regionEnd;
+            }
+        } catch (const std::bad_alloc&) {
+            scanIssue = L"memory scan buffer allocation failed";
+            return MemoryScanResult::Incomplete;
         }
 
-        return finishScan(MemoryScanResult::Clean);
+        return MemoryScanResult::Clean;
     }
 
     std::string AdvancedProcessHeuristics::BuildHeuristicDetails(const std::wstring& processName,
