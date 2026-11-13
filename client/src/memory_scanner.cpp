@@ -795,44 +795,10 @@ namespace Oblivion {
             // baseline.memoryCRC32 adalah snapshot memory saat baseline dibuat (setelah relocations)
             // baseline.diskCRC32 digunakan untuk verifikasi bahwa file disk belum diubah
             
-            bool memoryModified = false;
-            if (baseline.memoryCRC32 != 0) {
-                // Gunakan memory baseline jika tersedia (setelah relocations)
-                memoryModified = (currentMemoryCRC32 != baseline.memoryCRC32);
-            } else {
-                // Fallback: jika memory baseline tidak tersedia, bandingkan dengan disk
-                // tapi perlu toleransi untuk relocations (perbedaan kecil adalah normal)
-                if (currentMemoryCRC32 != baseline.diskCRC32) {
-                    // Hitung perbedaan untuk membedakan relocations dari injection
-                    auto it_section_info = m_sectionMap.find(baseline.rva);
-                    if (it_section_info != m_sectionMap.end() && !fileData.empty()) {
-                        const auto& section = it_section_info->second;
-                        if (section.rawDataOffset <= fileData.size() &&
-                            section.rawDataSize <= fileData.size() - section.rawDataOffset) {
-                            const uint8_t* diskData = fileData.data() + section.rawDataOffset;
-                            size_t differentBytes = 0;
-                            size_t bytesToCompare = (sizeToCheck < section.rawDataSize) ? sizeToCheck : section.rawDataSize;
-                            
-                            for (size_t i = 0; i < bytesToCompare; i++) {
-                                if (diskData[i] != memoryAddr[i]) {
-                                    differentBytes++;
-                                }
-                            }
-                            
-                            // Relocations biasanya < 0.1% atau < 100 bytes
-                            double diffPercentage = (bytesToCompare > 0) ? (100.0 * differentBytes / bytesToCompare) : 0.0;
-                            size_t diffThreshold = (bytesToCompare > 100000) ? (bytesToCompare / 1000) : 100;
-                            
-                            // Hanya flag jika perbedaannya signifikan
-                            memoryModified = (differentBytes > diffThreshold || diffPercentage > 0.1);
-                        } else {
-                            memoryModified = true; // Tidak bisa verifikasi, anggap modified
-                        }
-                    } else {
-                        memoryModified = true; // Tidak bisa verifikasi, anggap modified
-                    }
-                }
-            }
+            // CRC32 value zero is valid data, not an "unavailable" sentinel.
+            // Every disk baseline records this memory snapshot before insertion.
+            const bool memoryModified =
+                currentMemoryCRC32 != baseline.memoryCRC32;
 
             if (memoryModified) {
                 // Code modification detected!
@@ -856,7 +822,7 @@ namespace Oblivion {
                 ss << "File: " << exeName
                    << " | Section: " << sectionName
                    << " | RVA: 0x" << std::hex << baseline.rva
-                   << " | Expected CRC32: 0x" << (baseline.memoryCRC32 != 0 ? baseline.memoryCRC32 : baseline.diskCRC32)
+                   << " | Expected CRC32: 0x" << baseline.memoryCRC32
                    << " | Got CRC32: 0x" << currentMemoryCRC32;
 
                 ReportViolationAndExit(L"", "CODE_MODIFICATION", ss.str());
@@ -1019,70 +985,10 @@ namespace Oblivion {
 
             const uint32_t currentCRC32 =
                 CalculateCRC32(memoryBase, sizeToCheck);
-            bool memoryModified = false;
-
-            if (baseline.memoryCRC32 != 0) {
-                // A full-region CRC cannot validate a shorter prefix. The old
-                // fallback re-read the live module as its own "baseline" and,
-                // on a short VirtualQuery range, could hash baseline.size bytes
-                // from a buffer that only had regionSize bytes available.
-                if (baseline.size > regionSize) {
-                    return RegionIntegrityResult::Incomplete;
-                }
-                // A larger VirtualQuery region may include alignment padding;
-                // the complete baseline-sized prefix is still safe to compare.
-                memoryModified = currentCRC32 != baseline.memoryCRC32;
-            } else if (currentCRC32 != baseline.diskCRC32) {
-                // Fallback: compare executable bytes against the disk image,
-                // retaining the existing relocation-tolerance threshold.
-                if (baseline.isCodeSection) {
-                    const auto sectionIt = m_sectionMap.find(
-                        static_cast<uint32_t>(baseline.rva));
-                    if (sectionIt == m_sectionMap.end()) {
-                        return RegionIntegrityResult::Incomplete;
-                    }
-
-                    const auto& section = sectionIt->second;
-                    std::vector<uint8_t> fileData;
-                    if (!ReadExecutableFile(m_executablePath, fileData) ||
-                        section.rawDataOffset > fileData.size() ||
-                        section.rawDataSize > fileData.size() - section.rawDataOffset) {
-                        return RegionIntegrityResult::Incomplete;
-                    }
-
-                    const size_t bytesToCompare =
-                        (std::min)(sizeToCheck, static_cast<size_t>(section.rawDataSize));
-                    if (bytesToCompare == 0) {
-                        return RegionIntegrityResult::Incomplete;
-                    }
-
-                    const uint8_t* diskData =
-                        fileData.data() + section.rawDataOffset;
-                    size_t differentBytes = 0;
-                    for (size_t i = 0; i < bytesToCompare; ++i) {
-                        if (diskData[i] != memoryBase[i]) {
-                            ++differentBytes;
-                        }
-                    }
-
-                    const double diffPercentage =
-                        100.0 * static_cast<double>(differentBytes) /
-                        static_cast<double>(bytesToCompare);
-                    const size_t diffThreshold =
-                        bytesToCompare > 100000 ? bytesToCompare / 1000 : 100;
-
-                    memoryModified =
-                        differentBytes > diffThreshold || diffPercentage > 0.1;
-                } else {
-                    // Preserve the existing non-code fallback behavior.
-                    const uint64_t sha32 =
-                        CalculateSHA256_32bit(memoryBase, sizeToCheck);
-                    const uint32_t sha32Lo = static_cast<uint32_t>(sha32);
-                    memoryModified =
-                        sha32Lo != baseline.memoryCRC32 &&
-                        baseline.memoryCRC32 != 0;
-                }
-            }
+            // memoryCRC32 is always populated when a baseline is inserted.
+            // Do not reserve zero as a sentinel: CRC32 can legitimately be zero.
+            const bool memoryModified =
+                currentCRC32 != baseline.memoryCRC32;
 
             if (!memoryModified) {
                 return RegionIntegrityResult::Clean;
