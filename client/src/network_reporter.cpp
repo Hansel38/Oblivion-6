@@ -24,6 +24,10 @@ extern void ReportViolationAndExit(const std::wstring& message, const std::strin
 
 namespace Oblivion {
 
+    static bool SendAll(SOCKET socket, const std::string& data);
+    static bool ReceiveFrame(SOCKET socket, std::string& pending,
+                             std::string& frame, DWORD timeoutMs, size_t maxSize);
+
     static std::string HmacSha256(const std::string& key, const std::string& data);
 
     static bool ConstantTimeEquals(const std::string& left, const std::string& right) {
