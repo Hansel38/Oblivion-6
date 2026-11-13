@@ -603,6 +603,13 @@ namespace Oblivion {
             return;
         }
 
+        if (moduleBaseAddress == 0) {
+            ReportViolationAndExit(
+                L"", "MODULE_ENUMERATION_UNAVAILABLE",
+                "Executable module entry was found without a valid base address");
+            return;
+        }
+
         m_moduleBaseAddress = moduleBaseAddress;
 
         // STEP 6: Create baseline untuk setiap executable section
