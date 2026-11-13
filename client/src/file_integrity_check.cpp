@@ -30,15 +30,53 @@ const std::vector<Oblivion::FileIntegrityChecker::FileHashPair> Oblivion::FileIn
     { L"DATA.ini", "7b5cea254e67b3cfbc58f710658bdadbb07109146c92f837f467d3c9b8bf5af5" }
 };
 
+namespace {
+    bool GetExecutableDirectory(std::wstring& directory) {
+        directory.clear();
+
+        constexpr size_t kInitialCapacity = MAX_PATH;
+        constexpr size_t kMaximumCapacity = 32768;
+        std::vector<wchar_t> buffer(kInitialCapacity);
+
+        while (buffer.size() <= kMaximumCapacity) {
+            const DWORD capacity = static_cast<DWORD>(buffer.size());
+            const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), capacity);
+            if (length == 0) {
+                return false;
+            }
+
+            // A full buffer may indicate truncation; retry with more space.
+            if (length < capacity) {
+                const std::wstring fullPath(buffer.data(), static_cast<size_t>(length));
+                const size_t lastSlash = fullPath.find_last_of(L"\\/");
+                if (lastSlash == std::wstring::npos) {
+                    return false;
+                }
+
+                directory.assign(fullPath, 0, lastSlash + 1);
+                return !directory.empty();
+            }
+
+            if (buffer.size() == kMaximumCapacity) {
+                return false;
+            }
+            buffer.resize((std::min)(buffer.size() * 2, kMaximumCapacity));
+        }
+
+        return false;
+    }
+}
+
 namespace Oblivion {
     void FileIntegrityChecker::PerformCheck() {
-        // Dapatkan direktori tempat client berada
-        wchar_t exePath[MAX_PATH];
-        GetModuleFileNameW(NULL, exePath, MAX_PATH);
-        std::wstring exeDir = exePath;
-        size_t lastSlash = exeDir.find_last_of(L"\\/");
-        if (lastSlash != std::wstring::npos) {
-            exeDir = exeDir.substr(0, lastSlash + 1);
+        // Resolve the executable directory without reading a truncated or
+        // uninitialized MAX_PATH buffer.
+        std::wstring exeDir;
+        if (!GetExecutableDirectory(exeDir)) {
+            ReportViolationAndExit(
+                L"", "FILE_INTEGRITY_UNAVAILABLE",
+                "Unable to resolve the executable directory for file integrity checks");
+            return;
         }
 
         for (const auto& filePair : m_filesToCheck) {
