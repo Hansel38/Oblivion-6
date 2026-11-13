@@ -619,20 +619,32 @@ namespace Oblivion {
         for (WORD i = 0; i < ntHeaders->FileHeader.NumberOfSections; ++i) {
             const IMAGE_SECTION_HEADER& section = sectionHeaders[i];
             const size_t sectionStart = static_cast<size_t>(section.VirtualAddress);
-            const size_t sectionSize = (std::max)(
-                static_cast<size_t>(section.Misc.VirtualSize),
-                static_cast<size_t>(section.SizeOfRawData));
-            if (sectionStart > imageSize || sectionSize > imageSize - sectionStart)
+            // RVA coverage is defined by the section's virtual extent, not
+            // by file-alignment padding. When VirtualSize is zero, retain the
+            // existing raw-size fallback for compatibility with older images.
+            const size_t virtualSize = section.Misc.VirtualSize != 0
+                ? static_cast<size_t>(section.Misc.VirtualSize)
+                : static_cast<size_t>(section.SizeOfRawData);
+            if (sectionStart > imageSize || virtualSize > imageSize - sectionStart)
                 return false;
 
             const size_t requestStart = static_cast<size_t>(rva);
-            if (requestStart < sectionStart || requestStart >= sectionStart + sectionSize)
+            if (requestStart < sectionStart ||
+                requestStart - sectionStart >= virtualSize) {
                 continue;
+            }
 
             const size_t offsetWithinSection = requestStart - sectionStart;
-            if (offsetWithinSection > section.SizeOfRawData ||
-                static_cast<size_t>(size) > static_cast<size_t>(section.SizeOfRawData) - offsetWithinSection)
+            // A data-directory RVA must be both mapped by the loader and
+            // backed by bytes in the file. Do not parse raw padding beyond
+            // VirtualSize as if it were part of the loaded image.
+            if (offsetWithinSection > virtualSize ||
+                static_cast<size_t>(size) > virtualSize - offsetWithinSection ||
+                offsetWithinSection > static_cast<size_t>(section.SizeOfRawData) ||
+                static_cast<size_t>(size) >
+                    static_cast<size_t>(section.SizeOfRawData) - offsetWithinSection) {
                 return false;
+            }
 
             const size_t rawOffset = static_cast<size_t>(section.PointerToRawData);
             if (rawOffset > m_diskImage.size() ||
