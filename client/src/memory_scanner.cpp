@@ -540,8 +540,11 @@ namespace Oblivion {
             return; // Error already reported
         }
 
-        // STEP 3: Verify embedded signature (jika ada)
-        VerifyEmbeddedSignature(fileData);
+        // STEP 3: Verify embedded signature (if required by this build).
+        // Never create or publish a baseline after signature verification fails.
+        if (!VerifyEmbeddedSignature(fileData)) {
+            return; // Verification failure has already been reported.
+        }
 
         // STEP 4: Parse sections and create disk-based baseline
         std::vector<PESectionInfo> sections;
