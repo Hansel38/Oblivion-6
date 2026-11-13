@@ -6,6 +6,8 @@
 #include "secret_obf.h"
 #include <windows.h>
 #include <thread>
+#include <mutex>
+#include <atomic>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -23,20 +25,141 @@ static Oblivion::NetworkReporter* g_pNetworkReporter = nullptr;
 static Oblivion::SelfIntegrityGuard* g_pSelfIntegrityGuard = nullptr;
 static HMODULE g_hSelfModule = nullptr;
 
-// Fungsi export dari Stud_PE
-// Ini adalah fungsi yang akan dipanggil oleh client setelah DLL di-inject.
-// Untuk saat ini kita biarkan kosong karena inisialisasi utama ada di DllMain.
+namespace {
+    enum class LifecycleState {
+        NotStarted,
+        Starting,
+        Started,
+        Stopping,
+        Stopped
+    };
+
+    struct LifecycleControl {
+        std::mutex mutex;
+        std::thread initializationThread;
+        std::atomic<bool> shutdownRequested{ false };
+        LifecycleState state = LifecycleState::NotStarted;
+    };
+
+    LifecycleControl& GetLifecycleControl() {
+        static LifecycleControl control;
+        return control;
+    }
+}
+
+void InitializeSecuritySystem();
+
+// The injector/host must call this export after LoadLibrary succeeds.
+// Initialization is deliberately started outside DllMain and therefore outside
+// the Windows loader lock.
 extern "C" __declspec(dllexport) void Oblivion_Entry() {
-    // Potensial untuk trigger manual jika diperlukan di masa depan
+    LifecycleControl& lifecycle = GetLifecycleControl();
+    std::lock_guard<std::mutex> lock(lifecycle.mutex);
+
+    if (lifecycle.state != LifecycleState::NotStarted) {
+        return;
+    }
+
+    lifecycle.state = LifecycleState::Starting;
+    lifecycle.shutdownRequested.store(false);
+
+    try {
+        lifecycle.initializationThread = std::thread([]() {
+            try {
+                InitializeSecuritySystem();
+            } catch (...) {
+                OutputDebugStringW(L"[ERROR] Unhandled exception during Oblivion initialization.");
+            }
+
+            LifecycleControl& state = GetLifecycleControl();
+            std::lock_guard<std::mutex> stateLock(state.mutex);
+            if (state.state == LifecycleState::Starting) {
+                state.state = LifecycleState::Started;
+            }
+        });
+    } catch (...) {
+        lifecycle.state = LifecycleState::Stopped;
+        OutputDebugStringW(L"[ERROR] Failed to create Oblivion initialization thread.");
+    }
+}
+
+// The host must call this export before FreeLibrary. It runs outside DllMain,
+// requests cancellation, joins initialization, then stops workers in dependency
+// order so no worker can use NetworkReporter after it is destroyed.
+extern "C" __declspec(dllexport) void Oblivion_Shutdown() {
+    LifecycleControl& lifecycle = GetLifecycleControl();
+    std::thread initializationThread;
+
+    {
+        std::lock_guard<std::mutex> lock(lifecycle.mutex);
+        if (lifecycle.state == LifecycleState::Stopped) {
+            return;
+        }
+
+        lifecycle.shutdownRequested.store(true);
+        lifecycle.state = LifecycleState::Stopping;
+
+        if (lifecycle.initializationThread.joinable()) {
+            // Shutdown is a host-thread API. If misused from the initialization
+            // thread, leave the joinable thread for a later host-thread call.
+            if (lifecycle.initializationThread.get_id() == std::this_thread::get_id()) {
+                return;
+            }
+            initializationThread = std::move(lifecycle.initializationThread);
+        }
+    }
+
+    if (initializationThread.joinable()) {
+        initializationThread.join();
+    }
+
+    if (g_pProcessWatcher) {
+        try {
+            g_pProcessWatcher->Stop();
+        } catch (...) {
+        }
+        delete g_pProcessWatcher;
+        g_pProcessWatcher = nullptr;
+    }
+
+    if (g_pSelfIntegrityGuard) {
+        try {
+            g_pSelfIntegrityGuard->Stop();
+        } catch (...) {
+        }
+        delete g_pSelfIntegrityGuard;
+        g_pSelfIntegrityGuard = nullptr;
+    }
+
+    if (g_pNetworkReporter) {
+        delete g_pNetworkReporter;
+        g_pNetworkReporter = nullptr;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(lifecycle.mutex);
+        lifecycle.state = LifecycleState::Stopped;
+    }
 }
 
 // Fungsi helper untuk melaporkan pelanggaran
 void ReportViolationAndExit(const std::wstring& message, const std::string& type, const std::string& details) {
-    // Tunggu maksimal 5 detik untuk NetworkReporter siap (jika belum siap)
+    LifecycleControl& lifecycle = GetLifecycleControl();
+    if (lifecycle.shutdownRequested.load()) {
+        return;
+    }
+
+    // Tunggu maksimal 5 detik untuk NetworkReporter siap (jika belum siap),
+    // tetapi jangan menahan worker bila host sedang menghentikan DLL.
     int waitCount = 0;
-    while (!g_pNetworkReporter && waitCount < 50) {
-        Sleep(100); // Tunggu 100ms
+    while (!g_pNetworkReporter && waitCount < 50 &&
+           !lifecycle.shutdownRequested.load()) {
+        Sleep(100);
         waitCount++;
+    }
+
+    if (lifecycle.shutdownRequested.load()) {
+        return;
     }
     
     // Kirim laporan ke server (BLOCKING - menunggu respons)
@@ -184,7 +307,8 @@ void InitializeSecuritySystem() {
         const ULONGLONG durationMs = 2000;
         ULONGLONG start = GetTickCount64();
         MSG msg;
-        while (GetTickCount64() - start < durationMs) {
+        while (GetTickCount64() - start < durationMs &&
+               !GetLifecycleControl().shutdownRequested.load()) {
             while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
@@ -198,8 +322,9 @@ void InitializeSecuritySystem() {
         GdiplusShutdown(gdiplusToken);
     };
 
-    // Tampilkan splash sebelum console init
+    // Tampilkan splash sebelum console init. The loop is cancellable by shutdown.
     ShowSplash();
+    if (GetLifecycleControl().shutdownRequested.load()) return;
 
     // --- LANGKAH PERTAMA: BUAT CONSOLE UNTUK DEBUGGING ---
     const bool hideConsole = ShouldHideDebugConsole();
@@ -225,6 +350,8 @@ void InitializeSecuritySystem() {
         OutputDebugStringW(L"[INFO] Oblivion Hack Shield debug console disabled via configuration.");
     }
     
+    if (GetLifecycleControl().shutdownRequested.load()) return;
+
     // --- LANGKAH KEDUA: BUAT NETWORK REPORTER ---
     std::cout << "[INIT] Creating network reporter..." << std::endl;
     try {
@@ -246,6 +373,8 @@ void InitializeSecuritySystem() {
         ExitProcess(1);
     }
 
+    if (GetLifecycleControl().shutdownRequested.load()) return;
+
     // --- LANGKAH KETIGA: CEK BAN STATUS DARI SERVER ---
     std::cout << "[INIT] Checking ban status with server..." << std::endl;
     try {
@@ -260,6 +389,8 @@ void InitializeSecuritySystem() {
                     L"Oblivion Hack Shield - Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
         ExitProcess(1);
     }
+
+    if (GetLifecycleControl().shutdownRequested.load()) return;
 
     // --- LANGKAH KEEMPAT: PERIKSA INTEGRITAS FILE ---
     std::cout << "[INIT] Performing file integrity check..." << std::endl;
@@ -276,6 +407,8 @@ void InitializeSecuritySystem() {
         ReportViolationAndExit(L"", "FILE_INTEGRITY_UNKNOWN_ERROR", "Unknown exception");
         return;
     }
+
+    if (GetLifecycleControl().shutdownRequested.load()) return;
 
     // --- LANGKAH KELIMA: AKTIFKAN SELF-INTEGRITY GUARD ---
     std::cout << "[INIT] Starting self-integrity guard..." << std::endl;
@@ -295,6 +428,8 @@ void InitializeSecuritySystem() {
         return;
     }
 
+    if (GetLifecycleControl().shutdownRequested.load()) return;
+
     // --- LANGKAH KEENAM: MULAI SISTEM PEMANTAUAN ---
     std::cout << "[INIT] Starting process watcher..." << std::endl;
     try {
@@ -310,66 +445,17 @@ void InitializeSecuritySystem() {
     }
 }
 
-// DLL Entry Point
+// DLL entry point: keep it minimal. No thread creation, joins, logging, deletes,
+// or other blocking cleanup are allowed while the loader lock is held.
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
-    switch (ul_reason_for_call) {
-    case DLL_PROCESS_ATTACH: {
-        // Mencegah thread detach notification untuk performa yang lebih baik
+    (void)lpReserved;
+
+    if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
         g_hSelfModule = hModule;
-
-        // PENTING: Jangan melakukan operasi blocking di DllMain!
-        // Pindahkan semua inisialisasi berat ke thread terpisah agar aplikasi bisa menampilkan window
-        // Buat thread untuk inisialisasi sistem keamanan
-        std::thread initThread(InitializeSecuritySystem);
-        initThread.detach(); // Detach thread agar bisa berjalan mandiri
-        break;
     }
 
-    case DLL_PROCESS_DETACH:
-        std::cout << "[CLEANUP] Shutting down Oblivion Hack Shield..." << std::endl;
-        
-        // Stop process watcher terlebih dahulu (ini akan stop monitoring)
-        if (g_pProcessWatcher) {
-            std::cout << "[CLEANUP] Stopping process watcher..." << std::endl;
-            try {
-                g_pProcessWatcher->Stop();
-                delete g_pProcessWatcher;
-                g_pProcessWatcher = nullptr;
-            } catch (...) {
-                // Ignore exceptions during cleanup
-            }
-        }
-        
-        // Kemudian stop self-integrity guard
-        if (g_pSelfIntegrityGuard) {
-            std::cout << "[CLEANUP] Stopping self-integrity guard..." << std::endl;
-            try {
-                g_pSelfIntegrityGuard->Stop();
-                delete g_pSelfIntegrityGuard;
-                g_pSelfIntegrityGuard = nullptr;
-            } catch (...) {
-                // Ignore exceptions during cleanup
-            }
-        }
-        
-        // Terakhir cleanup network reporter
-        if (g_pNetworkReporter) {
-            std::cout << "[CLEANUP] Cleaning up network reporter..." << std::endl;
-            try {
-                delete g_pNetworkReporter;
-                g_pNetworkReporter = nullptr;
-            } catch (...) {
-                // Ignore exceptions during cleanup
-            }
-        }
-        
-        std::cout << "[CLEANUP] Shutdown complete" << std::endl;
-        break;
-
-    case DLL_THREAD_ATTACH:
-    case DLL_THREAD_DETACH:
-        break;
-    }
+    // On explicit unload, the host must call Oblivion_Shutdown() first.
+    // Process termination is handled by the operating system.
     return TRUE;
 }
