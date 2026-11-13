@@ -23,6 +23,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential libssl-dev
+      - name: Test heartbeat protocol helpers
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror tests/heartbeat_protocol_test.cpp -o /tmp/heartbeat_protocol_test
+          /tmp/heartbeat_protocol_test
       - name: Build Linux server
         run: |
           make -C server clean
