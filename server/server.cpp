@@ -33,7 +33,6 @@
 #define MAX_TYPE_LEN 64
 #define MAX_DETAILS_LEN 2048
 #define MAX_HWID_LEN 128
-#define MAX_SECRET_LEN 128
 // Ambil secret yang di-obfuscate agar tidak muncul sebagai literal.
 static std::string SERVER_SECRET = OblivionServer::GetServerSecret();
 #define BAN_LIST_FILE "bans.txt"
@@ -456,7 +455,7 @@ bool IsSeriousViolation(const std::string& type) {
 
 // Fungsi untuk mencoba extract HWID dari raw data (best effort)
 std::string ExtractHWIDFromRawData(const std::string& rawData) {
-    // Format yang diharapkan: TYPE:DETAILS:HWID:SECRET;
+    // Format yang diharapkan: TYPE:DETAILS:HWID:CHALLENGE_NONCE:MAC;
     // Kita akan coba extract HWID bahkan jika format tidak sempurna
     
     size_t firstColon = rawData.find(':');
