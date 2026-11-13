@@ -353,7 +353,7 @@ void AddToBanList(const std::string& hwid) {
         return;
     }
 
-    banFile << hwid << '\\n';
+    banFile << hwid << '\n';
     banFile.flush();
     if (!banFile.good()) {
         std::cerr << "[ERROR] Gagal menyimpan HWID ke ban list." << std::endl;
