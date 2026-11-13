@@ -145,6 +145,7 @@
   <ItemGroup>
     <ClInclude Include="framework.h" />
     <ClInclude Include="include\heartbeat_protocol.h" />
+    <ClInclude Include="..\common\heartbeat_protocol.h" />
     <ClInclude Include="include\secret_obf.h" />
     <ClInclude Include="include\AntiDebug.h" />
     <ClInclude Include="include\advanced_process_heuristics.h" />

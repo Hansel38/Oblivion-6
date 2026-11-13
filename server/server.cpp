@@ -863,19 +863,16 @@ void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbea
                                         const std::string hmac = resp.substr(col[5] + 1);
 
                                         const bool statusWellFormed =
-                                            status.size() == 3 &&
-                                            (status[0] == '0' || status[0] == '1') &&
-                                            status[1] == '|' &&
-                                            (status[2] == '0' || status[2] == '1');
+                                            Oblivion::IsValidClientStatus(status);
 
                                         if (pseq != seq || pnonce != ping_nonce || phwid != hwid ||
                                             !statusWellFormed) {
                                             ++consecutiveMiss;
                                             ++totalMisses;
                                         } else {
-                                            const std::string data = "PONG:v1:" +
-                                                std::to_string(pseq) + ":" + clientTsText + ":" +
-                                                std::to_string(pnonce) + ":" + status + ":" + phwid;
+                                            const std::string data =
+                                                Oblivion::BuildPongAuthData(
+                                                    pseq, clientTsText, pnonce, status, phwid);
                                             const std::string expect = hmacSha256(sessionKey, data);
                                             if (!ConstantTimeEquals(expect, hmac)) {
                                                 ++consecutiveMiss;

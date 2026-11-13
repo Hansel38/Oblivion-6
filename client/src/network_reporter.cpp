@@ -623,15 +623,15 @@ namespace Oblivion {
                         const std::string clientTimestamp =
                             std::to_string(static_cast<uint64_t>(GetTickCount64()));
                         const uint8_t clientStatus = m_clientStatus.load();
-                        const std::string status =
-                            std::string((clientStatus & 0x01) ? "1" : "0") + "|" +
-                            ((clientStatus & 0x02) ? "1" : "0");
-                        // Authenticate every mutable PONG field, including status and
-                        // the client timestamp, under a message-specific versioned label.
+                        const std::string status = SerializeClientStatus(
+                            (clientStatus & 0x01) != 0, (clientStatus & 0x02) != 0);
                         const std::string pongFields = std::to_string(seq) + ":" +
                             clientTimestamp + ":" + std::to_string(nonce) + ":" +
                             status + ":" + m_hwid;
-                        const std::string mac = HmacSha256(sessionKey, "PONG:v1:" + pongFields);
+                        const std::string mac = HmacSha256(
+                            sessionKey, BuildPongAuthData(
+                                seq, clientTimestamp, nonce, status, m_hwid));
+                        if (!IsValidClientStatus(status)) break;
                         if (mac.size() != 64) break;
                         const std::string pong = "PONG:" + pongFields + ":" + mac + ";";
                         if (!SendAll(socket, pong)) break;

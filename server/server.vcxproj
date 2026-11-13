@@ -137,6 +137,7 @@
   <ItemGroup>
     <ClInclude Include="include\secret_obf.h" />
     <ClInclude Include="include\socket_framing.h" />
+    <ClInclude Include="..\common\heartbeat_protocol.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
