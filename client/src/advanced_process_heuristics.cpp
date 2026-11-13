@@ -43,6 +43,12 @@ typedef struct _SYSTEM_HANDLE_INFORMATION {
 extern void ReportViolationAndExit(const std::wstring& message, const std::string& type, const std::string& details);
 
 namespace {
+    enum class ProcessWhitelistResult {
+        NotWhitelisted,
+        Whitelisted,
+        Incomplete
+    };
+
     // Cache untuk signature verification - menghindari re-verify proses yang sama
     // Key: Process Path (lowercase), Value: Is Verified (true/false)
     std::map<std::wstring, bool> g_signatureCache;
@@ -346,7 +352,13 @@ namespace {
         return GetProcessImagePath(processId, processPath) ? processPath : L"";
     }
 
-    bool IsProcessWhitelisted(const std::wstring& processName, DWORD processId = 0) {
+    ProcessWhitelistResult IsProcessWhitelisted(
+        const std::wstring& processName,
+        DWORD processId = 0,
+        std::wstring* scanIssue = nullptr) {
+        if (scanIssue != nullptr) {
+            scanIssue->clear();
+        }
         std::wstring lowerName = ToLowerCopy(processName);
         
         // Cek apakah process ada di whitelist
@@ -359,7 +371,7 @@ namespace {
         }
         
         if (!isInWhitelist) {
-            return false; // Tidak ada di whitelist
+            return ProcessWhitelistResult::NotWhitelisted;
         }
         
         // Cek apakah proses ini memerlukan verifikasi signature
@@ -373,21 +385,29 @@ namespace {
         
         // Jika tidak perlu verifikasi signature (proses Windows system), langsung return true
         if (!needsSignatureVerification) {
-            return true;
+            return ProcessWhitelistResult::Whitelisted;
         }
         
         // Proses memerlukan verifikasi signature - cegah spoofing!
         if (processId == 0) {
-            // Jika PID tidak diberikan, tidak bisa verifikasi - anggap tidak aman
-            return false;
+            if (scanIssue != nullptr) {
+                *scanIssue = L"signature whitelist check requires a process ID";
+            }
+            return ProcessWhitelistResult::Incomplete;
         }
         
         // Dapatkan full path dari process
-        std::wstring processPath = GetProcessPath(processId);
-        if (processPath.empty()) {
-            // Tidak bisa mendapatkan path - suspicious
-            std::wcout << L"[AdvHeuristics] WARNING: Cannot get path for whitelisted process: " << processName << L" (PID: " << processId << L")" << std::endl;
-            return false;
+        std::wstring processPath;
+        DWORD pathError = ERROR_SUCCESS;
+        if (!GetProcessImagePath(processId, processPath, &pathError)) {
+            if (scanIssue != nullptr) {
+                *scanIssue = L"signature whitelist image-path query failed; error=" +
+                    std::to_wstring(pathError);
+            }
+            std::wcout << L"[AdvHeuristics] WARNING: Cannot verify whitelist path for process: "
+                       << processName << L" (PID: " << processId
+                       << L", error: " << pathError << L")" << std::endl;
+            return ProcessWhitelistResult::Incomplete;
         }
         
         // Normalize path untuk cache (lowercase)
@@ -407,7 +427,7 @@ namespace {
             }
             // Jika valid, tidak perlu log (sudah di-log saat pertama kali verify)
             
-            return cachedResult;
+            return cachedResult ? ProcessWhitelistResult::Whitelisted : ProcessWhitelistResult::NotWhitelisted;
         }
         
         // Dapatkan expected publisher dari DigitalSignatureValidator
@@ -416,8 +436,12 @@ namespace {
         
         if (it == publisherMap.end()) {
             // Tidak ada expected publisher - ini seharusnya tidak terjadi karena kita sudah filter di atas
-            std::wcout << L"[AdvHeuristics] WARNING: No expected publisher for: " << processName << std::endl;
-            return false;
+            std::wcout << L"[AdvHeuristics] WARNING: No expected publisher for: "
+                       << processName << std::endl;
+            if (scanIssue != nullptr) {
+                *scanIssue = L"expected publisher is missing from the whitelist configuration";
+            }
+            return ProcessWhitelistResult::Incomplete;
         }
         
         const std::wstring& expectedPublisher = it->second;
@@ -468,13 +492,13 @@ namespace {
             std::wcout << L"[AdvHeuristics] Reporting spoofing to server..." << std::endl;
             ReportViolationAndExit(L"", "SIGNATURE_SPOOFING", details_utf8);
             
-            return false; // Tidak akan tercapai karena ReportViolationAndExit memanggil ExitProcess
+            return ProcessWhitelistResult::NotWhitelisted; // Normally unreachable after ExitProcess
         }
         
         // Signature verified successfully
         std::wcout << L"[AdvHeuristics] Signature verified: " << processName 
                << L" (PID: " << processId << L") - Publisher: " << expectedPublisher << std::endl;
-        return true;
+        return ProcessWhitelistResult::Whitelisted;
     }
 
     // Enable SeDebugPrivilege and verify that Windows assigned the privilege.
@@ -944,10 +968,22 @@ namespace Oblivion {
 
                 std::wstring processName = pe32.szExeFile;
 
-                // Skip whitelisted system processes untuk menghindari false positive
-                // IMPORTANT: Sekarang dengan signature verification untuk mencegah spoofing
-                if (IsProcessWhitelisted(processName, pe32.th32ProcessID)) {
+                // Skip only processes whose whitelist status was positively verified.
+                // An incomplete signature/path check must not silently count as trusted.
+                std::wstring whitelistIssue;
+                const ProcessWhitelistResult whitelistResult =
+                    IsProcessWhitelisted(
+                        processName, pe32.th32ProcessID, &whitelistIssue);
+                if (whitelistResult == ProcessWhitelistResult::Whitelisted) {
                     continue;
+                }
+                if (whitelistResult == ProcessWhitelistResult::Incomplete) {
+                    const std::wstring warning =
+                        L"[AdvHeuristics] Signature whitelist check incomplete for " +
+                        processName + L" (PID: " +
+                        std::to_wstring(pe32.th32ProcessID) + L"): " + whitelistIssue;
+                    OutputDebugStringW(warning.c_str());
+                    OutputDebugStringW(L"\\n");
                 }
 
 #ifdef _DEBUG
@@ -1464,9 +1500,20 @@ namespace Oblivion {
             }
 
             const std::wstring processName = GetProcessName(handle.ProcessId);
-            if (!processName.empty() &&
-                IsProcessWhitelisted(processName, handle.ProcessId)) {
-                continue;
+            if (!processName.empty()) {
+                std::wstring whitelistIssue;
+                const ProcessWhitelistResult whitelistResult =
+                    IsProcessWhitelisted(
+                        processName, handle.ProcessId, &whitelistIssue);
+                if (whitelistResult == ProcessWhitelistResult::Whitelisted) {
+                    continue;
+                }
+                if (whitelistResult == ProcessWhitelistResult::Incomplete) {
+                    setScanIssue(
+                        L"signature whitelist check incomplete for handle owner PID " +
+                        std::to_wstring(handle.ProcessId) + L": " + whitelistIssue);
+                    incomplete = true;
+                }
             }
 
             HANDLE hOwnerProcess =
