@@ -281,17 +281,38 @@ namespace Oblivion {
                         std::wcout << L"[SCAN] Memory scan scheduled for: " << processName << L" (PID: " << processId << L")" << std::endl;
                     }
 
-                    // Heuristik perilaku
-                    if (Oblivion::IsSuspiciousBehavior(processId)) {
-                        Oblivion::LogSuspiciousProcess(processName, processId, "Suspicious module or injection detected");
-                        // Optional: langsung blokir
+                    // Access-denied processes (for example protected system
+                    // processes) are incomplete, not clean and not proof of cheating.
+                    std::string behaviorScanIssue;
+                    const Oblivion::BehaviorScanResult behaviorResult =
+                        Oblivion::IsSuspiciousBehavior(processId, behaviorScanIssue);
+                    if (behaviorResult == Oblivion::BehaviorScanResult::Suspicious) {
+                        Oblivion::LogSuspiciousProcess(
+                            processName, processId,
+                            "Suspicious module or injection detected");
                         std::string details_utf8;
-                        int size_needed = WideCharToMultiByte(CP_UTF8, 0, &processName[0], (int)processName.size(), NULL, 0, NULL, NULL);
+                        const int size_needed = WideCharToMultiByte(
+                            CP_UTF8, 0, processName.c_str(),
+                            static_cast<int>(processName.size()),
+                            NULL, 0, NULL, NULL);
                         if (size_needed > 0) {
-                            details_utf8.assign(size_needed, 0);
-                            WideCharToMultiByte(CP_UTF8, 0, &processName[0], (int)processName.size(), &details_utf8[0], size_needed, NULL, NULL);
+                            details_utf8.resize(static_cast<size_t>(size_needed));
+                            if (WideCharToMultiByte(
+                                    CP_UTF8, 0, processName.c_str(),
+                                    static_cast<int>(processName.size()),
+                                    &details_utf8[0], size_needed,
+                                    NULL, NULL) != size_needed) {
+                                details_utf8.clear();
+                            }
                         }
-                        ReportViolationAndExit(L"", "SUSPICIOUS_BEHAVIOR", details_utf8);
+                        ReportViolationAndExit(
+                            L"", "SUSPICIOUS_BEHAVIOR", details_utf8);
+                    } else if (behaviorResult == Oblivion::BehaviorScanResult::Incomplete) {
+                        const std::string warning =
+                            "[ProcessWatcher] Behavior inspection incomplete for PID " +
+                            std::to_string(processId) + ": " + behaviorScanIssue;
+                        OutputDebugStringA(warning.c_str());
+                        OutputDebugStringA("\n");
                     }
                 }
 
