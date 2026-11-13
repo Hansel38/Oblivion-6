@@ -613,6 +613,15 @@ namespace Oblivion {
         std::wstring& failureReason) {
         failureReason.clear();
 
+        if (processPath.empty()) {
+            failureReason = L"process image path is empty";
+            return ProcessSignatureResult::Incomplete;
+        }
+        if (expectedPublisher.empty()) {
+            failureReason = L"expected publisher configuration is empty";
+            return ProcessSignatureResult::Incomplete;
+        }
+
         LONG trustStatus = ERROR_SUCCESS;
         if (!VerifyFileSignature(processPath, &trustStatus)) {
             failureReason =
