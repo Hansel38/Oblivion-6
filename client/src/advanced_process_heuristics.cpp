@@ -105,13 +105,13 @@ namespace {
 
     // Window class signatures untuk berbagai versi CE dan tools
     const std::vector<std::wstring> kSuspiciousWindowClasses = {
-        // Cheat Engine main forms (Lazarus/FPC classes)
+        // Cheat Engine-specific main forms.
+        // Generic TForm1/TMainForm names are intentionally excluded: they are
+        // common application form names and are not reliable cheat indicators.
         L"tceform",
         L"tcemainform",
         L"tcheatengine",
-        L"tform1",           // Generic Lazarus form - CE sometimes uses this
-        L"tmainform",        // Another generic CE main form name
-        
+
         // CE dialogs & windows
         L"tmemoryview",
         L"tmemorybrowser",
@@ -137,9 +137,8 @@ namespace {
         L"tluaengine",
         L"tluaform",
         
-        // x64dbg
-        L"qt5qwindowicon",
-        L"qt5qwindowowndc",
+        // x64dbg. Generic Qt window classes are excluded because Qt creates
+        // them from window flags for many unrelated applications.
         L"x64dbgmain",
         
         // OllyDbg variants
@@ -148,7 +147,6 @@ namespace {
         
         // IDA Pro
         L"idawindow",
-        L"qt5156qwindowicon",
         
         // Other debuggers
         L"windbgframeclass",
