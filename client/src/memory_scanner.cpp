@@ -552,32 +552,65 @@ namespace Oblivion {
         }
 
         // STEP 5: Get module base address from memory
-        HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
+        HANDLE hSnapshot = CreateToolhelp32Snapshot(
+            TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
         if (hSnapshot == INVALID_HANDLE_VALUE) {
-            std::string details = "Failed to enumerate modules";
-            ReportViolationAndExit(L"", "MODULE_ENUM_FAILED", details);
+            const DWORD error = GetLastError();
+            ReportViolationAndExit(
+                L"", "MODULE_ENUMERATION_UNAVAILABLE",
+                "CreateToolhelp32Snapshot failed during baseline creation; error=" +
+                    std::to_string(error));
             return;
         }
 
-        MODULEENTRY32W me32;
+        MODULEENTRY32W me32{};
         me32.dwSize = sizeof(MODULEENTRY32W);
 
-        if (Module32FirstW(hSnapshot, &me32)) {
+        uintptr_t moduleBaseAddress = 0;
+        bool foundExecutableModule = false;
+        DWORD enumerationError = ERROR_SUCCESS;
+        if (!Module32FirstW(hSnapshot, &me32)) {
+            enumerationError = GetLastError();
+        } else {
             do {
                 if (_wcsicmp(me32.szExePath, filePath.c_str()) == 0) {
-                    m_moduleBaseAddress = reinterpret_cast<uintptr_t>(me32.modBaseAddr);
+                    moduleBaseAddress =
+                        reinterpret_cast<uintptr_t>(me32.modBaseAddr);
+                    foundExecutableModule = true;
                     break;
                 }
-            } while (Module32NextW(hSnapshot, &me32));
+
+                if (!Module32NextW(hSnapshot, &me32)) {
+                    enumerationError = GetLastError();
+                    break;
+                }
+            } while (true);
         }
 
         CloseHandle(hSnapshot);
 
-        if (m_moduleBaseAddress == 0) {
-            std::string details = "Failed to find module base address";
-            ReportViolationAndExit(L"", "MODULE_BASE_NOT_FOUND", details);
+        if (!foundExecutableModule) {
+            if (enumerationError == ERROR_NO_MORE_FILES) {
+                ReportViolationAndExit(
+                    L"", "MODULE_BASE_NOT_FOUND",
+                    "Module snapshot did not contain the executable during baseline creation");
+            } else {
+                ReportViolationAndExit(
+                    L"", "MODULE_ENUMERATION_UNAVAILABLE",
+                    "Module enumeration failed during baseline creation; error=" +
+                        std::to_string(enumerationError));
+            }
             return;
         }
+
+        if (moduleBaseAddress == 0) {
+            ReportViolationAndExit(
+                L"", "MODULE_ENUMERATION_UNAVAILABLE",
+                "Executable module entry was found without a valid base address");
+            return;
+        }
+
+        m_moduleBaseAddress = moduleBaseAddress;
 
         // STEP 6: Create baseline untuk setiap executable section
         for (const auto& section : sections) {
