@@ -1076,6 +1076,14 @@ namespace Oblivion {
         scanIssue.clear();
         bool incomplete = false;
 
+        struct ProcessHandleDeleter {
+            void operator()(HANDLE handle) const noexcept {
+                if (handle != NULL) {
+                    CloseHandle(handle);
+                }
+            }
+        };
+
         const auto setScanIssue = [&scanIssue](const std::wstring& issue) {
             if (scanIssue.empty()) {
                 scanIssue = issue;
@@ -1107,6 +1115,26 @@ namespace Oblivion {
                 std::to_wstring(GetLastError()));
             return HandleScanResult::Incomplete;
         }
+
+        const DWORD selfPid = GetCurrentProcessId();
+        HANDLE hSelfProcess = OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, FALSE, selfPid);
+        if (hSelfProcess == NULL) {
+            setScanIssue(
+                L"OpenProcess for scanner process failed; error=" +
+                std::to_wstring(GetLastError()));
+            return HandleScanResult::Incomplete;
+        }
+        std::unique_ptr<void, ProcessHandleDeleter> selfProcessHandle(hSelfProcess);
+
+        const ULONG_PTR selfHandleValue =
+            reinterpret_cast<ULONG_PTR>(hSelfProcess);
+        if (selfHandleValue > (std::numeric_limits<USHORT>::max)()) {
+            setScanIssue(L"scanner process handle exceeds legacy handle-table representation");
+            return HandleScanResult::Incomplete;
+        }
+        const USHORT selfHandleEntry =
+            static_cast<USHORT>(selfHandleValue);
 
         constexpr ULONG kInitialBufferSize = 0x10000;
         constexpr ULONG kMaximumBufferSize = 128u * 1024u * 1024u;
@@ -1194,15 +1222,23 @@ namespace Oblivion {
             return HandleScanResult::Incomplete;
         }
 
-        struct ProcessHandleDeleter {
-            void operator()(HANDLE handle) const noexcept {
-                if (handle != NULL) {
-                    CloseHandle(handle);
-                }
+        // ObjectTypeNumber is a runtime index, not a stable constant. Resolve the
+        // process-object index from our own known process handle in this snapshot.
+        BYTE processObjectType = 0;
+        bool foundSelfProcessHandle = false;
+        for (ULONG i = 0; i < handleInfo->HandleCount; ++i) {
+            const SYSTEM_HANDLE& handle = handleInfo->Handles[i];
+            if (handle.ProcessId == selfPid && handle.Handle == selfHandleEntry) {
+                processObjectType = handle.ObjectTypeNumber;
+                foundSelfProcessHandle = true;
+                break;
             }
-        };
+        }
+        if (!foundSelfProcessHandle) {
+            setScanIssue(L"scanner process handle is absent from the system handle snapshot");
+            return HandleScanResult::Incomplete;
+        }
 
-        const DWORD selfPid = GetCurrentProcessId();
         const ACCESS_MASK dangerousMasks =
             PROCESS_VM_READ |
             PROCESS_VM_WRITE |
@@ -1218,7 +1254,7 @@ namespace Oblivion {
                 continue;
             }
 
-            if (handle.ObjectTypeNumber != 7 ||
+            if (handle.ObjectTypeNumber != processObjectType ||
                 (handle.GrantedAccess & dangerousMasks) == 0) {
                 continue;
             }
