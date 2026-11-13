@@ -1179,7 +1179,7 @@ namespace Oblivion {
                     }
 
                     const ULONG remainingCapacity = kMaximumBufferSize - returnLength;
-                    const ULONG extraCapacity = (std::min)(0x1000u, remainingCapacity);
+                    const ULONG extraCapacity = (std::min)(static_cast<ULONG>(0x1000), remainingCapacity);
                     nextBufferSize = returnLength + extraCapacity;
                 } else {
                     nextBufferSize = bufferSize <= kMaximumBufferSize / 2
