@@ -769,8 +769,15 @@ void HandleClient(SocketType clientSocket) {
                 bool isBanned = IsHWIDBanned(hwid);
                 
                 if (isBanned) {
-                    const char* kickCommand = "KICK;";
-                    OblivionNet::SendAll(clientSocket, kickCommand, strlen(kickCommand));
+                    const std::string kickMac = hmacSha256(
+                        SERVER_SECRET, "RESPONSE:KICK:" + hwid + ":" + challengeNonce);
+                    if (kickMac.size() != 64) {
+                        LogViolation("AUTH_CRYPTO_FAILURE", "Unable to authenticate ban response", hwid);
+                        closesocket_impl(clientSocket);
+                        return;
+                    }
+                    const std::string kickCommand = "KICK:" + kickMac + ";";
+                    OblivionNet::SendAll(clientSocket, kickCommand.data(), kickCommand.size());
                     std::cout << "[BAN] HWID [" << hwid << "] terdeteksi di ban list. Perintah KICK dikirim." << std::endl;
                     std::cout << "[INFO] Untuk unban, hapus HWID dari bans.txt dan restart client." << std::endl;
                 } else {
@@ -791,7 +798,14 @@ void HandleClient(SocketType clientSocket) {
                         closesocket_impl(clientSocket);
                         return;
                     }
-                    std::string response = "OK;SESSION_NONCE:" + sessionNonceText +
+                    const std::string statusMac = hmacSha256(
+                        SERVER_SECRET, "RESPONSE:OK:" + hwid + ":" + challengeNonce);
+                    if (statusMac.size() != 64) {
+                        LogViolation("AUTH_CRYPTO_FAILURE", "Unable to authenticate check-in response", hwid);
+                        closesocket_impl(clientSocket);
+                        return;
+                    }
+                    std::string response = "OK:" + statusMac + ";SESSION_NONCE:" + sessionNonceText +
                                            ";HB_CONFIG:" + std::to_string(cfg.interval_ms) +
                                            ":" + std::to_string(cfg.timeout_ms) +
                                            ";SESSION_AUTH:" + sessionAuthMac + ";";
@@ -824,7 +838,15 @@ void HandleClient(SocketType clientSocket) {
                             LogViolation("RNG_FAILURE", "Unable to generate secure heartbeat nonce", hwid);
                             break;
                         }
-                        std::string ping = "PING:" + std::to_string(seq) + ":" + std::to_string(ping_ts) + ":" + std::to_string(ping_nonce) + ";";
+                        const std::string pingAuthData =
+                            "PING:" + std::to_string(seq) + ":" + std::to_string(ping_ts) + ":" +
+                            std::to_string(ping_nonce) + ":" + hwid;
+                        const std::string pingMac = hmacSha256(sessionKey, pingAuthData);
+                        if (pingMac.size() != 64) {
+                            LogViolation("HB_CRYPTO_FAILURE", "Unable to authenticate heartbeat ping", hwid);
+                            break;
+                        }
+                        const std::string ping = pingAuthData + ":" + pingMac + ";";
                         if (!OblivionNet::SendAll(clientSocket, ping.data(), ping.size())) { 
                             std::cout << "[HEARTBEAT] Connection closed for HWID [" << hwid << "] - send failed" << std::endl; 
                             break; 
@@ -960,13 +982,19 @@ void HandleClient(SocketType clientSocket) {
                 
                 bool isBanned = IsHWIDBanned(hwid);
                 
+                const std::string responseStatus = isBanned ? "KICK" : "OK";
+                const std::string responseMac = hmacSha256(
+                    SERVER_SECRET, "RESPONSE:" + responseStatus + ":" + hwid + ":" + challengeNonce);
+                if (responseMac.size() != 64) {
+                    LogViolation("AUTH_CRYPTO_FAILURE", "Unable to authenticate report acknowledgement", hwid);
+                    closesocket_impl(clientSocket);
+                    return;
+                }
+                const std::string responseFrame = responseStatus + ":" + responseMac + ";";
+                OblivionNet::SendAll(clientSocket, responseFrame.data(), responseFrame.size());
                 if (isBanned) {
-                    const char* kickCommand = "KICK;";
-                    OblivionNet::SendAll(clientSocket, kickCommand, strlen(kickCommand));
                     std::cout << "[INFO] Perintah KICK dikirim ke client (HWID: " << hwid << ") - sudah ada di ban list." << std::endl;
                 } else {
-                    const char* acceptedCommand = "OK;";
-                    OblivionNet::SendAll(clientSocket, acceptedCommand, strlen(acceptedCommand));
                     std::cout << "[WARNING] Pelanggaran terdeteksi dari HWID [" << hwid
                               << "], dicatat ke log (menunggu review manual)." << std::endl;
                 }
