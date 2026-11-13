@@ -110,7 +110,7 @@ This checklist tracks findings from a source review. A checked item means the co
 ### P2 — Data handling and privacy
 
 - [ ] **P2 — Harden HWID generation.** Current HWID uses CPU brand, motherboard UUID, and disk serial, with `UNKNOWN` fallbacks. Handle COM initialization outcomes correctly, normalize values, and document privacy/retention policy.
-- [ ] **P2 — Fix COM apartment handling.** `CoInitializeEx` can return `S_FALSE` (successful initialization) and `RPC_E_CHANGED_MODE`; only call `CoUninitialize` when this call successfully initialized COM.
+- [x] **P2 — Fix COM apartment handling.** A scoped COM initializer treats both `S_OK` and `S_FALSE` as successful initialization and balances either with exactly one `CoUninitialize`; `RPC_E_CHANGED_MODE` leaves the caller's existing COM apartment untouched. Runtime validation under both apartment models remains required.
 - [ ] **P2 — Avoid leaking hardware identifiers in console output.** Redact or pseudonymize HWID in operational logs.
 - [ ] **P2 — Add log rotation and access controls.** `violations.log` currently grows without bound and may contain sensitive process/path data.
 - [ ] **P2 — Synchronize ban-list writes.** `violations.log` writes are now serialized, but ban-list reads/writes still need an explicit synchronization and atomic update strategy.
