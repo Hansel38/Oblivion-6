@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
-#include <fstream>
 #include <limits>
 #include <new>
 #include <stdexcept>
@@ -15,6 +14,22 @@
 extern void ReportViolationAndExit(const std::wstring& message, const std::string& type, const std::string& details);
 
 namespace {
+    class ScopedFileHandle {
+    public:
+        explicit ScopedFileHandle(HANDLE handle) : m_handle(handle) {}
+        ~ScopedFileHandle() {
+            if (m_handle != INVALID_HANDLE_VALUE) {
+                CloseHandle(m_handle);
+            }
+        }
+        ScopedFileHandle(const ScopedFileHandle&) = delete;
+        ScopedFileHandle& operator=(const ScopedFileHandle&) = delete;
+        HANDLE get() const { return m_handle; }
+
+    private:
+        HANDLE m_handle;
+    };
+
     constexpr auto kVerificationInterval = std::chrono::seconds(5);
 
     bool GetModulePath(HMODULE module, std::wstring& path) {
@@ -264,32 +279,33 @@ namespace Oblivion {
             return true;
         }
 
-        std::ifstream file(m_modulePath, std::ios::binary | std::ios::ate);
-        if (!file.is_open()) {
+        // Keep the file stable while taking the disk image snapshot. The
+        // previous ifstream default allowed concurrent write/delete sharing.
+        ScopedFileHandle file(CreateFileW(
+            m_modulePath.c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+            nullptr));
+        if (file.get() == INVALID_HANDLE_VALUE) {
             return false;
         }
 
-        const std::streampos fileEnd = file.tellg();
-        if (fileEnd <= std::streampos(0)) {
+        LARGE_INTEGER fileSize{};
+        if (!GetFileSizeEx(file.get(), &fileSize) || fileSize.QuadPart <= 0) {
             return false;
         }
 
-        const std::streamoff fileSize = static_cast<std::streamoff>(fileEnd);
-        if (fileSize <= 0) {
-            return false;
-        }
-
-        const std::uintmax_t unsignedFileSize =
-            static_cast<std::uintmax_t>(fileSize);
+        const std::uint64_t unsignedFileSize =
+            static_cast<std::uint64_t>(fileSize.QuadPart);
         if (unsignedFileSize >
-                static_cast<std::uintmax_t>((std::numeric_limits<size_t>::max)()) ||
-            unsignedFileSize >
-                static_cast<std::uintmax_t>((std::numeric_limits<std::streamsize>::max)())) {
+            static_cast<std::uint64_t>((std::numeric_limits<size_t>::max)())) {
             return false;
         }
 
-        const size_t imageSize = static_cast<size_t>(fileSize);
-        const std::streamsize readSize = static_cast<std::streamsize>(fileSize);
+        const size_t imageSize = static_cast<size_t>(fileSize.QuadPart);
         std::vector<uint8_t> loadedImage;
         if (imageSize > loadedImage.max_size()) {
             return false;
@@ -303,19 +319,29 @@ namespace Oblivion {
             return false;
         }
 
-        file.seekg(0, std::ios::beg);
-        if (!file) {
+        size_t totalRead = 0;
+        while (totalRead < imageSize) {
+            const size_t remaining = imageSize - totalRead;
+            const DWORD requestSize = static_cast<DWORD>((std::min)(
+                remaining,
+                static_cast<size_t>((std::numeric_limits<DWORD>::max)())));
+            DWORD bytesRead = 0;
+            if (!ReadFile(file.get(), loadedImage.data() + totalRead,
+                          requestSize, &bytesRead, nullptr) ||
+                bytesRead == 0) {
+                return false;
+            }
+            totalRead += static_cast<size_t>(bytesRead);
+        }
+
+        LARGE_INTEGER finalFileSize{};
+        if (!GetFileSizeEx(file.get(), &finalFileSize) ||
+            finalFileSize.QuadPart != fileSize.QuadPart) {
             return false;
         }
 
-        file.read(reinterpret_cast<char*>(loadedImage.data()), readSize);
-        if (!file || file.gcount() != readSize) {
-            // Keep the member image empty; a later Start() must retry the read.
-            return false;
-        }
-
-        // Publish only a complete image. A partial read is discarded with the
-        // local temporary instead of leaving a non-empty member that looks loaded.
+        // Publish only a complete, stable image. A partial read is discarded
+        // with the local temporary so a later Start() can retry.
         m_diskImage.swap(loadedImage);
         return true;
     }
