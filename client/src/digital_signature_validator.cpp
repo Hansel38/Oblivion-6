@@ -310,6 +310,34 @@ namespace Oblivion {
         std::wstring programFilesX86;
         const bool haveProgramFiles = GetEnvironmentPath(L"ProgramFiles", programFiles);
         const bool haveProgramFilesX86 = GetEnvironmentPath(L"ProgramFiles(x86)", programFilesX86);
+
+        SYSTEM_INFO nativeSystemInfo{};
+        GetNativeSystemInfo(&nativeSystemInfo);
+        const bool is64BitWindows =
+            nativeSystemInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64 ||
+            nativeSystemInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_IA64 ||
+#ifdef PROCESSOR_ARCHITECTURE_ARM64
+            nativeSystemInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_ARM64 ||
+#endif
+            false;
+
+        // Directory classification controls whether legacy unsigned-DLL
+        // exceptions can apply. If a protected root cannot be resolved,
+        // continuing would let modules fall through to the weaker allowlist.
+        if (!haveWindowsDirectory || !haveProgramFiles ||
+            (is64BitWindows && !haveProgramFilesX86)) {
+            std::string details =
+                "Unable to resolve protected module trust roots; WindowsDirectory=" +
+                std::string(haveWindowsDirectory ? "available" : "unavailable") +
+                ", ProgramFiles=" +
+                std::string(haveProgramFiles ? "available" : "unavailable") +
+                ", ProgramFiles(x86)=" +
+                std::string(haveProgramFilesX86 ? "available" : "unavailable");
+            ReportViolationAndExit(
+                L"", "MODULE_TRUST_ROOT_UNAVAILABLE", details);
+            return;
+        }
+
         programFiles = NormalizePathForComparison(programFiles);
         programFilesX86 = NormalizePathForComparison(programFilesX86);
 
