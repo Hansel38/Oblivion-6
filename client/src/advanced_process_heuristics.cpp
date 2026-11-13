@@ -1013,7 +1013,7 @@ namespace Oblivion {
                         L" (PID: " + std::to_wstring(pe32.th32ProcessID) +
                         L"): " + scanIssue;
                     OutputDebugStringW(warning.c_str());
-                    OutputDebugStringW(L"\\n");
+                    OutputDebugStringW(L"\n");
                 }
 
                 indicator.clear();
@@ -1033,7 +1033,7 @@ namespace Oblivion {
                         L" (PID: " + std::to_wstring(pe32.th32ProcessID) +
                         L"): " + scanIssue;
                     OutputDebugStringW(warning.c_str());
-                    OutputDebugStringW(L"\\n");
+                    OutputDebugStringW(L"\n");
                 }
 
                 indicator.clear();
