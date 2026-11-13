@@ -665,29 +665,39 @@ namespace Oblivion {
                 // berarti sudah ada injection SEBELUM kita load!
                 // Tapi HANYA untuk .text section (core code)
                 // CATATAN: Relocations (ASLR) dapat menyebabkan perbedaan kecil yang legitimate
-                if (baseline.diskCRC32 != baseline.memoryCRC32 && baseline.isCodeSection) {
-                    // Hitung perbedaan byte-byte untuk membedakan relocations dari injection
-                    // Relocations biasanya hanya mengubah beberapa bytes (< 0.1% dari section)
-                    size_t rawDataSize = section.rawDataSize;
-                    if (rawDataSize > 0 && section.rawDataOffset <= fileData.size() &&
-                        rawDataSize <= fileData.size() - section.rawDataOffset) {
-                        const uint8_t* diskData = fileData.data() + section.rawDataOffset;
-                        size_t differentBytes = 0;
-                        size_t bytesToCompare = (sizeToHash < rawDataSize) ? sizeToHash : rawDataSize;
-                        
-                        // Hitung jumlah byte yang berbeda
-                        for (size_t i = 0; i < bytesToCompare; i++) {
-                            if (diskData[i] != memoryAddr[i]) {
-                                differentBytes++;
-                            }
+                if (baseline.isCodeSection) {
+                    // Compare the same mapped span on both sides. Bytes beyond
+                    // SizeOfRawData are zero-filled by the PE image loader.
+                    const size_t rawDataSize = static_cast<size_t>(section.rawDataSize);
+                    const size_t rawDataOffset = static_cast<size_t>(section.rawDataOffset);
+                    if (rawDataOffset > fileData.size() ||
+                        rawDataSize > fileData.size() - rawDataOffset) {
+                        ReportViolationAndExit(L"", "DISK_SECTION_UNAVAILABLE",
+                                               "Executable section raw data is outside the validated file range");
+                        return;
+                    }
+
+                    const uint8_t* diskData = fileData.data() + rawDataOffset;
+                    size_t differentBytes = 0;
+                    const size_t bytesToCompare = sizeToHash;
+
+                    // Compare initialized bytes and the zero-filled virtual tail.
+                    for (size_t i = 0; i < bytesToCompare; ++i) {
+                        const uint8_t expectedByte = i < rawDataSize ? diskData[i] : 0;
+                        if (expectedByte != memoryAddr[i]) {
+                            ++differentBytes;
                         }
-                        
-                        // Relocations biasanya mengubah < 0.1% dari section (atau < 100 bytes untuk section kecil)
-                        // Jika perbedaannya terlalu besar, kemungkinan ada injection
-                        double diffPercentage = (bytesToCompare > 0) ? (100.0 * differentBytes / bytesToCompare) : 0.0;
-                        size_t diffThreshold = (bytesToCompare > 100000) ? (bytesToCompare / 1000) : 100; // 0.1% atau max 100 bytes
-                        
-                        if (differentBytes > diffThreshold || diffPercentage > 0.1) {
+                    }
+
+                    // Keep the existing tolerance for a small number of relocation changes.
+                    const double diffPercentage = bytesToCompare > 0
+                        ? (100.0 * static_cast<double>(differentBytes) / static_cast<double>(bytesToCompare))
+                        : 0.0;
+                    const size_t diffThreshold = bytesToCompare > 100000
+                        ? (bytesToCompare / 1000)
+                        : 100;
+
+                    if (differentBytes > diffThreshold || diffPercentage > 0.1) {
                             // Extract executable filename from path
                             std::string exeName = "unknown";
                             if (!filePath.empty()) {
