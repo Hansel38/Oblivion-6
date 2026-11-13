@@ -4,7 +4,6 @@
 #include <iostream>
 #include <iomanip>
 #include <string>
-#include <fstream>
 #include <algorithm>
 #include <wincrypt.h>
 #include <sstream>
@@ -14,6 +13,22 @@
 #pragma comment(lib, "crypt32.lib")
 
 namespace {
+    class ScopedFileHandle {
+    public:
+        explicit ScopedFileHandle(HANDLE handle) : m_handle(handle) {}
+        ~ScopedFileHandle() {
+            if (m_handle != INVALID_HANDLE_VALUE) {
+                CloseHandle(m_handle);
+            }
+        }
+        ScopedFileHandle(const ScopedFileHandle&) = delete;
+        ScopedFileHandle& operator=(const ScopedFileHandle&) = delete;
+        HANDLE get() const { return m_handle; }
+
+    private:
+        HANDLE m_handle;
+    };
+
     bool IsReadableMemoryRange(const void* address, size_t length) {
         if (length == 0) return true;
         uintptr_t cursor = reinterpret_cast<uintptr_t>(address);
@@ -211,35 +226,68 @@ namespace Oblivion {
     }
 
     // === LAYER 1: PE Structure Validation ===\n    
-    bool MemoryScanner::ReadExecutableFile(const std::wstring& filePath, std::vector<uint8_t>& fileData) {
+    bool MemoryScanner::ReadExecutableFile(
+        const std::wstring& filePath, std::vector<uint8_t>& fileData) {
         fileData.clear();
-        std::ifstream file(filePath, std::ios::binary | std::ios::ate);
-        if (!file.is_open()) return false;
 
-        const std::streamoff fileSize = static_cast<std::streamoff>(file.tellg());
+        // Hold a read-only sharing handle for the entire snapshot. This denies
+        // concurrent write/delete opens, so the PE bytes cannot change between
+        // the size query and the final read.
+        ScopedFileHandle file(CreateFileW(
+            filePath.c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+            nullptr));
+        if (file.get() == INVALID_HANDLE_VALUE) return false;
+
+        LARGE_INTEGER fileSize{};
+        if (!GetFileSizeEx(file.get(), &fileSize)) return false;
+
         // This reader is for the anti-cheat/game executable image, not arbitrary archives.
-        constexpr std::streamoff kMaxExecutableImageSize = 512LL * 1024LL * 1024LL;
-        if (fileSize <= 0 || fileSize > kMaxExecutableImageSize ||
-            static_cast<uint64_t>(fileSize) >
+        constexpr uint64_t kMaxExecutableImageSize = 512ULL * 1024ULL * 1024ULL;
+        if (fileSize.QuadPart <= 0 ||
+            static_cast<uint64_t>(fileSize.QuadPart) > kMaxExecutableImageSize ||
+            static_cast<uint64_t>(fileSize.QuadPart) >
                 static_cast<uint64_t>((std::numeric_limits<size_t>::max)())) {
             return false;
         }
 
-        if (!file.seekg(0, std::ios::beg)) return false;
+        const size_t imageSize = static_cast<size_t>(fileSize.QuadPart);
+        std::vector<uint8_t> loadedImage;
+        if (imageSize > loadedImage.max_size()) return false;
+
         try {
-            fileData.resize(static_cast<size_t>(fileSize));
+            loadedImage.resize(imageSize);
         } catch (...) {
-            fileData.clear();
             return false;
         }
 
-        if (!file.read(reinterpret_cast<char*>(fileData.data()),
-                       static_cast<std::streamsize>(fileSize)) ||
-            file.gcount() != static_cast<std::streamsize>(fileSize)) {
-            fileData.clear();
+        size_t totalRead = 0;
+        while (totalRead < imageSize) {
+            const size_t remaining = imageSize - totalRead;
+            const DWORD requestSize = static_cast<DWORD>((std::min)(
+                remaining,
+                static_cast<size_t>((std::numeric_limits<DWORD>::max)())));
+            DWORD bytesRead = 0;
+            if (!ReadFile(file.get(), loadedImage.data() + totalRead,
+                          requestSize, &bytesRead, nullptr) ||
+                bytesRead == 0) {
+                return false;
+            }
+            totalRead += static_cast<size_t>(bytesRead);
+        }
+
+        LARGE_INTEGER finalFileSize{};
+        if (!GetFileSizeEx(file.get(), &finalFileSize) ||
+            finalFileSize.QuadPart != fileSize.QuadPart) {
             return false;
         }
 
+        // Publish only the complete stable snapshot.
+        fileData.swap(loadedImage);
         return true;
     }
 
