@@ -128,6 +128,10 @@ extern "C" __declspec(dllexport) void Oblivion_Shutdown() {
         initializationThread.join();
     }
 
+    if (g_pNetworkReporter) {
+        g_pNetworkReporter->SetClientStatus(false, false);
+    }
+
     if (g_pProcessWatcher) {
         try {
             g_pProcessWatcher->Stop();
@@ -452,6 +456,11 @@ void InitializeSecuritySystem() {
     try {
         g_pProcessWatcher = new Oblivion::ProcessWatcher();
         g_pProcessWatcher->Start();
+        // Publish healthy only after the self-integrity guard and process watcher
+        // (including its anti-suspend guardian) have both started successfully.
+        if (g_pNetworkReporter && g_pSelfIntegrityGuard) {
+            g_pNetworkReporter->SetClientStatus(true, true);
+        }
         std::cout << "[SUCCESS] Oblivion Hack Shield fully initialized!" << std::endl;
         std::cout << "[INFO] Protection active - monitoring for threats..." << std::endl;
         std::cout << "==================================================" << std::endl;
