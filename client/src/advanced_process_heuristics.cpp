@@ -1163,51 +1163,46 @@ namespace Oblivion {
         }
 
         const std::wstring lowerPath = ToLowerCopy(fullPath);
-        bool detected = false;
-
-        {
 
 #ifdef _DEBUG
-            std::wstring debugMsg = L"[AdvHeuristics] Process path: " + fullPath + L"\n";
-            OutputDebugStringW(debugMsg.c_str());
+        std::wstring debugMsg = L"[AdvHeuristics] Process path: " + fullPath + L"\\n";
+        OutputDebugStringW(debugMsg.c_str());
 #endif
 
-            // Suspicious path keywords
-            const std::vector<std::wstring> suspiciousPathKeywords = {
-                L"cheat",
-                L"hack",
-                L"\\ce\\",
-                L"\\ce2",
-                L"\\cheatengine",
-                L"\\newce",
-                L"cheatprogram",
-                L"trainer",
-                L"crack",
-                L"keygen",
-                L"patch",
-                L"mod\\",
-                L"inject",
-                L"\\bossb",
-                L"\\ce7",
-                L"\\ce6",
-                L"memory scanner",
-                L"memoryscanner"
-            };
+        // Suspicious path keywords
+        const std::vector<std::wstring> suspiciousPathKeywords = {
+            L"cheat",
+            L"hack",
+            L"\\ce\\",
+            L"\\ce2",
+            L"\\cheatengine",
+            L"\\newce",
+            L"cheatprogram",
+            L"trainer",
+            L"crack",
+            L"keygen",
+            L"patch",
+            L"mod\\",
+            L"inject",
+            L"\\bossb",
+            L"\\ce7",
+            L"\\ce6",
+            L"memory scanner",
+            L"memoryscanner"
+        };
 
-            for (const auto& keyword : suspiciousPathKeywords) {
-                if (lowerPath.find(keyword) != std::wstring::npos) {
-                    matchedPath = L"SUSPICIOUS_PATH: " + fullPath;
-                    detected = true;
+        for (const auto& keyword : suspiciousPathKeywords) {
+            if (lowerPath.find(keyword) != std::wstring::npos) {
+                matchedPath = L"SUSPICIOUS_PATH: " + fullPath;
 #ifdef _DEBUG
-                    std::wstring debugMsg2 = L"[AdvHeuristics] DETECTED SUSPICIOUS PATH with keyword: " + keyword + L"\n";
-                    OutputDebugStringW(debugMsg2.c_str());
+                std::wstring debugMsg2 = L"[AdvHeuristics] DETECTED SUSPICIOUS PATH with keyword: " + keyword + L"\\n";
+                OutputDebugStringW(debugMsg2.c_str());
 #endif
-                    break;
-                }
+                return true;
             }
         }
 
-        return detected;
+        return false;
     }
 
     bool AdvancedProcessHeuristics::HasSuspiciousBehavior(DWORD processId, std::wstring& behaviorType) const {
