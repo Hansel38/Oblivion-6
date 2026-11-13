@@ -1752,6 +1752,7 @@ namespace Oblivion {
         bool carryRegionValid = false;
         bool carryRegionExecutable = false;
         ULONG_PTR carryRegionEnd = 0;
+        bool encounteredUnreadableExecutableRegion = false;
         ULONG_PTR queryAddress = 0;
 
         try {
@@ -1805,16 +1806,33 @@ namespace Oblivion {
                     protection == PAGE_EXECUTE_READ ||
                     protection == PAGE_EXECUTE_READWRITE ||
                     protection == PAGE_EXECUTE_WRITECOPY;
+                const bool hasExecuteProtection =
+                    protection == PAGE_EXECUTE || isExecutable;
                 const bool isReadable =
                     protection == PAGE_READWRITE ||
                     protection == PAGE_WRITECOPY ||
                     protection == PAGE_READONLY ||
                     isExecutable;
-
-                if (mbi.State == MEM_COMMIT &&
+                const bool isScannableRegion =
+                    mbi.State == MEM_COMMIT &&
                     isReadable &&
                     !(mbi.Protect & PAGE_GUARD) &&
-                    !(mbi.Protect & PAGE_NOACCESS)) {
+                    !(mbi.Protect & PAGE_NOACCESS);
+
+                if (mbi.State == MEM_COMMIT &&
+                    hasExecuteProtection &&
+                    !isScannableRegion) {
+                    // Execute-only and guarded executable pages cannot be read
+                    // by this scanner, so they must not be reported as clean.
+                    encounteredUnreadableExecutableRegion = true;
+                    if (scanIssue.empty()) {
+                        scanIssue =
+                            L"Committed executable memory region is unreadable or guarded at address " +
+                            std::to_wstring(queryAddress);
+                    }
+                }
+
+                if (isScannableRegion) {
                     // Keep signature overlap across adjacent readable regions
                     // only when their executable classification is unchanged.
                     if (!carryRegionValid ||
@@ -1928,7 +1946,9 @@ namespace Oblivion {
             return MemoryScanResult::Incomplete;
         }
 
-        return MemoryScanResult::Clean;
+        return encounteredUnreadableExecutableRegion
+            ? MemoryScanResult::Incomplete
+            : MemoryScanResult::Clean;
     }
 
     std::string AdvancedProcessHeuristics::BuildHeuristicDetails(const std::wstring& processName,
