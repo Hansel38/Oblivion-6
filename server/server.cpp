@@ -527,7 +527,7 @@ static bool IsValidChallengeNonce(const std::string& nonce) {
     }
     try {
         size_t parsed = 0;
-        const unsigned long long value = std::stoull(nonce, &parsed, 10);
+        std::stoull(nonce, &parsed, 10);
         return parsed == nonce.size();
     } catch (...) {
         return false;
