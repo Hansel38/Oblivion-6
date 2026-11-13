@@ -802,7 +802,7 @@ void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbea
                     std::cout << "[HEARTBEAT] Started for HWID [" << hwid << "]" << std::endl;
 
                     while (true) {
-                        // Compose ping: PING:seq:ts:nonce;
+                        // Authenticate each server PING with the active session key.
                         uint64_t ping_ts = (uint64_t)GetTickCount64();
                         // naive nonce
                         uint64_t ping_nonce = 0;
