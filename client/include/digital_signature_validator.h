@@ -8,6 +8,12 @@
 namespace Oblivion {
     class DigitalSignatureValidator {
     public:
+        enum class ProcessSignatureResult {
+            Trusted,
+            Untrusted,
+            Incomplete
+        };
+
         DigitalSignatureValidator();
         ~DigitalSignatureValidator();
 
@@ -16,7 +22,13 @@ namespace Oblivion {
 
         // Fungsi untuk verifikasi process executable (untuk whitelist verification)
         // Mengembalikan true jika signature valid dan publisher sesuai ekspektasi
-        static bool VerifyProcessSignature(const std::wstring& processPath, const std::wstring& expectedPublisher);
+        static ProcessSignatureResult VerifyProcessSignatureDetailed(
+            const std::wstring& processPath,
+            const std::wstring& expectedPublisher,
+            std::wstring& failureReason);
+        static bool VerifyProcessSignature(
+            const std::wstring& processPath,
+            const std::wstring& expectedPublisher);
         
         // Fungsi untuk mendapatkan publisher dari file executable
         static bool GetFilePublisher(const std::wstring& filePath, std::wstring& publisherName);
@@ -32,7 +44,9 @@ namespace Oblivion {
         bool GetCertificateSubjectName(HMODULE hModule, std::wstring& subjectName);
 
         // Fungsi helper untuk verifikasi signature file
-        static bool VerifyFileSignature(const std::wstring& filePath);
+        static bool VerifyFileSignature(
+            const std::wstring& filePath,
+            LONG* trustStatus = nullptr);
 
         // Daftar penerbit yang dipercaya
         static const std::vector<std::wstring> m_trustedPublishers;
