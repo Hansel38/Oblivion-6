@@ -1,7 +1,7 @@
 #include "socket_framing.h"
 
-#include <cassert>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -13,9 +13,18 @@
 
 #ifndef _WIN32
 namespace {
+    void Require(bool condition, const char* message) {
+        if (!condition) {
+            std::cerr << "FAILED: " << message << std::endl;
+            std::abort();
+        }
+    }
+
     void CreatePair(int sockets[2]) {
-        const int result = socketpair(AF_UNIX, SOCK_STREAM, 0, sockets);
-        assert(result == 0);
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) {
+            std::cerr << "socketpair failed" << std::endl;
+            std::abort();
+        }
     }
 
     void ClosePair(const int sockets[2]) {
@@ -24,7 +33,9 @@ namespace {
     }
 
     void SendPayload(int socket, const std::string& payload) {
-        assert(OblivionNet::SendAll(socket, payload.data(), payload.size()));
+        Require(
+            OblivionNet::SendAll(socket, payload.data(), payload.size()),
+            "SendAll should transmit the complete payload");
     }
 
     void TestFragmentedFrame() {
@@ -49,10 +60,10 @@ namespace {
             OblivionNet::ReceiveFrame(sockets[0], pending, frame, 2000, 64);
 
         sender.join();
-        assert(senderSucceeded);
-        assert(received);
-        assert(frame == expected);
-        assert(pending.empty());
+        Require(senderSucceeded, "fragmented sender should complete");
+        Require(received, "fragmented frame should be reconstructed");
+        Require(frame == expected, "fragmented frame content should match");
+        Require(pending.empty(), "fragmented frame should leave no remainder");
         ClosePair(sockets);
     }
 
@@ -63,14 +74,18 @@ namespace {
 
         std::string pending;
         std::string frame;
-        assert(OblivionNet::ReceiveFrame(sockets[0], pending, frame, 1000, 32));
-        assert(frame == "FIRST;");
-        assert(pending == "SECOND;");
+        Require(
+            OblivionNet::ReceiveFrame(sockets[0], pending, frame, 1000, 32),
+            "first coalesced frame should be read");
+        Require(frame == "FIRST;", "first frame content should match");
+        Require(pending == "SECOND;", "second coalesced frame should remain pending");
 
         frame.clear();
-        assert(OblivionNet::ReceiveFrame(sockets[0], pending, frame, 1000, 32));
-        assert(frame == "SECOND;");
-        assert(pending.empty());
+        Require(
+            OblivionNet::ReceiveFrame(sockets[0], pending, frame, 1000, 32),
+            "second coalesced frame should be read from pending data");
+        Require(frame == "SECOND;", "second frame content should match");
+        Require(pending.empty(), "pending buffer should be empty after both frames");
         ClosePair(sockets);
     }
 
@@ -81,8 +96,10 @@ namespace {
             SendPayload(sockets[1], "AB;");
             std::string pending;
             std::string frame;
-            assert(OblivionNet::ReceiveFrame(sockets[0], pending, frame, 1000, 3));
-            assert(frame == "AB;");
+            Require(
+                OblivionNet::ReceiveFrame(sockets[0], pending, frame, 1000, 3),
+                "frame exactly at maximum size should be accepted");
+            Require(frame == "AB;", "maximum-size frame content should match");
             ClosePair(sockets);
         }
 
@@ -92,7 +109,9 @@ namespace {
             SendPayload(sockets[1], "ABC;");
             std::string pending;
             std::string frame;
-            assert(!OblivionNet::ReceiveFrame(sockets[0], pending, frame, 1000, 3));
+            Require(
+                !OblivionNet::ReceiveFrame(sockets[0], pending, frame, 1000, 3),
+                "frame larger than maximum size should be rejected");
             ClosePair(sockets);
         }
 
@@ -102,7 +121,9 @@ namespace {
             SendPayload(sockets[1], "ABCD");
             std::string pending;
             std::string frame;
-            assert(!OblivionNet::ReceiveFrame(sockets[0], pending, frame, 1000, 3));
+            Require(
+                !OblivionNet::ReceiveFrame(sockets[0], pending, frame, 1000, 3),
+                "oversized unterminated frame should be rejected");
             ClosePair(sockets);
         }
     }
@@ -114,9 +135,11 @@ namespace {
             std::string pending;
             std::string frame;
             const auto start = std::chrono::steady_clock::now();
-            assert(!OblivionNet::ReceiveFrame(sockets[0], pending, frame, 30, 16));
+            const bool received =
+                OblivionNet::ReceiveFrame(sockets[0], pending, frame, 30, 16);
             const auto elapsed = std::chrono::steady_clock::now() - start;
-            assert(elapsed < std::chrono::seconds(1));
+            Require(!received, "empty socket should time out");
+            Require(elapsed < std::chrono::seconds(1), "timeout should remain bounded");
             ClosePair(sockets);
         }
 
@@ -126,7 +149,9 @@ namespace {
             shutdown(sockets[1], SHUT_WR);
             std::string pending;
             std::string frame;
-            assert(!OblivionNet::ReceiveFrame(sockets[0], pending, frame, 1000, 16));
+            Require(
+                !OblivionNet::ReceiveFrame(sockets[0], pending, frame, 1000, 16),
+                "peer close before delimiter should fail the frame read");
             ClosePair(sockets);
         }
     }
@@ -135,7 +160,9 @@ namespace {
         int sockets[2]{};
         CreatePair(sockets);
         const std::string empty;
-        assert(OblivionNet::SendAll(sockets[0], empty.data(), empty.size()));
+        Require(
+            OblivionNet::SendAll(sockets[0], empty.data(), empty.size()),
+            "zero-length SendAll should succeed without sending");
         ClosePair(sockets);
     }
 }
@@ -143,7 +170,7 @@ namespace {
 
 int main() {
 #ifdef _WIN32
-    std::cout << "TCP socket framing tests require POSIX socketpair in this CI target"
+    std::cout << "TCP socket framing tests run on the Linux socketpair CI target"
               << std::endl;
 #else
     TestFragmentedFrame();
