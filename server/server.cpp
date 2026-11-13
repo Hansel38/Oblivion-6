@@ -866,9 +866,9 @@ void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbea
                                             ++consecutiveMiss;
                                             ++totalMisses;
                                         } else {
-                                            const std::string data = std::to_string(pseq) + ":" +
-                                                std::to_string(ping_ts) + ":" +
-                                                std::to_string(pnonce) + ":" + phwid;
+                                            const std::string data = "PONG:v1:" +
+                                                std::to_string(pseq) + ":" + clientTsText + ":" +
+                                                std::to_string(pnonce) + ":" + status + ":" + phwid;
                                             const std::string expect = hmacSha256(sessionKey, data);
                                             if (!ConstantTimeEquals(expect, hmac)) {
                                                 ++consecutiveMiss;
