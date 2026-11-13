@@ -279,11 +279,20 @@ namespace {
     };
 
     // Resolve the complete process image path without assuming MAX_PATH is sufficient.
-    bool GetProcessImagePath(DWORD processId, std::wstring& processPath) {
+    bool GetProcessImagePath(
+        DWORD processId,
+        std::wstring& processPath,
+        DWORD* failureError = nullptr) {
         processPath.clear();
+        if (failureError != nullptr) {
+            *failureError = ERROR_SUCCESS;
+        }
 
         HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
         if (hProcess == NULL) {
+            if (failureError != nullptr) {
+                *failureError = GetLastError();
+            }
             return false;
         }
 
@@ -291,6 +300,7 @@ namespace {
         constexpr size_t kMaximumPathCapacity = 32768;
         std::vector<wchar_t> buffer(kInitialPathCapacity);
         bool resolved = false;
+        DWORD lastError = ERROR_SUCCESS;
 
         while (buffer.size() <= kMaximumPathCapacity) {
             DWORD length = static_cast<DWORD>(buffer.size());
@@ -300,8 +310,8 @@ namespace {
                 break;
             }
 
-            const DWORD error = GetLastError();
-            if (error != ERROR_INSUFFICIENT_BUFFER ||
+            lastError = GetLastError();
+            if (lastError != ERROR_INSUFFICIENT_BUFFER ||
                 buffer.size() == kMaximumPathCapacity) {
                 break;
             }
@@ -310,6 +320,9 @@ namespace {
         }
 
         CloseHandle(hProcess);
+        if (!resolved && failureError != nullptr) {
+            *failureError = lastError;
+        }
         return resolved;
     }
 
@@ -900,19 +913,40 @@ namespace Oblivion {
                 std::wstring indicator;
                 bool hasSuspiciousIndicator = false;
 
-                // Check 1: Suspicious Path Detection (Priority #1 - Most reliable for this case)
-                // Deteksi path mencurigakan seperti "cheatprogram", "newce", "hack", dll
-                if (HasSuspiciousPath(pe32.th32ProcessID, indicator)) {
-                    const auto details = BuildHeuristicDetails(processName, pe32.th32ProcessID, L"SUSPICIOUS_PATH", indicator);
+                // Check 1: Suspicious Path Detection.
+                std::wstring scanIssue;
+                const PathScanResult pathScanResult =
+                    HasSuspiciousPath(pe32.th32ProcessID, indicator, scanIssue);
+                if (pathScanResult == PathScanResult::Suspicious) {
+                    const auto details = BuildHeuristicDetails(
+                        processName, pe32.th32ProcessID, L"SUSPICIOUS_PATH", indicator);
                     ReportViolationAndExit(L"", "ADV_HEURISTIC_DETECTED", details);
+                } else if (pathScanResult == PathScanResult::Incomplete) {
+                    const std::wstring warning =
+                        L"[AdvHeuristics] Path scan incomplete for " + processName +
+                        L" (PID: " + std::to_wstring(pe32.th32ProcessID) +
+                        L"): " + scanIssue;
+                    OutputDebugStringW(warning.c_str());
+                    OutputDebugStringW(L"\n");
                 }
 
                 indicator.clear();
 
-                // Check 2: Suspicious Module (DLL) Detection
-                if (ContainsSuspiciousModule(pe32.th32ProcessID, indicator)) {
-                    const auto details = BuildHeuristicDetails(processName, pe32.th32ProcessID, L"MODULE", indicator);
+                // Check 2: Suspicious Module (DLL) Detection.
+                scanIssue.clear();
+                const ModuleScanResult moduleScanResult =
+                    ContainsSuspiciousModule(pe32.th32ProcessID, indicator, scanIssue);
+                if (moduleScanResult == ModuleScanResult::Suspicious) {
+                    const auto details = BuildHeuristicDetails(
+                        processName, pe32.th32ProcessID, L"MODULE", indicator);
                     ReportViolationAndExit(L"", "ADV_HEURISTIC_DETECTED", details);
+                } else if (moduleScanResult == ModuleScanResult::Incomplete) {
+                    const std::wstring warning =
+                        L"[AdvHeuristics] Module scan incomplete for " + processName +
+                        L" (PID: " + std::to_wstring(pe32.th32ProcessID) +
+                        L"): " + scanIssue;
+                    OutputDebugStringW(warning.c_str());
+                    OutputDebugStringW(L"\n");
                 }
 
                 indicator.clear();
@@ -984,30 +1018,76 @@ namespace Oblivion {
         }
     }
 
-    bool AdvancedProcessHeuristics::ContainsSuspiciousModule(DWORD processId, std::wstring& matchedModule) const {
-        HANDLE hModuleSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, processId);
-        if (hModuleSnapshot == INVALID_HANDLE_VALUE) {
-            return false;
-        }
+    AdvancedProcessHeuristics::ModuleScanResult
+    AdvancedProcessHeuristics::ContainsSuspiciousModule(
+        DWORD processId,
+        std::wstring& matchedModule,
+        std::wstring& scanIssue) const {
+        scanIssue.clear();
 
-        MODULEENTRY32W me32;
-        me32.dwSize = sizeof(MODULEENTRY32W);
-
-        bool detected = false;
-
-        if (Module32FirstW(hModuleSnapshot, &me32)) {
-            do {
-                std::wstring moduleLower = ToLowerCopy(me32.szModule);
-                if (std::find(kSuspiciousModules.begin(), kSuspiciousModules.end(), moduleLower) != kSuspiciousModules.end()) {
-                    matchedModule = me32.szModule;
-                    detected = true;
-                    break;
+        struct SnapshotHandleDeleter {
+            void operator()(HANDLE handle) const noexcept {
+                if (handle != INVALID_HANDLE_VALUE && handle != NULL) {
+                    CloseHandle(handle);
                 }
-            } while (Module32NextW(hModuleSnapshot, &me32));
+            }
+        };
+
+        HANDLE hModuleSnapshot = INVALID_HANDLE_VALUE;
+        DWORD snapshotError = ERROR_SUCCESS;
+        constexpr size_t kMaximumSnapshotAttempts = 3;
+        for (size_t attempt = 0; attempt < kMaximumSnapshotAttempts; ++attempt) {
+            hModuleSnapshot = CreateToolhelp32Snapshot(
+                TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, processId);
+            if (hModuleSnapshot != INVALID_HANDLE_VALUE) {
+                break;
+            }
+
+            snapshotError = GetLastError();
+            if (snapshotError != ERROR_BAD_LENGTH ||
+                attempt + 1 == kMaximumSnapshotAttempts) {
+                scanIssue = L"CreateToolhelp32Snapshot(module) failed; error=" +
+                    std::to_wstring(snapshotError);
+                return ModuleScanResult::Incomplete;
+            }
         }
 
-        CloseHandle(hModuleSnapshot);
-        return detected;
+        if (hModuleSnapshot == INVALID_HANDLE_VALUE) {
+            scanIssue = L"CreateToolhelp32Snapshot(module) did not produce a snapshot";
+            return ModuleScanResult::Incomplete;
+        }
+        std::unique_ptr<void, SnapshotHandleDeleter> snapshotHandle(hModuleSnapshot);
+
+        MODULEENTRY32W moduleEntry{};
+        moduleEntry.dwSize = sizeof(moduleEntry);
+        SetLastError(ERROR_SUCCESS);
+        if (!Module32FirstW(hModuleSnapshot, &moduleEntry)) {
+            const DWORD error = GetLastError();
+            scanIssue = L"Module32FirstW failed; error=" + std::to_wstring(error);
+            return ModuleScanResult::Incomplete;
+        }
+
+        do {
+            const std::wstring moduleLower = ToLowerCopy(moduleEntry.szModule);
+            if (std::find(
+                    kSuspiciousModules.begin(),
+                    kSuspiciousModules.end(),
+                    moduleLower) != kSuspiciousModules.end()) {
+                matchedModule = moduleEntry.szModule;
+                return ModuleScanResult::Suspicious;
+            }
+
+            SetLastError(ERROR_SUCCESS);
+        } while (Module32NextW(hModuleSnapshot, &moduleEntry));
+
+        const DWORD enumerationError = GetLastError();
+        if (enumerationError != ERROR_NO_MORE_FILES) {
+            scanIssue = L"Module32NextW failed before enumeration completed; error=" +
+                std::to_wstring(enumerationError);
+            return ModuleScanResult::Incomplete;
+        }
+
+        return ModuleScanResult::Clean;
     }
 
     bool AdvancedProcessHeuristics::HasSuspiciousWindowClass(DWORD processId, std::wstring& matchedClass) const {
@@ -1321,10 +1401,17 @@ namespace Oblivion {
         return incomplete ? HandleScanResult::Incomplete : HandleScanResult::Clean;
     }
 
-    bool AdvancedProcessHeuristics::HasSuspiciousPath(DWORD processId, std::wstring& matchedPath) const {
+    AdvancedProcessHeuristics::PathScanResult AdvancedProcessHeuristics::HasSuspiciousPath(
+        DWORD processId,
+        std::wstring& matchedPath,
+        std::wstring& scanIssue) const {
+        scanIssue.clear();
         std::wstring fullPath;
-        if (!GetProcessImagePath(processId, fullPath)) {
-            return false;
+        DWORD pathError = ERROR_SUCCESS;
+        if (!GetProcessImagePath(processId, fullPath, &pathError)) {
+            scanIssue = L"QueryFullProcessImageNameW failed; error=" +
+                std::to_wstring(pathError);
+            return PathScanResult::Incomplete;
         }
 
         const std::wstring lowerPath = ToLowerCopy(fullPath);
@@ -1363,11 +1450,11 @@ namespace Oblivion {
                 std::wstring debugMsg2 = L"[AdvHeuristics] DETECTED SUSPICIOUS PATH with keyword: " + keyword + L"\n";
                 OutputDebugStringW(debugMsg2.c_str());
 #endif
-                return true;
+                return PathScanResult::Suspicious;
             }
         }
 
-        return false;
+        return PathScanResult::Clean;
     }
 
     bool AdvancedProcessHeuristics::HasSuspiciousBehavior(DWORD processId, std::wstring& behaviorType) const {

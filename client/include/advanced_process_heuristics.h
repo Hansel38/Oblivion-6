@@ -20,7 +20,16 @@ namespace Oblivion {
         AdvancedProcessHeuristics& operator=(const AdvancedProcessHeuristics&) = delete;
 
         // DLL detection
-        bool ContainsSuspiciousModule(DWORD processId, std::wstring& matchedModule) const;
+        enum class ModuleScanResult {
+            Clean,
+            Suspicious,
+            Incomplete
+        };
+
+        ModuleScanResult ContainsSuspiciousModule(
+            DWORD processId,
+            std::wstring& matchedModule,
+            std::wstring& scanIssue) const;
         
         // Window class detection
         bool HasSuspiciousWindowClass(DWORD processId, std::wstring& matchedClass) const;
@@ -29,7 +38,16 @@ namespace Oblivion {
         bool HasSuspiciousWindowTitle(DWORD processId, std::wstring& matchedPattern) const;
         
         // Path-based detection
-        bool HasSuspiciousPath(DWORD processId, std::wstring& matchedPath) const;
+        enum class PathScanResult {
+            Clean,
+            Suspicious,
+            Incomplete
+        };
+
+        PathScanResult HasSuspiciousPath(
+            DWORD processId,
+            std::wstring& matchedPath,
+            std::wstring& scanIssue) const;
         
         // Handle-based detection (ULTIMATE - detects any memory scanner)
         enum class HandleScanResult {
