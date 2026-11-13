@@ -100,9 +100,16 @@ namespace Oblivion {
         std::function<void()> m_heartbeatCallback;
     };
 
+    enum class BehaviorScanResult {
+        Clean,
+        Suspicious,
+        Incomplete
+    };
+
     // Global helper functions for advanced heuristics
     bool ShouldPerformMemoryScan(const std::wstring& processName);
-    bool IsSuspiciousBehavior(DWORD processId);
+    BehaviorScanResult IsSuspiciousBehavior(
+        DWORD processId, std::string& scanIssue);
     void LogSuspiciousProcess(const std::wstring& processName, DWORD processId, const std::string& reason);
 }
 
