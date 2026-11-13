@@ -2,6 +2,7 @@
 #include "advanced_process_heuristics.h"
 #include "digital_signature_validator.h"
 #include <limits>
+#include <cstddef>
 #include <tlhelp32.h>
 #include <vector>
 #include <memory>
@@ -448,18 +449,20 @@ namespace {
         return true;
     }
 
-    // Enable SeDebugPrivilege untuk akses system-wide handles
+    // Enable SeDebugPrivilege and verify that Windows assigned the privilege.
     bool EnableDebugPrivilege() {
         HANDLE hToken = NULL;
-        TOKEN_PRIVILEGES tokenPrivileges;
-        LUID luid;
+        TOKEN_PRIVILEGES tokenPrivileges{};
+        LUID luid{};
 
         if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &hToken)) {
             return false;
         }
 
         if (!LookupPrivilegeValueW(NULL, SE_DEBUG_NAME, &luid)) {
+            const DWORD error = GetLastError();
             CloseHandle(hToken);
+            SetLastError(error);
             return false;
         }
 
@@ -467,9 +470,14 @@ namespace {
         tokenPrivileges.Privileges[0].Luid = luid;
         tokenPrivileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
 
-        bool result = AdjustTokenPrivileges(hToken, FALSE, &tokenPrivileges, 0, NULL, NULL) != 0;
+        SetLastError(ERROR_SUCCESS);
+        const BOOL adjusted =
+            AdjustTokenPrivileges(hToken, FALSE, &tokenPrivileges, 0, NULL, NULL);
+        const DWORD error = GetLastError();
         CloseHandle(hToken);
-        return result;
+        SetLastError(error);
+
+        return adjusted != FALSE && error == ERROR_SUCCESS;
     }
 
     // Get process name from PID using the dynamically sized image-path helper.
@@ -813,10 +821,14 @@ namespace Oblivion {
         // Use the process ID of the host game (current process)
         const DWORD gameProcessId = GetProtectedProcessId();
 
-        // Check for suspicious handles to game process (ULTIMATE - detects ANY memory scanner)
+        // Check for suspicious handles to game process.
         if (gameProcessId != 0) {
             std::wstring suspiciousProcess;
-            if (HasSuspiciousHandleToGame(gameProcessId, suspiciousProcess)) {
+            std::wstring handleScanIssue;
+            const HandleScanResult handleScanResult =
+                HasSuspiciousHandleToGame(
+                    gameProcessId, suspiciousProcess, handleScanIssue);
+            if (handleScanResult == HandleScanResult::Suspicious) {
                 const auto details = BuildHeuristicDetails(
                     L"Handle-Based Detection",
                     gameProcessId,
@@ -824,6 +836,11 @@ namespace Oblivion {
                     suspiciousProcess
                 );
                 ReportViolationAndExit(L"", "ADV_HEURISTIC_DETECTED", details);
+            } else if (handleScanResult == HandleScanResult::Incomplete) {
+                const std::wstring warning =
+                    L"[AdvHeuristics] Handle scan incomplete: " + handleScanIssue;
+                OutputDebugStringW(warning.c_str());
+                OutputDebugStringW(L"\n");
             }
         }
 
@@ -1051,120 +1068,221 @@ namespace Oblivion {
         return false;
     }
 
-    bool AdvancedProcessHeuristics::HasSuspiciousHandleToGame(DWORD gameProcessId, std::wstring& suspiciousProcess) const {
-        // Enable SeDebugPrivilege untuk akses system-wide handles
-        EnableDebugPrivilege();
+    AdvancedProcessHeuristics::HandleScanResult
+    AdvancedProcessHeuristics::HasSuspiciousHandleToGame(
+        DWORD gameProcessId,
+        std::wstring& suspiciousProcess,
+        std::wstring& scanIssue) const {
+        scanIssue.clear();
+        bool incomplete = false;
 
-        // Load NtQuerySystemInformation dari ntdll.dll
+        const auto setScanIssue = [&scanIssue](const std::wstring& issue) {
+            if (scanIssue.empty()) {
+                scanIssue = issue;
+            }
+        };
+
+        // Querying all system handles is best-effort unless SeDebugPrivilege
+        // was actually assigned to this process token.
+        if (!EnableDebugPrivilege()) {
+            setScanIssue(
+                L"SeDebugPrivilege unavailable; error=" + std::to_wstring(GetLastError()));
+            incomplete = true;
+        }
+
         HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
         if (hNtdll == NULL) {
-            return false;
+            setScanIssue(
+                L"GetModuleHandleW(ntdll.dll) failed; error=" +
+                std::to_wstring(GetLastError()));
+            return HandleScanResult::Incomplete;
         }
 
         NtQuerySystemInformationFn pNtQuerySystemInformation =
             reinterpret_cast<NtQuerySystemInformationFn>(
                 GetProcAddress(hNtdll, "NtQuerySystemInformation"));
         if (pNtQuerySystemInformation == NULL) {
-            return false;
+            setScanIssue(
+                L"NtQuerySystemInformation export unavailable; error=" +
+                std::to_wstring(GetLastError()));
+            return HandleScanResult::Incomplete;
         }
 
-        // Query system handles - start dengan buffer kecil, expand jika perlu
-        ULONG bufferSize = 0x10000; // 64KB initial
+        constexpr ULONG kInitialBufferSize = 0x10000;
+        constexpr ULONG kMaximumBufferSize = 128u * 1024u * 1024u;
+        constexpr size_t kMaximumQueryAttempts = 16;
+        ULONG bufferSize = kInitialBufferSize;
+        ULONG returnLength = 0;
+        NTSTATUS status = STATUS_INFO_LENGTH_MISMATCH;
+        bool querySucceeded = false;
         std::vector<BYTE> buffer;
-        NTSTATUS status;
 
-        do {
-            buffer.resize(bufferSize);
-            ULONG returnLength = 0;
-            status = pNtQuerySystemInformation(
-                SYSTEM_HANDLE_INFORMATION_CLASS,
-                buffer.data(),
-                bufferSize,
-                &returnLength);
+        try {
+            for (size_t attempt = 0; attempt < kMaximumQueryAttempts; ++attempt) {
+                buffer.resize(bufferSize);
+                returnLength = 0;
+                status = pNtQuerySystemInformation(
+                    SYSTEM_HANDLE_INFORMATION_CLASS,
+                    buffer.data(),
+                    bufferSize,
+                    &returnLength);
 
-            if (status == STATUS_INFO_LENGTH_MISMATCH) {
-                bufferSize = returnLength + 0x1000; // Add extra space
+                if (status == 0) {
+                    querySucceeded = true;
+                    break;
+                }
+
+                if (status != STATUS_INFO_LENGTH_MISMATCH) {
+                    setScanIssue(
+                        L"NtQuerySystemInformation failed; status=" +
+                        std::to_wstring(static_cast<unsigned long>(status)));
+                    return HandleScanResult::Incomplete;
+                }
+
+                if (attempt + 1 == kMaximumQueryAttempts) {
+                    break;
+                }
+
+                ULONG nextBufferSize = 0;
+                if (returnLength > bufferSize) {
+                    if (returnLength > kMaximumBufferSize) {
+                        setScanIssue(L"system handle table exceeds the 128 MiB scan limit");
+                        return HandleScanResult::Incomplete;
+                    }
+
+                    const ULONG remainingCapacity = kMaximumBufferSize - returnLength;
+                    const ULONG extraCapacity = (std::min)(0x1000u, remainingCapacity);
+                    nextBufferSize = returnLength + extraCapacity;
+                } else {
+                    nextBufferSize = bufferSize <= kMaximumBufferSize / 2
+                        ? bufferSize * 2
+                        : kMaximumBufferSize;
+                }
+
+                if (nextBufferSize <= bufferSize ||
+                    nextBufferSize > kMaximumBufferSize) {
+                    setScanIssue(L"system handle query buffer cannot grow within its limit");
+                    return HandleScanResult::Incomplete;
+                }
+
+                bufferSize = nextBufferSize;
             }
-        } while (status == STATUS_INFO_LENGTH_MISMATCH);
-
-        if (status != 0) {
-            return false;
+        } catch (const std::bad_alloc&) {
+            setScanIssue(L"system handle query buffer allocation failed");
+            return HandleScanResult::Incomplete;
         }
 
-        PSYSTEM_HANDLE_INFORMATION handleInfo = reinterpret_cast<PSYSTEM_HANDLE_INFORMATION>(buffer.data());
+        if (!querySucceeded) {
+            setScanIssue(L"system handle query exceeded its retry limit");
+            return HandleScanResult::Incomplete;
+        }
+
+        constexpr size_t kHandleArrayOffset =
+            offsetof(SYSTEM_HANDLE_INFORMATION, Handles);
+        if (returnLength < kHandleArrayOffset || returnLength > buffer.size()) {
+            setScanIssue(L"NtQuerySystemInformation returned an invalid buffer length");
+            return HandleScanResult::Incomplete;
+        }
+
+        PSYSTEM_HANDLE_INFORMATION handleInfo =
+            reinterpret_cast<PSYSTEM_HANDLE_INFORMATION>(buffer.data());
+        const size_t availableHandleCount =
+            (static_cast<size_t>(returnLength) - kHandleArrayOffset) /
+            sizeof(SYSTEM_HANDLE);
+        if (handleInfo->HandleCount > availableHandleCount) {
+            setScanIssue(L"system handle count exceeds the returned buffer length");
+            return HandleScanResult::Incomplete;
+        }
+
+        struct ProcessHandleDeleter {
+            void operator()(HANDLE handle) const noexcept {
+                if (handle != NULL) {
+                    CloseHandle(handle);
+                }
+            }
+        };
+
         const DWORD selfPid = GetCurrentProcessId();
+        const ACCESS_MASK dangerousMasks =
+            PROCESS_VM_READ |
+            PROCESS_VM_WRITE |
+            PROCESS_VM_OPERATION;
 
-        // Dangerous access masks untuk memory manipulation
-        // Minimal: PROCESS_VM_READ sudah cukup untuk memory scanner
-        const ACCESS_MASK dangerousMasks = 
-            PROCESS_VM_READ |           // Read memory (required for scanning)
-            PROCESS_VM_WRITE |          // Write memory (required for modification)
-            PROCESS_VM_OPERATION;       // VirtualProtect, VirtualAlloc (required for advanced manipulation)
-
-        // Iterate through all handles
         for (ULONG i = 0; i < handleInfo->HandleCount; ++i) {
             const SYSTEM_HANDLE& handle = handleInfo->Handles[i];
 
-            // Skip handles owned by game process itself or system processes
-            if (handle.ProcessId == gameProcessId || 
-                handle.ProcessId == 0 || 
-                handle.ProcessId == 4 || 
+            if (handle.ProcessId == gameProcessId ||
+                handle.ProcessId == 0 ||
+                handle.ProcessId == 4 ||
                 handle.ProcessId == selfPid) {
                 continue;
             }
 
-            // Check if this handle points to a process object (ObjectTypeNumber 7)
-            // AND has dangerous access rights
-            if (handle.ObjectTypeNumber == 7 && (handle.GrantedAccess & dangerousMasks) != 0) {
-                // Get process name that owns this suspicious handle
-                const std::wstring processName = GetProcessName(handle.ProcessId);
+            if (handle.ObjectTypeNumber != 7 ||
+                (handle.GrantedAccess & dangerousMasks) == 0) {
+                continue;
+            }
 
-                // Trust the whitelist only when the owner name can be resolved.
-                // An inaccessible/vanished image path must not suppress the
-                // definitive duplicate-handle target check.
-                if (processName.empty() || !IsProcessWhitelisted(processName, handle.ProcessId)) {
-                    HANDLE hOwnerProcess = OpenProcess(PROCESS_DUP_HANDLE, FALSE, handle.ProcessId);
-                    if (hOwnerProcess != NULL) {
-                        HANDLE hDuplicated = NULL;
+            const std::wstring processName = GetProcessName(handle.ProcessId);
+            if (!processName.empty() &&
+                IsProcessWhitelisted(processName, handle.ProcessId)) {
+                continue;
+            }
 
-                        if (DuplicateHandle(
-                            hOwnerProcess,
-                            (HANDLE)(ULONG_PTR)handle.Handle,
-                            GetCurrentProcess(),
-                            &hDuplicated,
-                            0,
-                            FALSE,
-                            DUPLICATE_SAME_ACCESS)) {
+            HANDLE hOwnerProcess =
+                OpenProcess(PROCESS_DUP_HANDLE, FALSE, handle.ProcessId);
+            if (hOwnerProcess == NULL) {
+                setScanIssue(
+                    L"OpenProcess(PROCESS_DUP_HANDLE) failed; error=" +
+                    std::to_wstring(GetLastError()));
+                incomplete = true;
+                continue;
+            }
+            std::unique_ptr<void, ProcessHandleDeleter> ownerHandle(hOwnerProcess);
 
-                            // The target PID, not the owner's image path, is the
-                            // authoritative check for a handle targeting this game.
-                            const DWORD targetPid = GetProcessId(hDuplicated);
-                            if (targetPid == gameProcessId) {
-                                std::wstring ownerName = processName;
-                                if (ownerName.empty()) {
-                                    ownerName = L"UNKNOWN_PROCESS";
-                                }
-                                suspiciousProcess = ownerName + L" (PID:" +
-                                    std::to_wstring(handle.ProcessId) +
-                                    L", Access:0x" + std::to_wstring(handle.GrantedAccess) + L")";
+            HANDLE hDuplicated = NULL;
+            if (!DuplicateHandle(
+                    hOwnerProcess,
+                    reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(handle.Handle)),
+                    GetCurrentProcess(),
+                    &hDuplicated,
+                    0,
+                    FALSE,
+                    DUPLICATE_SAME_ACCESS)) {
+                setScanIssue(
+                    L"DuplicateHandle failed; error=" + std::to_wstring(GetLastError()));
+                incomplete = true;
+                continue;
+            }
+            std::unique_ptr<void, ProcessHandleDeleter> duplicatedHandle(hDuplicated);
+
+            const DWORD targetPid = GetProcessId(hDuplicated);
+            if (targetPid == 0) {
+                setScanIssue(
+                    L"GetProcessId on duplicated handle failed; error=" +
+                    std::to_wstring(GetLastError()));
+                incomplete = true;
+                continue;
+            }
+
+            if (targetPid == gameProcessId) {
+                std::wstring ownerName = processName.empty()
+                    ? L"UNKNOWN_PROCESS"
+                    : processName;
+                suspiciousProcess = ownerName + L" (PID:" +
+                    std::to_wstring(handle.ProcessId) +
+                    L", Access:0x" + std::to_wstring(handle.GrantedAccess) + L")";
 #ifdef _DEBUG
-                                std::wstring debugMsg = L"[AdvHeuristics] DETECTED SUSPICIOUS HANDLE to game: " + suspiciousProcess + L"\n";
-                                OutputDebugStringW(debugMsg.c_str());
+                std::wstring debugMsg =
+                    L"[AdvHeuristics] DETECTED SUSPICIOUS HANDLE to game: " +
+                    suspiciousProcess + L"\n";
+                OutputDebugStringW(debugMsg.c_str());
 #endif
-                                CloseHandle(hDuplicated);
-                                CloseHandle(hOwnerProcess);
-                                return true;
-                            }
-
-                            CloseHandle(hDuplicated);
-                        }
-                        CloseHandle(hOwnerProcess);
-                    }
-                }
+                return HandleScanResult::Suspicious;
             }
         }
 
-        return false;
+        return incomplete ? HandleScanResult::Incomplete : HandleScanResult::Clean;
     }
 
     bool AdvancedProcessHeuristics::HasSuspiciousPath(DWORD processId, std::wstring& matchedPath) const {
