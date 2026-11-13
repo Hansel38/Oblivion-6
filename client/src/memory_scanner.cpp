@@ -974,11 +974,13 @@ namespace Oblivion {
             const size_t sizeDiff = baseline.size > regionSize
                 ? baseline.size - regionSize
                 : regionSize - baseline.size;
-            if (sizeDiff >= 0x1000) {
+            if (sizeDiff >= 0x1000 || baseline.size > regionSize) {
+                // The stored CRC covers the complete section; never compare it
+                // against a shorter VirtualQuery prefix.
                 return RegionIntegrityResult::Incomplete;
             }
 
-            const size_t sizeToCheck = (std::min)(baseline.size, regionSize);
+            const size_t sizeToCheck = baseline.size;
             if (!IsReadableMemoryRange(memoryBase, sizeToCheck)) {
                 return RegionIntegrityResult::Incomplete;
             }
