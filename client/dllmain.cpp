@@ -7,7 +7,9 @@
 #include <windows.h>
 #include <thread>
 #include <mutex>
+#include <condition_variable>
 #include <atomic>
+#include <utility>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -36,9 +38,11 @@ namespace {
 
     struct LifecycleControl {
         std::mutex mutex;
+        std::condition_variable shutdownCondition;
         std::thread initializationThread;
         std::atomic<bool> shutdownRequested{ false };
         LifecycleState state = LifecycleState::NotStarted;
+        bool shutdownInProgress = false;
     };
 
     LifecycleControl& GetLifecycleControl() {
@@ -91,7 +95,7 @@ extern "C" __declspec(dllexport) void Oblivion_Shutdown() {
     std::thread initializationThread;
 
     {
-        std::lock_guard<std::mutex> lock(lifecycle.mutex);
+        std::unique_lock<std::mutex> lock(lifecycle.mutex);
         if (lifecycle.state == LifecycleState::Stopped) {
             return;
         }
@@ -99,12 +103,23 @@ extern "C" __declspec(dllexport) void Oblivion_Shutdown() {
         lifecycle.shutdownRequested.store(true);
         lifecycle.state = LifecycleState::Stopping;
 
+        if (lifecycle.initializationThread.joinable() &&
+            lifecycle.initializationThread.get_id() == std::this_thread::get_id()) {
+            // Never join the initialization thread from itself. A later call
+            // from the host thread completes the cleanup.
+            return;
+        }
+
+        lifecycle.shutdownCondition.wait(lock, [&lifecycle]() {
+            return !lifecycle.shutdownInProgress ||
+                   lifecycle.state == LifecycleState::Stopped;
+        });
+        if (lifecycle.state == LifecycleState::Stopped) {
+            return;
+        }
+
+        lifecycle.shutdownInProgress = true;
         if (lifecycle.initializationThread.joinable()) {
-            // Shutdown is a host-thread API. If misused from the initialization
-            // thread, leave the joinable thread for a later host-thread call.
-            if (lifecycle.initializationThread.get_id() == std::this_thread::get_id()) {
-                return;
-            }
             initializationThread = std::move(lifecycle.initializationThread);
         }
     }
@@ -139,7 +154,9 @@ extern "C" __declspec(dllexport) void Oblivion_Shutdown() {
     {
         std::lock_guard<std::mutex> lock(lifecycle.mutex);
         lifecycle.state = LifecycleState::Stopped;
+        lifecycle.shutdownInProgress = false;
     }
+    lifecycle.shutdownCondition.notify_all();
 }
 
 // Fungsi helper untuk melaporkan pelanggaran
