@@ -127,7 +127,7 @@ This checklist tracks findings from a source review. A checked item means the co
 ### P2 — Build, repository hygiene, and observability
 
 - [ ] **P2 — Remove generated Visual Studio build artifacts from source control.** Repository currently includes `Debug`, `Release`, `.tlog`, `.iobj`, `.ipdb`, and `.pdb` artifacts. Add appropriate ignore rules and remove generated files from Git history as appropriate.
-- [x] **P2 — Add automated CI workflow.** Linux server and Windows Release x86/x64 builds are configured in GitHub Actions. Check run results and add Debug builds / warnings-as-errors later.
+- [x] **P2 — Add automated CI workflow.** GitHub Actions builds the Linux server with GCC and the Windows solution in Debug and Release for both x86 and x64. Warnings-as-errors and static analysis remain separate follow-ups.
 - [ ] **P2 — Add unit tests.** Cover frame parser fragmentation/coalescing, malformed messages, maximum lengths, nonce parsing, HMAC verification, config validation, and ban-list parsing.
 - [ ] **P2 — Add fuzz tests.** Fuzz all protocol parsers and PE parsing routines using bounded input corpora.
 - [ ] **P2 — Add integration tests.** Exercise check-in, banned client, invalid secret, partial send, delayed response, disconnect, heartbeat timeout, and graceful shutdown.
