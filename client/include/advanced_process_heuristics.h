@@ -38,7 +38,16 @@ namespace Oblivion {
         bool HasSuspiciousBehavior(DWORD processId, std::wstring& behaviorType) const;
         
         // Memory signature detection
-        bool HasSuspiciousMemorySignature(DWORD processId, std::wstring& matchedPattern) const;
+        enum class MemoryScanResult {
+            Clean,
+            Suspicious,
+            Incomplete
+        };
+
+        MemoryScanResult HasSuspiciousMemorySignature(
+            DWORD processId,
+            std::wstring& matchedPattern,
+            std::wstring& scanIssue) const;
 
         // Helper functions
         std::string BuildHeuristicDetails(const std::wstring& processName,
