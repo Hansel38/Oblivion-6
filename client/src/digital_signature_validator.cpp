@@ -171,8 +171,8 @@ const std::map<std::wstring, std::wstring> Oblivion::DigitalSignatureValidator::
     {L"onedrive.exe", L"Microsoft Corporation"},
     {L"googledrivesync.exe", L"Google LLC"},
     
-    // NOTE: Open-source apps seperti notepad++, 7zip, vlc sering tidak ditandatangani
-    // Mereka dipindahkan ke whitelist biasa (tanpa signature verification)
+    // Unsigned utility apps are not process-whitelisted by basename; they
+    // receive path/module/window checks and only skip the generic memory-byte scan.
     
     // Add more as needed
 };
@@ -665,6 +665,59 @@ namespace Oblivion {
         WinVerifyTrust(NULL, &policyGUID, &winTrustData);
 
         return result == ERROR_SUCCESS;
+    }
+
+    // Used only after the caller has verified that the executable path is
+    // inside the Windows directory. This helper checks the file-signature path;
+    // it does not perform a separate catalog lookup. A missing embedded signature
+    // is therefore incomplete, not proof that a Windows binary is untrusted.
+    DigitalSignatureValidator::ProcessSignatureResult
+    DigitalSignatureValidator::VerifyWindowsSystemProcessSignatureDetailed(
+        const std::wstring& processPath,
+        std::wstring& failureReason) {
+        failureReason.clear();
+        if (processPath.empty()) {
+            failureReason = L"Windows process image path is empty";
+            return ProcessSignatureResult::Incomplete;
+        }
+
+        LONG trustStatus = ERROR_SUCCESS;
+        if (VerifyFileSignature(processPath, &trustStatus)) {
+            std::wstring publisherName;
+            SetLastError(ERROR_SUCCESS);
+            if (!GetFilePublisher(processPath, publisherName)) {
+                failureReason =
+                    L"embedded signature verified but publisher extraction failed; error=" +
+                    std::to_wstring(GetLastError());
+                return ProcessSignatureResult::Incomplete;
+            }
+
+            std::transform(
+                publisherName.begin(), publisherName.end(), publisherName.begin(),
+                [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
+            if (publisherName != L"microsoft corporation" &&
+                publisherName != L"microsoft windows") {
+                failureReason =
+                    L"Windows-core process has an unexpected signature publisher";
+                return ProcessSignatureResult::Untrusted;
+            }
+            return ProcessSignatureResult::Trusted;
+        }
+
+        failureReason = L"WinVerifyTrust failed; status=" +
+            std::to_wstring(static_cast<unsigned long>(trustStatus));
+        if (trustStatus == TRUST_E_NOSIGNATURE) {
+            failureReason = L"No embedded signature was found; catalog trust was not established";
+            return ProcessSignatureResult::Incomplete;
+        }
+
+        if (IsDefinitivelyUntrustedSignatureStatus(trustStatus)) {
+            return ProcessSignatureResult::Untrusted;
+        }
+
+        failureReason = L"WinVerifyTrust could not produce a definitive result; status=" +
+            std::to_wstring(static_cast<unsigned long>(trustStatus));
+        return ProcessSignatureResult::Incomplete;
     }
 
     // Static function untuk mendapatkan publisher dari file

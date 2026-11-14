@@ -130,7 +130,9 @@ This checklist tracks findings from a source review. A checked item means the co
 - [x] **P1 — Do not skip handle-target verification when the owner image path is unavailable.** `GetProcessName` now requests only `PROCESS_QUERY_LIMITED_INFORMATION`; when the name still cannot be resolved, the scanner continues with the authoritative `DuplicateHandle`/`GetProcessId` target check and reports a confirmed game handle as `UNKNOWN_PROCESS` rather than silently skipping it.
 - [x] **P1 — Narrow API-hook prologue detection.** Treat `0xFF` as a branch only when its ModRM operation encodes indirect CALL/JMP, and use `VirtualQuery` allocation-base checks instead of dereferencing module PE headers.
 - [x] **P1 — Bound process signature verification cache.** Remove the process-global path cache; retain signature decisions only within the current scan phase and cap each cache at 256 entries. Once full, verify directly instead of inserting, so cached trust cannot survive a later scan or watcher restart and memory use stays bounded. Windows runtime file-replacement and long-running-process tests remain required.
+- [ ] **P1 — Review remaining heuristic false positives.**
 - [ ] **P1 — Review remaining heuristic false positives.** Generic window classes (for example `TForm1`) and broad handle/module heuristics can still flag legitimate software; review these separately.
+- [x] **P1 — Avoid basename-only process whitelist bypasses.** Unsigned utilities no longer skip all process heuristics solely by executable name; they remain exempt only from the generic memory-byte scan, while path/module/window checks still run. Windows-core names must resolve inside `System32` or `SysWOW64`, pass embedded Authenticode verification, and have a Microsoft publisher before being skipped. Missing embedded signatures are treated as incomplete rather than trusted or malicious because this helper does not perform catalog lookup. VLC uses its configured VideoLAN publisher verification. Runtime spoofed-name, core-process, catalog-signature, and VLC trust fixtures remain required.
 - [x] **P1 — Remove generic window-class false positives.** Remove `TForm1`, `TMainForm`, and generic Qt window-class names from exact-match detections; retain the CE/debugger-specific class names. Runtime fixtures across clean Lazarus/Delphi/Qt applications remain required.
 - [x] **P1 — Narrow Cheat Engine window-title signatures.** Require the documented eight-hex-digit PID prefix and a standalone `CE 6.x` / `CE 7.x` token; do not match ordinary dates or `ce ` inside words such as `Science`. Runtime title fixtures remain required.
 - [x] **P1 — Bound ProcessWatcher PID cache.** Remove PIDs absent from the current process snapshot and clear the cache on watcher restart. PID reuse is checked against process creation time.
@@ -155,6 +157,14 @@ This checklist tracks findings from a source review. A checked item means the co
 - [ ] **P2 — Add integration tests.** Exercise check-in, banned client, invalid secret, partial send, delayed response, disconnect, heartbeat timeout, and graceful shutdown.
 - [ ] **P2 — Add structured security telemetry.** Use event IDs, severity, session correlation IDs, and redaction. Avoid logging credentials or full hardware identifiers.
 - [x] **P2 — Document deployment.** `DEPLOYMENT.md` documents the plain-TCP endpoint, firewall restrictions, secret handling/rotation limitations, backups, ban review, incident response, and remaining release blockers. TLS remains intentionally out of scope.
+
+- [ ] Runtime fixture: unsigned executables named `notepad++.exe`, `7zfm.exe`, `7zg.exe`, `winrar.exe`, or `vcpkgsrv.exe` still receive path/module/window checks and are not skipped by basename; their generic memory-byte scan remains disabled
+- [ ] Runtime fixture: VLC is skipped only after successful `VideoLAN` publisher verification; invalid/incomplete signature results do not count as trusted
+
+- [ ] Runtime fixture: a fake `svchost.exe` or `explorer.exe` outside `System32`/`SysWOW64` is not whitelisted; an executable in those directories is skipped only after Microsoft publisher verification
+- [ ] Runtime fixture: a Windows-core executable without an embedded signature returns `Incomplete` (not `Trusted` or `Untrusted`) until catalog verification is explicitly supported; remaining path/module/window checks still run
+- [ ] Runtime fixture: unsigned Notepad++/7-Zip/WinRAR tools do not skip path/module/window checks solely by basename; the generic memory-byte scan remains exempt for those names
+- [ ] Runtime fixture: VLC is skipped only after successful `VideoLAN` publisher verification; invalid/incomplete signature results do not count as trusted
 
 ## Verification checklist
 

@@ -2,6 +2,7 @@
 #include "advanced_process_heuristics.h"
 #include "digital_signature_validator.h"
 #include <limits>
+#include <new>
 #include <cstddef>
 #include <tlhelp32.h>
 #include <vector>
@@ -232,15 +233,7 @@ namespace {
         // Windows Audio Services
         L"audiodg.exe",  // Audio Device Graph Isolation (Windows audio service)
         
-        // Open-source utilities (no signature verification - often unsigned)
-        L"notepad++.exe",
-        L"7zfm.exe",
-        L"7zg.exe",
-        L"vlc.exe",
-        L"winrar.exe",
-        
-        // Development tools (no signature verification - often unsigned during development)
-        L"vcpkgsrv.exe",  // Visual Studio Package Server
+        // All remaining entries require path + Authenticode or publisher verification.
         
         // Common legitimate software (REQUIRES SIGNATURE VERIFICATION)
         // These processes MUST be verified with digital signature to prevent spoofing
@@ -287,6 +280,7 @@ namespace {
         L"skype.exe",
         L"teams.exe",
         L"spotify.exe",
+        L"vlc.exe", // VideoLAN publisher verification is configured below.
         L"epicgameslauncher.exe",
         L"easyanticheat.exe",
         L"battlenet.exe",
@@ -296,8 +290,8 @@ namespace {
         L"dropbox.exe",
         L"onedrive.exe",
         L"googledrivesync.exe"
-        // NOTE: notepad++, 7zip, vlc, winrar tidak require signature verification
-        // karena sering unsigned (open-source/freeware)
+        // Unsigned utilities are not full-process whitelist entries. They may
+        // be exempted only from the generic memory-byte scan below.
     };
 
     // Resolve the complete process image path without assuming MAX_PATH is sufficient.
@@ -353,6 +347,61 @@ namespace {
         return GetProcessImagePath(processId, processPath) ? processPath : L"";
     }
 
+    bool GetWindowsDirectoryDynamic(std::wstring& windowsDirectory, DWORD& failureError) {
+        windowsDirectory.clear();
+        failureError = ERROR_SUCCESS;
+        size_t capacity = 512;
+        constexpr size_t kMaximumCapacity = 32768;
+        while (capacity <= kMaximumCapacity) {
+            std::vector<wchar_t> buffer;
+            try {
+                buffer.resize(capacity);
+            } catch (const std::bad_alloc&) {
+                failureError = ERROR_NOT_ENOUGH_MEMORY;
+                return false;
+            }
+
+            const UINT length = GetWindowsDirectoryW(
+                buffer.data(), static_cast<UINT>(buffer.size()));
+            if (length == 0) {
+                failureError = GetLastError();
+                return false;
+            }
+            if (length < buffer.size()) {
+                windowsDirectory.assign(buffer.data(), length);
+                return !windowsDirectory.empty();
+            }
+            if (length >= kMaximumCapacity) {
+                failureError = ERROR_INSUFFICIENT_BUFFER;
+                return false;
+            }
+            capacity = static_cast<size_t>(length) + 1;
+        }
+
+        failureError = ERROR_INSUFFICIENT_BUFFER;
+        return false;
+    }
+
+    std::wstring NormalizeProcessPath(std::wstring path) {
+        std::replace(path.begin(), path.end(), L'/', L'\\');
+        std::transform(path.begin(), path.end(), path.begin(),
+            [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
+        while (path.size() > 3 && path.back() == L'\\') {
+            path.pop_back();
+        }
+        return path;
+    }
+
+    bool IsWithinProcessDirectory(
+        const std::wstring& path, const std::wstring& directory) {
+        if (directory.empty() || path.size() <= directory.size() ||
+            path.compare(0, directory.size(), directory) != 0) {
+            return false;
+        }
+        // A drive root such as "c:\\" already ends with a separator.
+        return directory.back() == L'\\' || path[directory.size()] == L'\\';
+    }
+
     ProcessWhitelistResult IsProcessWhitelisted(
         const std::wstring& processName,
         DWORD processId,
@@ -385,8 +434,91 @@ namespace {
             }
         }
         
-        // Jika tidak perlu verifikasi signature (proses Windows system), langsung return true
+        // Windows-core names are not trusted by basename alone. Require the
+        // executable to reside under the Windows directory and pass Authenticode.
         if (!needsSignatureVerification) {
+            if (processId == 0) {
+                if (scanIssue != nullptr) {
+                    *scanIssue = L"Windows process whitelist check requires a process ID";
+                }
+                return ProcessWhitelistResult::Incomplete;
+            }
+
+            std::wstring processPath;
+            DWORD pathError = ERROR_SUCCESS;
+            if (!GetProcessImagePath(processId, processPath, &pathError)) {
+                if (scanIssue != nullptr) {
+                    *scanIssue = L"Windows process image-path query failed; error=" +
+                        std::to_wstring(pathError);
+                }
+                return ProcessWhitelistResult::Incomplete;
+            }
+
+            std::wstring windowsDirectory;
+            DWORD windowsDirectoryError = ERROR_SUCCESS;
+            if (!GetWindowsDirectoryDynamic(windowsDirectory, windowsDirectoryError)) {
+                if (scanIssue != nullptr) {
+                    *scanIssue = L"Windows directory query failed; error=" +
+                        std::to_wstring(windowsDirectoryError);
+                }
+                return ProcessWhitelistResult::Incomplete;
+            }
+
+            const std::wstring normalizedProcessPath =
+                NormalizeProcessPath(processPath);
+            const std::wstring normalizedSystem32 =
+                NormalizeProcessPath(windowsDirectory + L"\\System32");
+            const std::wstring normalizedSyswow64 =
+                NormalizeProcessPath(windowsDirectory + L"\\SysWOW64");
+            if (!IsWithinProcessDirectory(normalizedProcessPath, normalizedSystem32) &&
+                !IsWithinProcessDirectory(normalizedProcessPath, normalizedSyswow64)) {
+                // Do not trust names from writable locations such as Windows\\Temp
+                // or Windows\\SystemApps. Only native system executable folders qualify.
+                return ProcessWhitelistResult::NotWhitelisted;
+            }
+
+            // Keep this decision separate from publisher-specific cache entries.
+            const std::wstring systemCacheKey =
+                L"windows-system:" + normalizedProcessPath;
+            const auto cachedSystemTrust = signatureCache.find(systemCacheKey);
+            if (cachedSystemTrust != signatureCache.end()) {
+                if (cachedSystemTrust->second) {
+                    return ProcessWhitelistResult::Whitelisted;
+                }
+                ReportViolationAndExit(
+                    L"", "SIGNATURE_SPOOFING",
+                    "Windows-core process failed Authenticode verification; PID=" +
+                        std::to_string(processId));
+                return ProcessWhitelistResult::NotWhitelisted;
+            }
+
+            std::wstring signatureIssue;
+            const auto signatureResult =
+                Oblivion::DigitalSignatureValidator::VerifyWindowsSystemProcessSignatureDetailed(
+                    processPath, signatureIssue);
+            if (signatureResult ==
+                Oblivion::DigitalSignatureValidator::ProcessSignatureResult::Incomplete) {
+                if (scanIssue != nullptr) {
+                    *scanIssue = L"Windows process Authenticode verification incomplete: " +
+                        signatureIssue;
+                }
+                return ProcessWhitelistResult::Incomplete;
+            }
+
+            const bool isTrusted =
+                signatureResult ==
+                Oblivion::DigitalSignatureValidator::ProcessSignatureResult::Trusted;
+            if (signatureCache.size() < kMaximumSignatureCacheEntries) {
+                signatureCache.emplace(systemCacheKey, isTrusted);
+            }
+            if (!isTrusted) {
+                ReportViolationAndExit(
+                    L"", "SIGNATURE_SPOOFING",
+                    "Windows-core process failed Authenticode verification; PID=" +
+                        std::to_string(processId));
+                return ProcessWhitelistResult::NotWhitelisted;
+            }
+
             return ProcessWhitelistResult::Whitelisted;
         }
         
@@ -845,11 +977,15 @@ namespace Oblivion {
     bool ShouldPerformMemoryScan(const std::wstring& processName) {
         std::wstring lowerName = ::ToLowerCopy(processName);
         
-        // Whitelist untuk proses inti Windows
-        const std::vector<std::wstring> systemWhitelist = {
-            L"system", L"smss.exe", L"csrss.exe", L"wininit.exe", L"services.exe", L"lsass.exe", L"svchost.exe", L"explorer.exe"
-        };
-        
+        // Keep the memory-byte scan policy aligned with the full-process whitelist.
+        // A name match here skips only this heuristic layer; it does not bypass the
+        // path, module, or window checks performed by PerformScan().
+        for (const auto& processNameWhitelisted : kSystemProcessWhitelist) {
+            if (lowerName == processNameWhitelisted) {
+                return false;
+            }
+        }
+
         // Whitelist untuk proses legitimate dari vendor hardware/software
         const std::vector<std::wstring> legitimatePatterns = {
             L"nvdisplay", L"nvcontainer", L"nvidia", L"nvbackend", L"nvspcap", L"nvstreamer",
@@ -859,6 +995,9 @@ namespace Oblivion {
             L"microsoft", L"windows", L"skype", L"teams", L"msedge", L"msedgewebview",
             L"audiodg", L"audio",  // Windows audio services
             L"vcpkgsrv",  // Visual Studio Package Server
+            // These unsigned tools still receive path/module/window checks. Skip only
+            // the generic memory-byte scan, whose signatures can overlap ordinary code.
+            L"notepad++", L"7zfm.exe", L"7zg.exe", L"winrar.exe",
             L"adobe", L"acrobat", L"creative cloud",
             L"google", L"chrome", L"drive",
             L"steam", L"origin", L"uplay", L"epicgames", L"battlenet",
@@ -868,13 +1007,6 @@ namespace Oblivion {
             L"vscode", L"code.exe", L"cpptools", L"omnisharp",
             L"devenv", L"msbuild", L"cl.exe", L"link.exe"
         };
-        
-        // Cek whitelist sistem
-        for (const auto& pattern : systemWhitelist) {
-            if (lowerName == pattern) {
-                return false;
-            }
-        }
         
         // Cek whitelist legitimate (partial match)
         for (const auto& pattern : legitimatePatterns) {

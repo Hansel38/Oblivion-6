@@ -29,6 +29,11 @@ namespace Oblivion {
         static bool VerifyProcessSignature(
             const std::wstring& processPath,
             const std::wstring& expectedPublisher);
+        // Windows-core process names are accepted only after path containment
+        // in the Windows directory has been established by the caller.
+        static ProcessSignatureResult VerifyWindowsSystemProcessSignatureDetailed(
+            const std::wstring& processPath,
+            std::wstring& failureReason);
         
         // Fungsi untuk mendapatkan publisher dari file executable
         static bool GetFilePublisher(const std::wstring& filePath, std::wstring& publisherName);
