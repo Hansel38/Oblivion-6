@@ -172,6 +172,12 @@ This checklist tracks findings from a source review. A checked item means the co
 
 - [ ] Runtime fixture: accept a PE section whose nonzero `VirtualSize` ends within `SizeOfImage` while `SizeOfRawData` extends beyond that virtual end due file alignment; still reject raw data that extends beyond the file
 
+- [x] **P1 — Verify every executable baseline in a shared `VirtualQuery` region.** Do not return `Clean` after the first matching section; compare every complete baseline section contained in the region and return `Incomplete` when an executable region has no baseline or overlaps only part of a section.
+
+- [ ] Runtime fixture: two adjacent executable sections share one `VirtualQuery` region; keep the first section unchanged, modify the second, and verify the second section is detected
+- [ ] Runtime fixture: an executable region inside the main module image that overlaps no baseline section returns `Incomplete`, not `Clean`
+- [ ] Runtime fixture: a `VirtualQuery` region that contains a complete baseline section plus a second partially overlapping section returns `Incomplete`
+
 ## Verification checklist
 
 - [x] Windows Visual Studio build: Debug x86
