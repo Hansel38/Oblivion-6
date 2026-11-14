@@ -298,7 +298,7 @@ static bool AppendBanListEntryAtomically(
     if (attributes != INVALID_FILE_ATTRIBUTES) {
         replaced = ReplaceFileA(
             banFilePath.c_str(), temporaryPath.c_str(), nullptr,
-            REPLACEFILE_WRITE_THROUGH, nullptr, nullptr) != FALSE;
+            0, nullptr, nullptr) != FALSE;
     } else {
         const DWORD error = GetLastError();
         if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
