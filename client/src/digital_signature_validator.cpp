@@ -693,9 +693,13 @@ namespace Oblivion {
             return ProcessSignatureResult::Incomplete;
         }
 
-        return IsDefinitivelyUntrustedSignatureStatus(trustStatus)
-            ? ProcessSignatureResult::Untrusted
-            : ProcessSignatureResult::Incomplete;
+        if (IsDefinitivelyUntrustedSignatureStatus(trustStatus)) {
+            return ProcessSignatureResult::Untrusted;
+        }
+
+        failureReason = L"WinVerifyTrust could not produce a definitive result; status=" +
+            std::to_wstring(static_cast<unsigned long>(trustStatus));
+        return ProcessSignatureResult::Incomplete;
     }
 
     // Static function untuk mendapatkan publisher dari file
