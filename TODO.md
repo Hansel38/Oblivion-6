@@ -132,6 +132,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [x] **P1 — Bound process signature verification cache.** Remove the process-global path cache; retain signature decisions only within the current scan phase and cap each cache at 256 entries. Once full, verify directly instead of inserting, so cached trust cannot survive a later scan or watcher restart and memory use stays bounded. Windows runtime file-replacement and long-running-process tests remain required.
 - [ ] **P1 — Review remaining heuristic false positives.** Generic window classes (for example `TForm1`) and broad handle/module heuristics can still flag legitimate software; review these separately.
 - [x] **P1 — Remove generic window-class false positives.** Remove `TForm1`, `TMainForm`, and generic Qt window-class names from exact-match detections; retain the CE/debugger-specific class names. Runtime fixtures across clean Lazarus/Delphi/Qt applications remain required.
+- [x] **P1 — Narrow Cheat Engine window-title signatures.** Require the documented eight-hex-digit PID prefix and a standalone `CE 6.x` / `CE 7.x` token; do not match ordinary dates or `ce ` inside words such as `Science`. Runtime title fixtures remain required.
 - [x] **P1 — Bound ProcessWatcher PID cache.** Remove PIDs absent from the current process snapshot and clear the cache on watcher restart. PID reuse is checked against process creation time.
 - [x] **P1 — Verify process identity against PID reuse.** Key ProcessWatcher cache entries by PID plus `GetProcessTimes()` creation time; discard the prior entry when the current process identity cannot be queried, so stale scan decisions are not reused.
 
@@ -180,6 +181,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [ ] Runtime fixture: PE relocation directory placed in raw padding beyond `VirtualSize` is rejected as unavailable; valid `VirtualSize < SizeOfRawData` and `VirtualSize > SizeOfRawData` images are handled correctly
 - [ ] Runtime fixture: with the module at its preferred `ImageBase`, tampering at a relocation target is detected; with a rebased image, only actual relocation spans are excluded
 - [ ] Runtime fixture: construct a valid executable section whose baseline CRC32 is `0x00000000`; clean memory remains clean and a modified byte is detected without falling back to a differently sized disk CRC
+- [ ] Runtime fixture: window title `Science 7.0` and date title `2026-11-14 - Report` are not classified as Cheat Engine; titles `CE 7.5` and `00001C0C-Republic-RO` retain their intended detection
 - [ ] Runtime fixture: provide a non-executable `.text` decoy plus an executable `.code` section marked `IMAGE_SCN_CNT_CODE`; early-injection and runtime checks must still cover `.code` even when another executable section uses a runtime-mutable name
 - [ ] Runtime fixture: present a structurally valid PE with only a non-executable `.text` section and no executable code section; verify baseline creation fails closed
 - [ ] Security test: invalid/missing secret fails closed
