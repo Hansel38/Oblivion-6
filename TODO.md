@@ -139,7 +139,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [x] **P2 — Fix COM apartment handling.** A scoped COM initializer treats both `S_OK` and `S_FALSE` as successful initialization and balances either with exactly one `CoUninitialize`; `RPC_E_CHANGED_MODE` leaves the caller's existing COM apartment untouched. Runtime validation under both apartment models remains required.
 - [ ] **P2 — Avoid leaking hardware identifiers in console output.** Redact or pseudonymize HWID in operational logs.
 - [ ] **P2 — Add log rotation and access controls.** `violations.log` currently grows without bound and may contain sensitive process/path data.
-- [ ] **P2 — Cross-process ban-list locking and atomic update.** Ban-list checks and appends are now serialized within one server process; OS-level locking and crash-safe atomic updates across multiple server instances remain open.
+- [x] **P2 — Cross-process ban-list locking and atomic replacement.** Windows and Linux now coordinate all ban-list reads through a shared sidecar lock (`LockFileEx` / `flock`) and updates through an exclusive lock. `AddToBanList` validates under the exclusive lock, writes a complete temporary file, flushes it, then publishes it with `ReplaceFile` / `rename`; Linux also syncs the containing directory. Existing ban-list content and entry validation are retained. The Linux lock file is created with mode `0660` (subject to `umask`); server instances sharing a ban list must have compatible directory/group permissions. Windows `ReplaceFile` has no supported write-through flag, so power-loss durability still requires fault-injection validation.
 - [x] **P2 — Fix whitespace trimming on empty ban-list lines.** Skip empty/whitespace-only lines before trimming, avoiding `std::string::npos` arithmetic in both Windows and Linux ban-list parsers.
 - [x] **P2 — Validate ban-list entries.** Require the generated 64-character hexadecimal SHA-256 HWID format for active entries and new writes; malformed entries make the list unavailable instead of being silently ignored. Duplicate checks and appends are serialized within one server process. Parser and concurrent runtime fixtures remain required.
 
@@ -164,6 +164,8 @@ This checklist tracks findings from a source review. A checked item means the co
 - [ ] Runtime test: client handshake and nonce parsing
 - [ ] Runtime test: heartbeat fragmentation/coalescing
 - [ ] Runtime test: ban-list missing, unreadable, malformed, duplicate, and concurrent access cases
+- [ ] Runtime test: two server processes concurrently attempt to add the same and different HWIDs; verify no duplicate/lost entries and that readers observe only complete old/new ban-list files
+- [ ] Fault-injection test: terminate a writer before temporary-file publication and immediately after publication; verify the original or complete new list remains parseable, with incomplete/corrupt data failing closed
 - [ ] Runtime fixture: split an executable baseline section into multiple `VirtualQuery` regions, modify a later page, and verify the scan reports incomplete rather than clean
 - [ ] Runtime fixture: force the first `VirtualQuery` region to be shorter than the baseline section and verify whole-section CRC is not compared to a truncated prefix
 - [ ] Runtime test: call `Oblivion_Entry()`, then `Oblivion_Shutdown()`, then unload the DLL across repeated cycles
