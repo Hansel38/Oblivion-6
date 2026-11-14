@@ -2,6 +2,7 @@
 #include "advanced_process_heuristics.h"
 #include "digital_signature_validator.h"
 #include <limits>
+#include <new>
 #include <cstddef>
 #include <tlhelp32.h>
 #include <vector>
@@ -232,7 +233,7 @@ namespace {
         // Windows Audio Services
         L"audiodg.exe",  // Audio Device Graph Isolation (Windows audio service)
         
-        // VLC is verified against its configured VideoLAN publisher below.
+        // All remaining entries require path + Authenticode or publisher verification.
         
         // Common legitimate software (REQUIRES SIGNATURE VERIFICATION)
         // These processes MUST be verified with digital signature to prevent spoofing
