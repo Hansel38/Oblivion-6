@@ -49,8 +49,9 @@ namespace Oblivion {
     private:
         // === LAYER 1: PE Header & Structure Validation ===
         bool ValidatePEStructure(const std::vector<uint8_t>& fileData);
-        bool ParsePEHeaders(const std::vector<uint8_t>& fileData, 
-                          std::vector<PESectionInfo>& sections);
+        bool ParsePEHeaders(const std::vector<uint8_t>& fileData,
+                          std::vector<PESectionInfo>& sections,
+                          bool updateSectionMap = true);
         bool ValidateImageHeaders(const std::vector<uint8_t>& fileData,
                                  IMAGE_DOS_HEADER& dosHeader,
                                  IMAGE_NT_HEADERS& ntHeaders);
