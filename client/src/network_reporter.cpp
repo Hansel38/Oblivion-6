@@ -590,6 +590,7 @@ namespace Oblivion {
                 Oblivion::HeartbeatConfig cfg;
                 cfg.interval_ms = m_hbIntervalMs;
                 cfg.timeout_ms = m_hbTimeoutMs;
+                uint32_t expectedPingSequence = 1;
                 while (m_hbRunning.load()) {
                     std::string frame;
                     if (!ReceiveFrame(socket, m_pendingNetworkData, frame,
@@ -618,6 +619,11 @@ namespace Oblivion {
                         (void)timestamp;
 
                         const uint32_t seq = static_cast<uint32_t>(seq64);
+                        // Reject authenticated replays and out-of-order PINGs before
+                        // replying. The server expects exactly one PONG for its current
+                        // sequence; answering an older PING only creates a false miss.
+                        if (!IsExpectedHeartbeatSequence(seq, expectedPingSequence)) break;
+
                         const std::string pingAuthData =
                             "PING:" + seqText + ":" + timestampText + ":" + nonceText + ":" + m_hwid;
                         const std::string expectedPingMac = HmacSha256(sessionKey, pingAuthData);
@@ -638,6 +644,7 @@ namespace Oblivion {
                         if (mac.size() != 64) break;
                         const std::string pong = "PONG:" + pongFields + ":" + mac + ";";
                         if (!SendAll(socket, pong)) break;
+                        ++expectedPingSequence;
                     } catch (...) { break; }
                 }
                 const bool endedUnexpectedly = m_hbRunning.load();
