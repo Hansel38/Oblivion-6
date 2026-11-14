@@ -1024,21 +1024,20 @@ namespace Oblivion {
             return RegionIntegrityResult::Incomplete;
         }
 
-        // Compare only a region that covers a complete baseline section.
-        // If VirtualQuery splits a baseline section (for example after a page
-        // protection change), a later subregion overlaps the section but cannot
-        // be validated against its whole-section CRC. Treat that as incomplete,
-        // not clean; otherwise modified pages after the first region are skipped.
+        // VirtualQuery can return one region containing multiple adjacent
+        // executable sections. Verify every complete baseline contained in
+        // this region; returning after the first section would skip the rest.
         const uintptr_t maximumAddress =
             (std::numeric_limits<uintptr_t>::max)();
         if (regionSize > maximumAddress - rva) {
             return RegionIntegrityResult::Incomplete;
         }
         const uintptr_t regionEnd = rva + regionSize;
+        bool verifiedBaseline = false;
 
         for (const auto& baseline : m_diskBaseline) {
             if (baseline.size == 0) {
-                if (baseline.rva == rva) {
+                if (baseline.rva >= rva && baseline.rva < regionEnd) {
                     return RegionIntegrityResult::Incomplete;
                 }
                 continue;
@@ -1052,78 +1051,80 @@ namespace Oblivion {
                 continue;
             }
 
-            // An overlapping region must begin at the baseline RVA and cover
-            // the complete CRC range. Partial overlaps cannot be called clean.
-            if (baseline.rva != rva) {
+            // Any overlap must contain the whole baseline section. A split
+            // section cannot be verified from a partial VirtualQuery region.
+            if (baseline.rva < rva || baselineEnd > regionEnd) {
                 return RegionIntegrityResult::Incomplete;
             }
 
-            const size_t sizeDiff = baseline.size > regionSize
-                ? baseline.size - regionSize
-                : regionSize - baseline.size;
-            if (sizeDiff >= 0x1000 || baseline.size > regionSize) {
-                // The stored CRC covers the complete section; never compare it
-                // against a shorter VirtualQuery prefix.
+            const size_t baselineOffset =
+                static_cast<size_t>(baseline.rva - rva);
+            if (baselineOffset > regionSize ||
+                baseline.size > regionSize - baselineOffset) {
                 return RegionIntegrityResult::Incomplete;
             }
 
+            uint8_t* baselineMemory = memoryBase + baselineOffset;
             const size_t sizeToCheck = baseline.size;
-            if (!IsReadableMemoryRange(memoryBase, sizeToCheck)) {
+            if (!IsReadableMemoryRange(baselineMemory, sizeToCheck)) {
                 return RegionIntegrityResult::Incomplete;
             }
 
             const uint32_t currentCRC32 =
-                CalculateCRC32(memoryBase, sizeToCheck);
+                CalculateCRC32(baselineMemory, sizeToCheck);
             // memoryCRC32 is always populated when a baseline is inserted.
             // Do not reserve zero as a sentinel: CRC32 can legitimately be zero.
             const bool memoryModified =
                 currentCRC32 != baseline.memoryCRC32;
 
-            if (!memoryModified) {
-                return RegionIntegrityResult::Clean;
-            }
-
-            // A confirmed modified code region still receives the existing
-            // code-cave check before reporting the stronger finding.
-            if (baseline.isCodeSection &&
-                DetectCodeCaveInjection(memoryBase, sizeToCheck)) {
-                std::string exeName = "unknown";
-                if (!m_executablePath.empty()) {
-                    const size_t lastSlash =
-                        m_executablePath.find_last_of(L"\\/");
-                    if (lastSlash != std::wstring::npos &&
-                        lastSlash + 1 < m_executablePath.length()) {
-                        const std::wstring exeNameWide =
-                            m_executablePath.substr(lastSlash + 1);
-                        const int required = WideCharToMultiByte(
-                            CP_UTF8, 0, exeNameWide.c_str(),
-                            static_cast<int>(exeNameWide.length()),
-                            nullptr, 0, nullptr, nullptr);
-                        if (required > 0) {
-                            exeName.resize(static_cast<size_t>(required));
-                            if (WideCharToMultiByte(
-                                    CP_UTF8, 0, exeNameWide.c_str(),
-                                    static_cast<int>(exeNameWide.length()),
-                                    &exeName[0], required, nullptr, nullptr) != required) {
-                                exeName = "unknown";
+            if (memoryModified) {
+                // A confirmed modified code region still receives the existing
+                // code-cave check before reporting the stronger finding.
+                if (baseline.isCodeSection &&
+                    DetectCodeCaveInjection(baselineMemory, sizeToCheck)) {
+                    std::string exeName = "unknown";
+                    if (!m_executablePath.empty()) {
+                        const size_t lastSlash =
+                            m_executablePath.find_last_of(L"\\/");
+                        if (lastSlash != std::wstring::npos &&
+                            lastSlash + 1 < m_executablePath.length()) {
+                            const std::wstring exeNameWide =
+                                m_executablePath.substr(lastSlash + 1);
+                            const int required = WideCharToMultiByte(
+                                CP_UTF8, 0, exeNameWide.c_str(),
+                                static_cast<int>(exeNameWide.length()),
+                                nullptr, 0, nullptr, nullptr);
+                            if (required > 0) {
+                                exeName.resize(static_cast<size_t>(required));
+                                if (WideCharToMultiByte(
+                                        CP_UTF8, 0, exeNameWide.c_str(),
+                                        static_cast<int>(exeNameWide.length()),
+                                        &exeName[0], required, nullptr, nullptr) != required) {
+                                    exeName = "unknown";
+                                }
                             }
                         }
                     }
+
+                    std::stringstream details;
+                    details << "File: " << exeName
+                            << " | Suspicious code pattern detected (NOP sled/code cave) at RVA: 0x"
+                            << std::hex << baseline.rva;
+                    ReportViolationAndExit(L"", "CODE_CAVE_DETECTED", details.str());
                 }
 
-                std::stringstream details;
-                details << "File: " << exeName
-                        << " | Suspicious code pattern detected (NOP sled/code cave) at RVA: 0x"
-                        << std::hex << rva;
-                ReportViolationAndExit(L"", "CODE_CAVE_DETECTED", details.str());
+                return RegionIntegrityResult::Modified;
             }
 
-            return RegionIntegrityResult::Modified;
+            verifiedBaseline = true;
         }
 
-        // Some executable pages do not begin at a baseline section RVA. They
-        // remain outside this section-level comparison, as before.
-        return RegionIntegrityResult::Clean;
+        // An executable region with no corresponding baseline section is not
+        // automatically clean: it may be newly committed executable memory
+        // in a gap or an executable section omitted from the original baseline.
+        return verifiedBaseline
+            ? RegionIntegrityResult::Clean
+            : RegionIntegrityResult::Incomplete;
     }
 
     bool MemoryScanner::DetectSuspiciousMemoryRegion(uint8_t* memoryBase, size_t regionSize) {

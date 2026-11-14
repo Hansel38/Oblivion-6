@@ -122,6 +122,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [x] **P1 — Exclude uninitialized struct padding from baseline integrity checksum.** Serialize the `ExecutableRegion` values field-by-field and normalize the boolean to 0/1 instead of hashing the raw struct object representation. Runtime baseline-tamper and repeated-scan stability fixtures remain required.
 - [x] **P1 — Treat zero CRC32 as a valid memory baseline.** Remove the zero-value sentinel and its disk-CRC fallback from runtime/cross verification; every inserted executable baseline has a memory CRC, and zero is a valid checksum. Add a zero-CRC fixture to the runtime regression suite.
 - [x] **P1 — Do not treat partial executable-section regions as clean.** When a queried executable region overlaps a recorded section baseline but does not begin at the section RVA, or is too short to cover the whole-section CRC, return `Incomplete` instead of skipping/comparing a partial prefix; invalid range arithmetic also fails closed. Runtime fixtures with `VirtualQuery`-split executable sections and page-protection changes remain required.
+- [x] **P1 — Verify every executable baseline in a shared `VirtualQuery` region.** Do not return `Clean` after the first matching section; compare every complete baseline section contained in the region and return `Incomplete` when an executable region has no baseline or overlaps only part of a section.
 - [x] **P1 — Bound MemoryScanner baseline CRC comparisons.** A stored whole-region CRC is compared only when the complete baseline range is available; a shorter region now returns `MEMORY_INTEGRITY_UNAVAILABLE` rather than re-reading live memory or hashing beyond the region. Failed disk fallback reads and invalid reference ranges also return unavailable instead of being labeled tampering. Runtime page-boundary and short-region fixtures remain required.
 - [x] **P1 — Report incomplete MemoryScanner runtime module enumeration.** Phase 4 reports snapshot/first/next and `VirtualQuery` failures, validates module base and region progress, and limits scans to the intersection with `modBaseSize`. Runtime fault-injection fixtures remain required.
 - [x] **P1 — Distinguish baseline module lookup from incomplete enumeration.** Baseline creation now reports `MODULE_ENUMERATION_UNAVAILABLE` for Toolhelp snapshot/first/next failures and reserves `MODULE_BASE_NOT_FOUND` for a completed enumeration with no matching executable. Runtime API-failure fixtures remain required.
@@ -165,6 +166,10 @@ This checklist tracks findings from a source review. A checked item means the co
 - [ ] Runtime fixture: a Windows-core executable without an embedded signature returns `Incomplete` (not `Trusted` or `Untrusted`) until catalog verification is explicitly supported; remaining path/module/window checks still run
 - [ ] Runtime fixture: unsigned Notepad++/7-Zip/WinRAR tools do not skip path/module/window checks solely by basename; the generic memory-byte scan remains exempt for those names
 - [ ] Runtime fixture: VLC is skipped only after successful `VideoLAN` publisher verification; invalid/incomplete signature results do not count as trusted
+
+- [ ] Runtime fixture: two adjacent executable sections share one `VirtualQuery` region; keep the first section unchanged, modify the second, and verify the second section is detected
+- [ ] Runtime fixture: an executable region inside the main module image that overlaps no baseline section returns `Incomplete`, not `Clean`
+- [ ] Runtime fixture: a `VirtualQuery` region that contains a complete baseline section plus a second partially overlapping section returns `Incomplete`
 
 ## Verification checklist
 
