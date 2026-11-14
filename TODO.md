@@ -172,6 +172,11 @@ This checklist tracks findings from a source review. A checked item means the co
 
 - [ ] Runtime fixture: accept a PE section whose nonzero `VirtualSize` ends within `SizeOfImage` while `SizeOfRawData` extends beyond that virtual end due file alignment; still reject raw data that extends beyond the file
 
+- [x] **P1 — Verify every executable page protection.** Include `PAGE_EXECUTE_WRITECOPY` in CRC verification and route `PAGE_EXECUTE` through the same integrity decision; if a baseline-overlapping execute-only page cannot be read, report `MEMORY_INTEGRITY_UNAVAILABLE` instead of skipping it. Runtime protection-change fixtures remain required.
+
+- [ ] Runtime fixture: change a baseline code page to `PAGE_EXECUTE_WRITECOPY`, modify bytes through copy-on-write, and verify the CRC check detects the modification
+- [ ] Runtime fixture: change a baseline code page to `PAGE_EXECUTE` and verify the scanner reports `MEMORY_INTEGRITY_UNAVAILABLE`, never a clean result
+
 ## Verification checklist
 
 - [x] Windows Visual Studio build: Debug x86
