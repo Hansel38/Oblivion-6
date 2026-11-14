@@ -647,8 +647,8 @@ namespace {
                 std::wstring lowerTitle = ToLowerCopy(title);
                 
                 // Pattern 1: CE window title format "[8-digit PID]-[ProcessName]".
-// Known examples: "00001C0C-Republic-RO" and "00001234-game.exe".
-// Requiring eight hexadecimal digits avoids date/version prefixes like "2026-11-14".
+                // Known examples: "00001C0C-Republic-RO" and "00001234-game.exe".
+                // Requiring eight hexadecimal digits avoids date/version prefixes like "2026-11-14".
                 if (title.length() > 9 && title[0] >= L'0' && title[0] <= L'9') {
                     const size_t dashPos = title.find(L'-');
                     if (dashPos == 8 && dashPos + 1 < title.size()) {
@@ -685,7 +685,7 @@ namespace {
                 }
                 
                 // Pattern 3: A standalone "CE 6.x" or "CE 7.x" version token.
-// Do not match the "ce " substring inside words such as "Science".
+                // Do not match the "ce " substring inside words such as "Science".
                 bool hasCeVersionPattern = false;
                 size_t cePosition = lowerTitle.find(L"ce ");
                 while (cePosition != std::wstring::npos) {
