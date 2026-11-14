@@ -398,7 +398,8 @@ namespace {
             path.compare(0, directory.size(), directory) != 0) {
             return false;
         }
-        return path[directory.size()] == L'\\';
+        // A drive root such as "c:\\" already ends with a separator.
+        return directory.back() == L'\\' || path[directory.size()] == L'\\';
     }
 
     ProcessWhitelistResult IsProcessWhitelisted(
