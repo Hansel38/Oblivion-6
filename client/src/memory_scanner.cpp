@@ -691,28 +691,38 @@ namespace Oblivion {
 
         m_moduleBaseAddress = moduleBaseAddress;
 
-        // STEP 6: Create baseline untuk setiap executable section
+        // STEP 6: Create baseline for every executable section.
         for (const auto& section : sections) {
-            // Hanya process executable sections
             if (!(section.characteristics & IMAGE_SCN_MEM_EXECUTE)) {
                 continue;
             }
 
-            // Skip sections yang legitimate berubah saat runtime
-            if (section.name.find(".reloc") != std::string::npos ||
-                section.name.find(".idata") != std::string::npos ||
-                section.name.find(".xdata") != std::string::npos ||
-                section.name.find(".pdata") != std::string::npos ||
-                section.name.find(".rsrc") != std::string::npos ||
-                section.name.find(".diff") != std::string::npos ||
-                section.name.find("xdiff") != std::string::npos) {
-                continue; // Skip verification untuk sections ini
+            // Section names are not authoritative. A code section can be
+            // named .code or anything else; IMAGE_SCN_CNT_CODE is the PE
+            // classification. Keep the .text fallback for older toolchains
+            // that omit the content-type bit on conventional .text sections.
+            const bool isCodeSection =
+                (section.characteristics & IMAGE_SCN_CNT_CODE) != 0 ||
+                section.name.find(".text") != std::string::npos;
+
+            // Runtime-mutable data sections are excluded only when they are
+            // not marked as code. Renaming a code section to ".reloc"/".idata"
+            // must not remove it from integrity verification.
+            if (!isCodeSection &&
+                (section.name.find(".reloc") != std::string::npos ||
+                 section.name.find(".idata") != std::string::npos ||
+                 section.name.find(".xdata") != std::string::npos ||
+                 section.name.find(".pdata") != std::string::npos ||
+                 section.name.find(".rsrc") != std::string::npos ||
+                 section.name.find(".diff") != std::string::npos ||
+                 section.name.find("xdiff") != std::string::npos)) {
+                continue;
             }
 
             ExecutableRegion baseline;
             baseline.rva = section.virtualAddress;
             baseline.size = section.virtualSize != 0 ? section.virtualSize : section.rawDataSize;
-            baseline.isCodeSection = (section.name.find(".text") != std::string::npos);
+            baseline.isCodeSection = isCodeSection;
 
             // CRITICAL: Hash dari DISK (trusted source)
             baseline.diskCRC32 = CalculateSectionHashFromDisk(fileData, section);
@@ -739,7 +749,7 @@ namespace Oblivion {
                 
                 // CRITICAL CHECK: Jika memory sudah berbeda dari disk saat baseline creation,
                 // berarti sudah ada injection SEBELUM kita load!
-                // Tapi HANYA untuk .text section (core code)
+                // Compare every executable code section, regardless of its section name.
                 // CATATAN: Relocations (ASLR) dapat menyebabkan perbedaan kecil yang legitimate
                 if (baseline.isCodeSection) {
                     // Compare the same mapped span on both sides. Bytes beyond
@@ -810,6 +820,16 @@ namespace Oblivion {
             m_diskBaseline.push_back(baseline);
         }
 
+        const bool hasCodeBaseline = std::any_of(
+            m_diskBaseline.begin(), m_diskBaseline.end(),
+            [](const ExecutableRegion& baseline) { return baseline.isCodeSection; });
+        if (!hasCodeBaseline) {
+            ReportViolationAndExit(
+                L"", "BASELINE_CODE_SECTION_MISSING",
+                "Executable image contains no verifiable executable code section");
+            return;
+        }
+
         m_baselineCreated = true;
         m_baselineVerified = true;
 
@@ -841,27 +861,20 @@ namespace Oblivion {
                 return false;
             }
 
-            // Skip non-code sections atau sections yang legitimate berubah
-            auto it = m_sectionMap.find(baseline.rva);
-            if (it != m_sectionMap.end()) {
-                std::string sectionName = it->second.name;
-                
-                // Whitelist: Skip sections yang legitimate berubah saat runtime
-                if (sectionName.find(".reloc") != std::string::npos ||
-                    sectionName.find(".idata") != std::string::npos ||
-                    sectionName.find(".xdata") != std::string::npos ||
-                    sectionName.find(".pdata") != std::string::npos ||
-                    sectionName.find(".rsrc") != std::string::npos ||
-                    sectionName.find(".diff") != std::string::npos ||
-                    sectionName.find("xdiff") != std::string::npos) {
-                    continue; // Skip these sections
-                }
-                
-                // Hanya verify .text section (core executable code)
-                if (sectionName.find(".text") == std::string::npos) {
-                    continue; // Skip non-text sections
-                }
+            const auto it = m_sectionMap.find(static_cast<uint32_t>(baseline.rva));
+            if (it == m_sectionMap.end()) {
+                ReportViolationAndExit(
+                    L"", "PE_SECTION_METADATA_UNAVAILABLE",
+                    "Executable baseline section metadata is unavailable during disk/memory verification");
+                return false;
             }
+
+            // Verify by the PE code characteristic recorded in the baseline,
+            // not by a mutable section-name convention.
+            if (!baseline.isCodeSection) {
+                continue;
+            }
+            const std::string sectionName = it->second.name;
 
             const size_t sizeToCheck = baseline.size;
             uint32_t currentMemoryCRC32 = CalculateCRC32(memoryAddr, sizeToCheck);
@@ -878,8 +891,6 @@ namespace Oblivion {
 
             if (memoryModified) {
                 // Code modification detected!
-                std::string sectionName = (it != m_sectionMap.end()) ? it->second.name : "unknown";
-
                 // Extract executable filename from path
                 std::string exeName = "unknown";
                 if (!m_executablePath.empty()) {
