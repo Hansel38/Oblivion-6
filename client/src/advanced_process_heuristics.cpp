@@ -2033,7 +2033,7 @@ namespace Oblivion {
         // The explicit input length excludes a trailing NUL, so allocate exactly
         // the byte count returned by the sizing call. This avoids writing the
         // terminator past a sizeNeeded - 1 string allocation.
-        std::string result(static_cast<size_t>(sizeNeeded), '\\0');
+        std::string result(static_cast<size_t>(sizeNeeded), '\0');
         const int converted = WideCharToMultiByte(
             CP_UTF8, WC_ERR_INVALID_CHARS, input.c_str(), inputLength,
             &result[0], sizeNeeded, nullptr, nullptr);

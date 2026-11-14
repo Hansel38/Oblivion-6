@@ -76,7 +76,7 @@ namespace {
         size_t capacity = MAX_PATH;
 
         while (capacity <= kMaximumPathLength) {
-            std::vector<wchar_t> buffer(capacity, L'\\0');
+            std::vector<wchar_t> buffer(capacity, L'\0');
             const DWORD length = GetModuleFileNameW(
                 nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
             if (length == 0) {

@@ -99,7 +99,7 @@ namespace Oblivion {
 
         try {
             size_t parsed = 0;
-            std::stoull(nonceText, &parsed, 10);
+            (void)std::stoull(nonceText, &parsed, 10);
             if (parsed != nonceText.size()) return false;
         } catch (...) {
             return false;
