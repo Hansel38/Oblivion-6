@@ -418,14 +418,17 @@ namespace Oblivion {
                         sizeof(section));
 
             const size_t virtualAddress = static_cast<size_t>(section.VirtualAddress);
-            const size_t mappedSize = (std::max)(
-                static_cast<size_t>(section.Misc.VirtualSize),
-                static_cast<size_t>(section.SizeOfRawData));
+            const size_t rawSize = static_cast<size_t>(section.SizeOfRawData);
+            // VirtualSize describes the section's mapped extent. Raw data can
+            // be larger because of file alignment padding and must be bounded
+            // against the file, not against SizeOfImage.
+            const size_t mappedSize = section.Misc.VirtualSize != 0
+                ? static_cast<size_t>(section.Misc.VirtualSize)
+                : rawSize;
             if (virtualAddress > imageSize || mappedSize > imageSize - virtualAddress)
                 return false;
 
             const size_t rawOffset = static_cast<size_t>(section.PointerToRawData);
-            const size_t rawSize = static_cast<size_t>(section.SizeOfRawData);
             if (rawOffset > fileData.size() || rawSize > fileData.size() - rawOffset)
                 return false;
         }
