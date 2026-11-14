@@ -176,8 +176,8 @@ This checklist tracks findings from a source review. A checked item means the co
 - [ ] Runtime fixture: PE relocation directory placed in raw padding beyond `VirtualSize` is rejected as unavailable; valid `VirtualSize < SizeOfRawData` and `VirtualSize > SizeOfRawData` images are handled correctly
 - [ ] Runtime fixture: with the module at its preferred `ImageBase`, tampering at a relocation target is detected; with a rebased image, only actual relocation spans are excluded
 - [ ] Runtime fixture: construct a valid executable section whose baseline CRC32 is `0x00000000`; clean memory remains clean and a modified byte is detected without falling back to a differently sized disk CRC
-- [ ] Runtime fixture: rename a PE code section from `.text` to `.code` while retaining `IMAGE_SCN_CNT_CODE`; early-injection and runtime checks must still cover it
-- [ ] Runtime fixture: present a structurally valid PE with no executable code section and verify baseline creation fails closed
+- [ ] Runtime fixture: provide a non-executable `.text` decoy plus an executable `.code` section marked `IMAGE_SCN_CNT_CODE`; early-injection and runtime checks must still cover `.code` even when another executable section uses a runtime-mutable name
+- [ ] Runtime fixture: present a structurally valid PE with only a non-executable `.text` section and no executable code section; verify baseline creation fails closed
 - [ ] Security test: invalid/missing secret fails closed
 - [ ] Security test: malformed/oversized protocol messages rejected
 
