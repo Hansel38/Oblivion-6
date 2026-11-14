@@ -289,8 +289,8 @@ namespace {
         L"dropbox.exe",
         L"onedrive.exe",
         L"googledrivesync.exe"
-        // NOTE: notepad++, 7zip, vlc, winrar tidak require signature verification
-        // karena sering unsigned (open-source/freeware)
+        // Unsigned utilities are not full-process whitelist entries. They may
+        // be exempted only from the generic memory-byte scan below.
     };
 
     // Resolve the complete process image path without assuming MAX_PATH is sufficient.
@@ -346,6 +346,60 @@ namespace {
         return GetProcessImagePath(processId, processPath) ? processPath : L"";
     }
 
+    bool GetWindowsDirectoryDynamic(std::wstring& windowsDirectory, DWORD& failureError) {
+        windowsDirectory.clear();
+        failureError = ERROR_SUCCESS;
+        size_t capacity = 512;
+        constexpr size_t kMaximumCapacity = 32768;
+        while (capacity <= kMaximumCapacity) {
+            std::vector<wchar_t> buffer;
+            try {
+                buffer.resize(capacity);
+            } catch (const std::bad_alloc&) {
+                failureError = ERROR_NOT_ENOUGH_MEMORY;
+                return false;
+            }
+
+            const UINT length = GetWindowsDirectoryW(
+                buffer.data(), static_cast<UINT>(buffer.size()));
+            if (length == 0) {
+                failureError = GetLastError();
+                return false;
+            }
+            if (length < buffer.size()) {
+                windowsDirectory.assign(buffer.data(), length);
+                return !windowsDirectory.empty();
+            }
+            if (length >= kMaximumCapacity) {
+                failureError = ERROR_INSUFFICIENT_BUFFER;
+                return false;
+            }
+            capacity = static_cast<size_t>(length) + 1;
+        }
+
+        failureError = ERROR_INSUFFICIENT_BUFFER;
+        return false;
+    }
+
+    std::wstring NormalizeProcessPath(std::wstring path) {
+        std::replace(path.begin(), path.end(), L'/', L'\\');
+        std::transform(path.begin(), path.end(), path.begin(),
+            [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
+        while (path.size() > 3 && path.back() == L'\\') {
+            path.pop_back();
+        }
+        return path;
+    }
+
+    bool IsWithinProcessDirectory(
+        const std::wstring& path, const std::wstring& directory) {
+        if (directory.empty() || path.size() <= directory.size() ||
+            path.compare(0, directory.size(), directory) != 0) {
+            return false;
+        }
+        return path[directory.size()] == L'\\';
+    }
+
     ProcessWhitelistResult IsProcessWhitelisted(
         const std::wstring& processName,
         DWORD processId,
@@ -378,8 +432,68 @@ namespace {
             }
         }
         
-        // Jika tidak perlu verifikasi signature (proses Windows system), langsung return true
+        // Windows-core names are not trusted by basename alone. Require the
+        // executable to reside under the Windows directory and pass Authenticode.
         if (!needsSignatureVerification) {
+            if (processId == 0) {
+                if (scanIssue != nullptr) {
+                    *scanIssue = L"Windows process whitelist check requires a process ID";
+                }
+                return ProcessWhitelistResult::Incomplete;
+            }
+
+            std::wstring processPath;
+            DWORD pathError = ERROR_SUCCESS;
+            if (!GetProcessImagePath(processId, processPath, &pathError)) {
+                if (scanIssue != nullptr) {
+                    *scanIssue = L"Windows process image-path query failed; error=" +
+                        std::to_wstring(pathError);
+                }
+                return ProcessWhitelistResult::Incomplete;
+            }
+
+            std::wstring windowsDirectory;
+            DWORD windowsDirectoryError = ERROR_SUCCESS;
+            if (!GetWindowsDirectoryDynamic(windowsDirectory, windowsDirectoryError)) {
+                if (scanIssue != nullptr) {
+                    *scanIssue = L"Windows directory query failed; error=" +
+                        std::to_wstring(windowsDirectoryError);
+                }
+                return ProcessWhitelistResult::Incomplete;
+            }
+
+            const std::wstring normalizedProcessPath =
+                NormalizeProcessPath(processPath);
+            const std::wstring normalizedWindowsDirectory =
+                NormalizeProcessPath(windowsDirectory);
+            if (!IsWithinProcessDirectory(
+                    normalizedProcessPath, normalizedWindowsDirectory)) {
+                // A familiar Windows executable name outside the Windows
+                // directory is not a trusted OS process; continue normal scans.
+                return ProcessWhitelistResult::NotWhitelisted;
+            }
+
+            std::wstring signatureIssue;
+            const auto signatureResult =
+                Oblivion::DigitalSignatureValidator::VerifyWindowsSystemProcessSignatureDetailed(
+                    processPath, signatureIssue);
+            if (signatureResult ==
+                Oblivion::DigitalSignatureValidator::ProcessSignatureResult::Incomplete) {
+                if (scanIssue != nullptr) {
+                    *scanIssue = L"Windows process Authenticode verification incomplete: " +
+                        signatureIssue;
+                }
+                return ProcessWhitelistResult::Incomplete;
+            }
+            if (signatureResult ==
+                Oblivion::DigitalSignatureValidator::ProcessSignatureResult::Untrusted) {
+                ReportViolationAndExit(
+                    L"", "SIGNATURE_SPOOFING",
+                    "Windows-core process failed Authenticode verification; PID=" +
+                        std::to_string(processId));
+                return ProcessWhitelistResult::NotWhitelisted;
+            }
+
             return ProcessWhitelistResult::Whitelisted;
         }
         
