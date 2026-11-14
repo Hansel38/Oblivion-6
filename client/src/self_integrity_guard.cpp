@@ -122,7 +122,8 @@ namespace {
         }
 
         const size_t ntOffset = static_cast<size_t>(dos->e_lfanew);
-        if (ntOffset > image.size() || sizeof(IMAGE_NT_HEADERS) > image.size() - ntOffset)
+        if (ntOffset % alignof(IMAGE_NT_HEADERS) != 0 ||
+            ntOffset > image.size() || sizeof(IMAGE_NT_HEADERS) > image.size() - ntOffset)
             return false;
 
         const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(image.data() + ntOffset);
@@ -147,6 +148,8 @@ namespace {
             return false;
 
         sectionTableOffset = optionalOffset + nt->FileHeader.SizeOfOptionalHeader;
+        if (sectionTableOffset % alignof(IMAGE_SECTION_HEADER) != 0)
+            return false;
         const size_t sectionBytes =
             static_cast<size_t>(nt->FileHeader.NumberOfSections) * sizeof(IMAGE_SECTION_HEADER);
         if (sectionTableOffset > image.size() ||
@@ -178,7 +181,9 @@ namespace {
 
         const size_t ntOffset = static_cast<size_t>(dos->e_lfanew);
         const uintptr_t baseAddress = reinterpret_cast<uintptr_t>(base);
-        if (baseAddress > (std::numeric_limits<uintptr_t>::max)() - ntOffset)
+        if (ntOffset % alignof(IMAGE_NT_HEADERS) != 0 ||
+            baseAddress > (std::numeric_limits<uintptr_t>::max)() - ntOffset ||
+            (baseAddress + ntOffset) % alignof(IMAGE_NT_HEADERS) != 0)
             return false;
         const auto* ntAddress = reinterpret_cast<const uint8_t*>(baseAddress + ntOffset);
         if (!IsReadableRange(ntAddress, sizeof(IMAGE_NT_HEADERS))) return false;
@@ -211,6 +216,9 @@ namespace {
         if (nt->FileHeader.SizeOfOptionalHeader > imageSize - optionalOffset)
             return false;
         const size_t sectionOffset = optionalOffset + nt->FileHeader.SizeOfOptionalHeader;
+        if (sectionOffset % alignof(IMAGE_SECTION_HEADER) != 0 ||
+            (baseAddress + sectionOffset) % alignof(IMAGE_SECTION_HEADER) != 0)
+            return false;
         const size_t sectionBytes =
             static_cast<size_t>(nt->FileHeader.NumberOfSections) * sizeof(IMAGE_SECTION_HEADER);
         if (sectionOffset > imageSize || sectionBytes > imageSize - sectionOffset)
@@ -574,20 +582,21 @@ namespace Oblivion {
 
         while (remaining > 0) {
             if (remaining < sizeof(IMAGE_BASE_RELOCATION)) return false;
-            const auto* block = reinterpret_cast<const IMAGE_BASE_RELOCATION*>(cursor);
-            if (block->SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION) ||
-                block->SizeOfBlock > remaining ||
-                ((block->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) % sizeof(WORD)) != 0) {
+            IMAGE_BASE_RELOCATION block{};
+            std::memcpy(&block, cursor, sizeof(block));
+            if (block.SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION) ||
+                block.SizeOfBlock > remaining ||
+                ((block.SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) % sizeof(WORD)) != 0) {
                 return false;
             }
 
             const size_t entryCount =
-                (block->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
-            const auto* entries =
-                reinterpret_cast<const WORD*>(cursor + sizeof(IMAGE_BASE_RELOCATION));
+                (block.SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
+            const uint8_t* entries = cursor + sizeof(IMAGE_BASE_RELOCATION);
 
             for (size_t i = 0; i < entryCount; ++i) {
-                const WORD typeOffset = entries[i];
+                WORD typeOffset = 0;
+                std::memcpy(&typeOffset, entries + i * sizeof(WORD), sizeof(typeOffset));
                 const WORD type = typeOffset >> 12;
                 const WORD offset = typeOffset & 0x0FFF;
 
@@ -620,15 +629,15 @@ namespace Oblivion {
                     return false;
                 }
 
-                if (block->VirtualAddress > imageSize ||
-                    offset > imageSize - block->VirtualAddress) return false;
-                const DWORD rva = block->VirtualAddress + offset;
+                if (block.VirtualAddress > imageSize ||
+                    offset > imageSize - block.VirtualAddress) return false;
+                const DWORD rva = block.VirtualAddress + offset;
                 if (rva > imageSize || spanSize > imageSize - rva) return false;
                 m_relocationSpans.push_back({ rva, spanSize });
             }
 
-            cursor += block->SizeOfBlock;
-            remaining -= block->SizeOfBlock;
+            cursor += block.SizeOfBlock;
+            remaining -= block.SizeOfBlock;
         }
 
         std::sort(m_relocationSpans.begin(), m_relocationSpans.end(),
