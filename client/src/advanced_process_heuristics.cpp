@@ -646,16 +646,18 @@ namespace {
                 std::wstring title(windowTitle, titleLen);
                 std::wstring lowerTitle = ToLowerCopy(title);
                 
-                // Pattern 1: CE window title format "[PID]-[ProcessName]" or "[PID]-[GameName]"
-                // Example: "00001C0C-Republic-RO" atau "00001234-game.exe"
-                if (title.length() > 5 && title[0] >= L'0' && title[0] <= L'9') {
-                    size_t dashPos = title.find(L'-');
-                    if (dashPos != std::wstring::npos && dashPos <= 8) {
-                        // Check if before dash is hex PID
+                // Pattern 1: CE window title format "[8-digit PID]-[ProcessName]".
+// Known examples: "00001C0C-Republic-RO" and "00001234-game.exe".
+// Requiring eight hexadecimal digits avoids date/version prefixes like "2026-11-14".
+                if (title.length() > 9 && title[0] >= L'0' && title[0] <= L'9') {
+                    const size_t dashPos = title.find(L'-');
+                    if (dashPos == 8 && dashPos + 1 < title.size()) {
                         bool isHexPID = true;
                         for (size_t i = 0; i < dashPos; ++i) {
-                            wchar_t ch = title[i];
-                            if (!((ch >= L'0' && ch <= L'9') || (ch >= L'A' && ch <= L'F') || (ch >= L'a' && ch <= L'f'))) {
+                            const wchar_t ch = title[i];
+                            if (!((ch >= L'0' && ch <= L'9') ||
+                                  (ch >= L'A' && ch <= L'F') ||
+                                  (ch >= L'a' && ch <= L'f'))) {
                                 isHexPID = false;
                                 break;
                             }
@@ -664,7 +666,7 @@ namespace {
                             ctx->matchedTitle = L"CE_PID_PATTERN: " + title;
                             ctx->matched = true;
 #ifdef _DEBUG
-                            OutputDebugStringW(L"[AdvHeuristics] DETECTED CE PID PATTERN!\n");
+                            OutputDebugStringW(L"[AdvHeuristics] DETECTED CE PID PATTERN!\\n");
 #endif
                             return FALSE;
                         }
@@ -682,13 +684,36 @@ namespace {
                     return FALSE;
                 }
                 
-                // Pattern 3: CE version pattern "Cheat Engine 7.x" atau "CE 7.x"
-                if (lowerTitle.find(L"ce ") != std::wstring::npos && 
-                    (lowerTitle.find(L"7.") != std::wstring::npos || lowerTitle.find(L"6.") != std::wstring::npos)) {
+                // Pattern 3: A standalone "CE 6.x" or "CE 7.x" version token.
+// Do not match the "ce " substring inside words such as "Science".
+                bool hasCeVersionPattern = false;
+                size_t cePosition = lowerTitle.find(L"ce ");
+                while (cePosition != std::wstring::npos) {
+                    const bool hasTokenBoundary =
+                        cePosition == 0 ||
+                        !((lowerTitle[cePosition - 1] >= L'a' &&
+                           lowerTitle[cePosition - 1] <= L'z') ||
+                          (lowerTitle[cePosition - 1] >= L'0' &&
+                           lowerTitle[cePosition - 1] <= L'9'));
+                    const size_t versionPosition = cePosition + 3;
+                    const bool hasSupportedVersion =
+                        versionPosition + 2 < lowerTitle.size() &&
+                        (lowerTitle.compare(versionPosition, 2, L"6.") == 0 ||
+                         lowerTitle.compare(versionPosition, 2, L"7.") == 0) &&
+                        lowerTitle[versionPosition + 2] >= L'0' &&
+                        lowerTitle[versionPosition + 2] <= L'9';
+                    if (hasTokenBoundary && hasSupportedVersion) {
+                        hasCeVersionPattern = true;
+                        break;
+                    }
+                    cePosition = lowerTitle.find(L"ce ", cePosition + 1);
+                }
+
+                if (hasCeVersionPattern) {
                     ctx->matchedTitle = L"CE_VERSION: " + title;
                     ctx->matched = true;
 #ifdef _DEBUG
-                    OutputDebugStringW(L"[AdvHeuristics] DETECTED CE VERSION!\n");
+                    OutputDebugStringW(L"[AdvHeuristics] DETECTED CE VERSION!\\n");
 #endif
                     return FALSE;
                 }
