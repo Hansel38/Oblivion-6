@@ -749,7 +749,7 @@ namespace Oblivion {
                 
                 // CRITICAL CHECK: Jika memory sudah berbeda dari disk saat baseline creation,
                 // berarti sudah ada injection SEBELUM kita load!
-                // Tapi HANYA untuk .text section (core code)
+                // Compare every executable code section, regardless of its section name.
                 // CATATAN: Relocations (ASLR) dapat menyebabkan perbedaan kecil yang legitimate
                 if (baseline.isCodeSection) {
                     // Compare the same mapped span on both sides. Bytes beyond
