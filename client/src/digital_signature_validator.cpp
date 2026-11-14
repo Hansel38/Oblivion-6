@@ -683,6 +683,24 @@ namespace Oblivion {
 
         LONG trustStatus = ERROR_SUCCESS;
         if (VerifyFileSignature(processPath, &trustStatus)) {
+            std::wstring publisherName;
+            SetLastError(ERROR_SUCCESS);
+            if (!GetFilePublisher(processPath, publisherName)) {
+                failureReason =
+                    L"embedded signature verified but publisher extraction failed; error=" +
+                    std::to_wstring(GetLastError());
+                return ProcessSignatureResult::Incomplete;
+            }
+
+            std::transform(
+                publisherName.begin(), publisherName.end(), publisherName.begin(),
+                [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
+            if (publisherName != L"microsoft corporation" &&
+                publisherName != L"microsoft windows") {
+                failureReason =
+                    L"Windows-core process has an unexpected signature publisher";
+                return ProcessSignatureResult::Untrusted;
+            }
             return ProcessSignatureResult::Trusted;
         }
 
