@@ -927,11 +927,15 @@ namespace Oblivion {
     bool ShouldPerformMemoryScan(const std::wstring& processName) {
         std::wstring lowerName = ::ToLowerCopy(processName);
         
-        // Whitelist untuk proses inti Windows
-        const std::vector<std::wstring> systemWhitelist = {
-            L"system", L"smss.exe", L"csrss.exe", L"wininit.exe", L"services.exe", L"lsass.exe", L"svchost.exe", L"explorer.exe"
-        };
-        
+        // Keep the memory-byte scan policy aligned with the full-process whitelist.
+        // A name match here skips only this heuristic layer; it does not bypass the
+        // path, module, or window checks performed by PerformScan().
+        for (const auto& processNameWhitelisted : kSystemProcessWhitelist) {
+            if (lowerName == processNameWhitelisted) {
+                return false;
+            }
+        }
+
         // Whitelist untuk proses legitimate dari vendor hardware/software
         const std::vector<std::wstring> legitimatePatterns = {
             L"nvdisplay", L"nvcontainer", L"nvidia", L"nvbackend", L"nvspcap", L"nvstreamer",
@@ -953,13 +957,6 @@ namespace Oblivion {
             L"vscode", L"code.exe", L"cpptools", L"omnisharp",
             L"devenv", L"msbuild", L"cl.exe", L"link.exe"
         };
-        
-        // Cek whitelist sistem
-        for (const auto& pattern : systemWhitelist) {
-            if (lowerName == pattern) {
-                return false;
-            }
-        }
         
         // Cek whitelist legitimate (partial match)
         for (const auto& pattern : legitimatePatterns) {
