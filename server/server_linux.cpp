@@ -313,13 +313,18 @@ static bool AppendBanListEntryAtomically(
     std::string currentContents;
     struct stat existingInfo{};
     mode_t fileMode = 0600;
-    if (stat(banFilePath.c_str(), &existingInfo) == 0) {
+    bool fileExists = false;
+    if (lstat(banFilePath.c_str(), &existingInfo) == 0) {
+        // Replacing a symlink would replace the link itself rather than its
+        // target, changing the existing file-path semantics. Fail closed.
+        if (S_ISLNK(existingInfo.st_mode)) return false;
+        fileExists = true;
         fileMode = existingInfo.st_mode & 0777;
     } else if (errno != ENOENT) {
         return false;
     }
 
-    if (existingInfo.st_mode != 0) {
+    if (fileExists) {
         std::ifstream input(banFilePath, std::ios::binary);
         if (!input.is_open()) return false;
         currentContents.assign(
