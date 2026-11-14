@@ -1263,10 +1263,20 @@ int main() {
     hints.ai_protocol = IPPROTO_TCP;
     hints.ai_flags = AI_PASSIVE; // Untuk bind()
 
-    // Resolve alamat server dan port
-    const char* configuredPort = std::getenv("OBLIVION_LISTEN_PORT");
+    // Resolve alamat server dan port. Use the MSVC-safe environment API.
+    char* configuredPortValue = nullptr;
+    size_t configuredPortLength = 0;
+    const errno_t environmentResult =
+        _dupenv_s(&configuredPortValue, &configuredPortLength, "OBLIVION_LISTEN_PORT");
+    std::string configuredPort;
+    if (environmentResult == 0 && configuredPortValue != nullptr &&
+        configuredPortLength > 0) {
+        configuredPort.assign(configuredPortValue, configuredPortLength - 1);
+    }
+    std::free(configuredPortValue);
+
     uint16_t listenPort = 0;
-    if (configuredPort == nullptr ||
+    if (configuredPort.empty() ||
         !OblivionNet::ParseTcpPort(configuredPort, listenPort)) {
         std::cerr << "[ERROR] OBLIVION_LISTEN_PORT must be configured with a TCP port from 1 through 65535." << std::endl;
         WSACleanup();
