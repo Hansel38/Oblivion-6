@@ -590,7 +590,9 @@ namespace Oblivion {
             std::memcpy(&block, cursor, sizeof(block));
             if (block.SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION) ||
                 block.SizeOfBlock > remaining ||
-                ((block.SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) % sizeof(WORD)) != 0) {
+                ((block.SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) % sizeof(WORD)) != 0 ||
+                // Each base-relocation block describes one 4 KiB page RVA.
+                (block.VirtualAddress & 0x0FFFu) != 0) {
                 return false;
             }
 
@@ -609,6 +611,11 @@ namespace Oblivion {
                 case IMAGE_REL_BASED_ABSOLUTE:
                     // Padding entry; it does not describe a relocated address.
                     continue;
+#if defined(_WIN64)
+                case IMAGE_REL_BASED_DIR64:
+                    spanSize = sizeof(ULONGLONG);
+                    break;
+#else
                 case IMAGE_REL_BASED_HIGH:
                 case IMAGE_REL_BASED_LOW:
                     spanSize = sizeof(WORD);
@@ -623,13 +630,10 @@ namespace Oblivion {
                     ++i;
                     spanSize = sizeof(WORD);
                     break;
-                case IMAGE_REL_BASED_DIR64:
-                    spanSize = sizeof(ULONGLONG);
-                    break;
+#endif
                 default:
-                    // Unknown relocation types cannot safely be ignored: their
-                    // loader-written bytes would otherwise be misclassified as
-                    // tampering during the disk-vs-memory comparison.
+                    // A relocation type unsupported for this image architecture
+                    // cannot be allowed to exempt bytes from integrity checking.
                     return false;
                 }
 
