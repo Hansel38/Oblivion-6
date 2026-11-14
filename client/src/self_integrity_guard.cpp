@@ -576,30 +576,27 @@ namespace Oblivion {
         if (!RvaToFileRange(relocDirectory.VirtualAddress, relocDirectory.Size, relocFileOffset))
             return false;
 
-        if (relocFileOffset % alignof(IMAGE_BASE_RELOCATION) != 0)
-            return false;
-
         size_t remaining = relocDirectory.Size;
         const uint8_t* cursor = m_diskImage.data() + relocFileOffset;
         const DWORD imageSize = ntHeaders->OptionalHeader.SizeOfImage;
 
         while (remaining > 0) {
             if (remaining < sizeof(IMAGE_BASE_RELOCATION)) return false;
-            const auto* block = reinterpret_cast<const IMAGE_BASE_RELOCATION*>(cursor);
-            if (block->SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION) ||
-                block->SizeOfBlock % alignof(IMAGE_BASE_RELOCATION) != 0 ||
-                block->SizeOfBlock > remaining ||
-                ((block->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) % sizeof(WORD)) != 0) {
+            IMAGE_BASE_RELOCATION block{};
+            std::memcpy(&block, cursor, sizeof(block));
+            if (block.SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION) ||
+                block.SizeOfBlock > remaining ||
+                ((block.SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) % sizeof(WORD)) != 0) {
                 return false;
             }
 
             const size_t entryCount =
-                (block->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
-            const auto* entries =
-                reinterpret_cast<const WORD*>(cursor + sizeof(IMAGE_BASE_RELOCATION));
+                (block.SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
+            const uint8_t* entries = cursor + sizeof(IMAGE_BASE_RELOCATION);
 
             for (size_t i = 0; i < entryCount; ++i) {
-                const WORD typeOffset = entries[i];
+                WORD typeOffset = 0;
+                std::memcpy(&typeOffset, entries + i * sizeof(WORD), sizeof(typeOffset));
                 const WORD type = typeOffset >> 12;
                 const WORD offset = typeOffset & 0x0FFF;
 
@@ -632,15 +629,15 @@ namespace Oblivion {
                     return false;
                 }
 
-                if (block->VirtualAddress > imageSize ||
-                    offset > imageSize - block->VirtualAddress) return false;
-                const DWORD rva = block->VirtualAddress + offset;
+                if (block.VirtualAddress > imageSize ||
+                    offset > imageSize - block.VirtualAddress) return false;
+                const DWORD rva = block.VirtualAddress + offset;
                 if (rva > imageSize || spanSize > imageSize - rva) return false;
                 m_relocationSpans.push_back({ rva, spanSize });
             }
 
-            cursor += block->SizeOfBlock;
-            remaining -= block->SizeOfBlock;
+            cursor += block.SizeOfBlock;
+            remaining -= block.SizeOfBlock;
         }
 
         std::sort(m_relocationSpans.begin(), m_relocationSpans.end(),
