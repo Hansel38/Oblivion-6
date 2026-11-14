@@ -466,12 +466,14 @@ namespace {
 
             const std::wstring normalizedProcessPath =
                 NormalizeProcessPath(processPath);
-            const std::wstring normalizedWindowsDirectory =
-                NormalizeProcessPath(windowsDirectory);
-            if (!IsWithinProcessDirectory(
-                    normalizedProcessPath, normalizedWindowsDirectory)) {
-                // A familiar Windows executable name outside the Windows
-                // directory is not a trusted OS process; continue normal scans.
+            const std::wstring normalizedSystem32 =
+                NormalizeProcessPath(windowsDirectory + L"\\System32");
+            const std::wstring normalizedSyswow64 =
+                NormalizeProcessPath(windowsDirectory + L"\\SysWOW64");
+            if (!IsWithinProcessDirectory(normalizedProcessPath, normalizedSystem32) &&
+                !IsWithinProcessDirectory(normalizedProcessPath, normalizedSyswow64)) {
+                // Do not trust names from writable locations such as Windows\\Temp
+                // or Windows\\SystemApps. Only native system executable folders qualify.
                 return ProcessWhitelistResult::NotWhitelisted;
             }
 
