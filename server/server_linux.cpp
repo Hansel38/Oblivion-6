@@ -537,7 +537,7 @@ static bool IsValidBanListHwid(const std::string& hwid) {
     return true;
 }
 
-// Caller must hold g_banListMutex.
+// Caller must hold g_banListMutex and the sidecar BanListFileLock.
 static BanListStatus CheckHWIDBanStatusUnlocked(const std::string& hwid) {
     if (!IsValidBanListHwid(hwid)) {
         return BanListStatus::Unavailable;
