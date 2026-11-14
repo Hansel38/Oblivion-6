@@ -232,15 +232,7 @@ namespace {
         // Windows Audio Services
         L"audiodg.exe",  // Audio Device Graph Isolation (Windows audio service)
         
-        // Open-source utilities (no signature verification - often unsigned)
-        L"notepad++.exe",
-        L"7zfm.exe",
-        L"7zg.exe",
-        L"vlc.exe",
-        L"winrar.exe",
-        
-        // Development tools (no signature verification - often unsigned during development)
-        L"vcpkgsrv.exe",  // Visual Studio Package Server
+        // VLC is verified against its configured VideoLAN publisher below.
         
         // Common legitimate software (REQUIRES SIGNATURE VERIFICATION)
         // These processes MUST be verified with digital signature to prevent spoofing
@@ -287,6 +279,7 @@ namespace {
         L"skype.exe",
         L"teams.exe",
         L"spotify.exe",
+        L"vlc.exe", // VideoLAN publisher verification is configured below.
         L"epicgameslauncher.exe",
         L"easyanticheat.exe",
         L"battlenet.exe",
@@ -834,6 +827,9 @@ namespace Oblivion {
             L"microsoft", L"windows", L"skype", L"teams", L"msedge", L"msedgewebview",
             L"audiodg", L"audio",  // Windows audio services
             L"vcpkgsrv",  // Visual Studio Package Server
+            // These unsigned tools still receive path/module/window checks. Skip only
+            // the generic memory-byte scan, whose signatures can overlap ordinary code.
+            L"notepad++", L"7zfm.exe", L"7zg.exe", L"winrar.exe",
             L"adobe", L"acrobat", L"creative cloud",
             L"google", L"chrome", L"drive",
             L"steam", L"origin", L"uplay", L"epicgames", L"battlenet",
