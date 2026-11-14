@@ -666,7 +666,7 @@ namespace {
                             ctx->matchedTitle = L"CE_PID_PATTERN: " + title;
                             ctx->matched = true;
 #ifdef _DEBUG
-                            OutputDebugStringW(L"[AdvHeuristics] DETECTED CE PID PATTERN!\\n");
+                            OutputDebugStringW(L"[AdvHeuristics] DETECTED CE PID PATTERN!\n");
 #endif
                             return FALSE;
                         }
@@ -713,7 +713,7 @@ namespace {
                     ctx->matchedTitle = L"CE_VERSION: " + title;
                     ctx->matched = true;
 #ifdef _DEBUG
-                    OutputDebugStringW(L"[AdvHeuristics] DETECTED CE VERSION!\\n");
+                    OutputDebugStringW(L"[AdvHeuristics] DETECTED CE VERSION!\n");
 #endif
                     return FALSE;
                 }
