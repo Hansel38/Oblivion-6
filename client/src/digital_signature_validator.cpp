@@ -171,8 +171,8 @@ const std::map<std::wstring, std::wstring> Oblivion::DigitalSignatureValidator::
     {L"onedrive.exe", L"Microsoft Corporation"},
     {L"googledrivesync.exe", L"Google LLC"},
     
-    // NOTE: Open-source apps seperti notepad++, 7zip, vlc sering tidak ditandatangani
-    // Mereka dipindahkan ke whitelist biasa (tanpa signature verification)
+    // Unsigned utility apps are not process-whitelisted by basename; they
+    // receive path/module/window checks and only skip the generic memory-byte scan.
     
     // Add more as needed
 };
