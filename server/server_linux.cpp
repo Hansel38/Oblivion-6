@@ -278,7 +278,7 @@ class BanListFileLock {
 public:
     BanListFileLock(const std::string& banFilePath, bool exclusive) {
         const std::string lockPath = banFilePath + ".lock";
-        m_fd = open(lockPath.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+        m_fd = open(lockPath.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0660);
         if (m_fd < 0) return;
 
         const int operation = exclusive ? LOCK_EX : LOCK_SH;
