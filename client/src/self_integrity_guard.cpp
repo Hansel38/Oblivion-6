@@ -203,9 +203,11 @@ namespace {
         }
 
         imageSize = static_cast<size_t>(nt->OptionalHeader.SizeOfImage);
+        const uintptr_t maximumAddress = (std::numeric_limits<uintptr_t>::max)();
         if (imageSize < sizeof(IMAGE_DOS_HEADER) ||
             ntOffset > imageSize ||
-            sizeof(IMAGE_NT_HEADERS) > imageSize - ntOffset) {
+            sizeof(IMAGE_NT_HEADERS) > imageSize - ntOffset ||
+            imageSize > static_cast<size_t>(maximumAddress - baseAddress)) {
             return false;
         }
 
@@ -216,18 +218,20 @@ namespace {
         if (nt->FileHeader.SizeOfOptionalHeader > imageSize - optionalOffset)
             return false;
         const size_t sectionOffset = optionalOffset + nt->FileHeader.SizeOfOptionalHeader;
-        if (sectionOffset % alignof(IMAGE_SECTION_HEADER) != 0 ||
-            (baseAddress + sectionOffset) % alignof(IMAGE_SECTION_HEADER) != 0)
-            return false;
         const size_t sectionBytes =
             static_cast<size_t>(nt->FileHeader.NumberOfSections) * sizeof(IMAGE_SECTION_HEADER);
         if (sectionOffset > imageSize || sectionBytes > imageSize - sectionOffset)
             return false;
-        if (baseAddress > (std::numeric_limits<uintptr_t>::max)() - sectionOffset)
+
+        // Validate the complete mapped-image address interval before computing
+        // any section pointer. The optional-header values are untrusted PE data.
+        const uintptr_t sectionAddress = baseAddress + sectionOffset;
+        if (sectionOffset % alignof(IMAGE_SECTION_HEADER) != 0 ||
+            sectionAddress % alignof(IMAGE_SECTION_HEADER) != 0)
             return false;
 
         const auto* sections = reinterpret_cast<const IMAGE_SECTION_HEADER*>(
-            base + sectionOffset);
+            sectionAddress);
         if (!IsReadableRange(sections, sectionBytes)) return false;
 
         ntHeaders = nt;
