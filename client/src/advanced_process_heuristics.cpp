@@ -474,6 +474,21 @@ namespace {
                 return ProcessWhitelistResult::NotWhitelisted;
             }
 
+            // Keep this decision separate from publisher-specific cache entries.
+            const std::wstring systemCacheKey =
+                L"windows-system:" + normalizedProcessPath;
+            const auto cachedSystemTrust = signatureCache.find(systemCacheKey);
+            if (cachedSystemTrust != signatureCache.end()) {
+                if (cachedSystemTrust->second) {
+                    return ProcessWhitelistResult::Whitelisted;
+                }
+                ReportViolationAndExit(
+                    L"", "SIGNATURE_SPOOFING",
+                    "Windows-core process failed Authenticode verification; PID=" +
+                        std::to_string(processId));
+                return ProcessWhitelistResult::NotWhitelisted;
+            }
+
             std::wstring signatureIssue;
             const auto signatureResult =
                 Oblivion::DigitalSignatureValidator::VerifyWindowsSystemProcessSignatureDetailed(
@@ -486,8 +501,14 @@ namespace {
                 }
                 return ProcessWhitelistResult::Incomplete;
             }
-            if (signatureResult ==
-                Oblivion::DigitalSignatureValidator::ProcessSignatureResult::Untrusted) {
+
+            const bool isTrusted =
+                signatureResult ==
+                Oblivion::DigitalSignatureValidator::ProcessSignatureResult::Trusted;
+            if (signatureCache.size() < kMaximumSignatureCacheEntries) {
+                signatureCache.emplace(systemCacheKey, isTrusted);
+            }
+            if (!isTrusted) {
                 ReportViolationAndExit(
                     L"", "SIGNATURE_SPOOFING",
                     "Windows-core process failed Authenticode verification; PID=" +
