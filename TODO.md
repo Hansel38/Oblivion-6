@@ -172,6 +172,12 @@ This checklist tracks findings from a source review. A checked item means the co
 
 - [ ] Runtime fixture: accept a PE section whose nonzero `VirtualSize` ends within `SizeOfImage` while `SizeOfRawData` extends beyond that virtual end due file alignment; still reject raw data that extends beyond the file
 
+- [x] **P1 — Bind relocation parsing to the mapped PE header.** `SelfIntegrityGuard` now checks disk/memory agreement for `ImageBase`, section/file alignment, `SizeOfHeaders`, optional-header size, relocation-directory presence/RVA/size, and the relevant header counts before using disk relocation entries to build skip intervals. Runtime header-mutation fixtures remain required.
+
+- [ ] Runtime fixture: change only the disk PE `ImageBase` after the process image is loaded; self-integrity must report `PE_HEADERS` before calculating relocation skip intervals
+- [ ] Runtime fixture: change only the disk base-relocation directory RVA/size or `NumberOfRvaAndSizes` while mapped headers remain unchanged; self-integrity must report `PE_HEADERS` and not trust the new disk relocation table
+- [ ] Runtime fixture: change disk `SectionAlignment`, `FileAlignment`, `SizeOfHeaders`, or `SizeOfOptionalHeader` after load; mapped-vs-disk header comparison must reject it
+
 ## Verification checklist
 
 - [x] Windows Visual Studio build: Debug x86
