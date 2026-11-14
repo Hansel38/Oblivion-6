@@ -668,8 +668,9 @@ namespace Oblivion {
     }
 
     // Used only after the caller has verified that the executable path is
-    // inside the Windows directory. WinVerifyTrust also covers catalog-signed
-    // Windows binaries, for which embedded publisher extraction may not work.
+    // inside the Windows directory. This helper checks the file-signature path;
+    // it does not perform a separate catalog lookup. A missing embedded signature
+    // is therefore incomplete, not proof that a Windows binary is untrusted.
     DigitalSignatureValidator::ProcessSignatureResult
     DigitalSignatureValidator::VerifyWindowsSystemProcessSignatureDetailed(
         const std::wstring& processPath,
@@ -687,6 +688,11 @@ namespace Oblivion {
 
         failureReason = L"WinVerifyTrust failed; status=" +
             std::to_wstring(static_cast<unsigned long>(trustStatus));
+        if (trustStatus == TRUST_E_NOSIGNATURE) {
+            failureReason = L"No embedded signature was found; catalog trust was not established";
+            return ProcessSignatureResult::Incomplete;
+        }
+
         return IsDefinitivelyUntrustedSignatureStatus(trustStatus)
             ? ProcessSignatureResult::Untrusted
             : ProcessSignatureResult::Incomplete;
