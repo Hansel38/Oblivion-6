@@ -667,6 +667,31 @@ namespace Oblivion {
         return result == ERROR_SUCCESS;
     }
 
+    // Used only after the caller has verified that the executable path is
+    // inside the Windows directory. WinVerifyTrust also covers catalog-signed
+    // Windows binaries, for which embedded publisher extraction may not work.
+    DigitalSignatureValidator::ProcessSignatureResult
+    DigitalSignatureValidator::VerifyWindowsSystemProcessSignatureDetailed(
+        const std::wstring& processPath,
+        std::wstring& failureReason) {
+        failureReason.clear();
+        if (processPath.empty()) {
+            failureReason = L"Windows process image path is empty";
+            return ProcessSignatureResult::Incomplete;
+        }
+
+        LONG trustStatus = ERROR_SUCCESS;
+        if (VerifyFileSignature(processPath, &trustStatus)) {
+            return ProcessSignatureResult::Trusted;
+        }
+
+        failureReason = L"WinVerifyTrust failed; status=" +
+            std::to_wstring(static_cast<unsigned long>(trustStatus));
+        return IsDefinitivelyUntrustedSignatureStatus(trustStatus)
+            ? ProcessSignatureResult::Untrusted
+            : ProcessSignatureResult::Incomplete;
+    }
+
     // Static function untuk mendapatkan publisher dari file
     bool DigitalSignatureValidator::GetFilePublisher(const std::wstring& filePath, std::wstring& publisherName) {
         HCERTSTORE hStore = NULL;
