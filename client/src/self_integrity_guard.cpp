@@ -393,9 +393,37 @@ namespace Oblivion {
             return false;
         }
 
+        const bool memoryHasBaseRelocations =
+            memoryNt->OptionalHeader.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_BASERELOC;
+        const bool diskHasBaseRelocations =
+            diskNt->OptionalHeader.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_BASERELOC;
+        bool relocationDirectoryMatches =
+            memoryHasBaseRelocations == diskHasBaseRelocations;
+        if (memoryHasBaseRelocations && diskHasBaseRelocations) {
+            const auto& memoryRelocations =
+                memoryNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+            const auto& diskRelocations =
+                diskNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+            relocationDirectoryMatches =
+                memoryRelocations.VirtualAddress == diskRelocations.VirtualAddress &&
+                memoryRelocations.Size == diskRelocations.Size;
+        }
+
+        // These disk fields directly control the relocation skip intervals and
+        // the RVA/file mapping used below. They must still match the PE headers
+        // mapped into this process; otherwise a modified disk header could
+        // redirect the parser to attacker-selected relocation metadata.
         if (memoryNt->FileHeader.NumberOfSections != diskNt->FileHeader.NumberOfSections ||
             memoryNt->FileHeader.Machine != diskNt->FileHeader.Machine ||
-            memoryNt->OptionalHeader.SizeOfImage != diskNt->OptionalHeader.SizeOfImage) {
+            memoryNt->FileHeader.SizeOfOptionalHeader != diskNt->FileHeader.SizeOfOptionalHeader ||
+            memoryNt->OptionalHeader.ImageBase != diskNt->OptionalHeader.ImageBase ||
+            memoryNt->OptionalHeader.SectionAlignment != diskNt->OptionalHeader.SectionAlignment ||
+            memoryNt->OptionalHeader.FileAlignment != diskNt->OptionalHeader.FileAlignment ||
+            memoryNt->OptionalHeader.SizeOfImage != diskNt->OptionalHeader.SizeOfImage ||
+            memoryNt->OptionalHeader.SizeOfHeaders != diskNt->OptionalHeader.SizeOfHeaders ||
+            memoryNt->OptionalHeader.NumberOfRvaAndSizes !=
+                diskNt->OptionalHeader.NumberOfRvaAndSizes ||
+            !relocationDirectoryMatches) {
             ReportTamper("PE_HEADERS");
             return false;
         }
