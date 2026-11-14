@@ -434,9 +434,12 @@ namespace Oblivion {
     }
 
     bool MemoryScanner::ParsePEHeaders(const std::vector<uint8_t>& fileData,
-                                       std::vector<PESectionInfo>& sections) {
+                                       std::vector<PESectionInfo>& sections,
+                                       bool updateSectionMap) {
         sections.clear();
-        m_sectionMap.clear();
+        if (updateSectionMap) {
+            m_sectionMap.clear();
+        }
 
         IMAGE_DOS_HEADER dosHeader{};
         IMAGE_NT_HEADERS ntHeaders{};
@@ -467,8 +470,10 @@ namespace Oblivion {
             section.rawDataSize = sectionHeader.SizeOfRawData;
             section.characteristics = sectionHeader.Characteristics;
 
-            if (!m_sectionMap.emplace(section.virtualAddress, section).second)
+            if (updateSectionMap &&
+                !m_sectionMap.emplace(section.virtualAddress, section).second) {
                 return false;
+            }
             sections.push_back(std::move(section));
         }
 
@@ -477,7 +482,9 @@ namespace Oblivion {
 
     bool MemoryScanner::ValidatePEStructure(const std::vector<uint8_t>& fileData) {
         std::vector<PESectionInfo> sections;
-        if (!ParsePEHeaders(fileData, sections)) {
+        // Once the disk baseline exists, parse into a temporary list without
+        // replacing the section metadata captured from the original image.
+        if (!ParsePEHeaders(fileData, sections, !m_baselineCreated)) {
             ReportViolationAndExit(L"", "PE_VALIDATION_FAILED",
                                    "PE structure validation failed: invalid headers or section table");
             return false;
@@ -493,6 +500,39 @@ namespace Oblivion {
                                    "PE validation failed: missing executable .text section");
             return false;
         }
+
+        if (m_baselineCreated) {
+            if (sections.size() != m_sectionMap.size()) {
+                ReportViolationAndExit(
+                    L"", "DISK_PE_METADATA_MODIFIED",
+                    "Executable section count changed after the disk baseline was created");
+                return false;
+            }
+
+            for (const auto& current : sections) {
+                const auto baselineIt = m_sectionMap.find(current.virtualAddress);
+                if (baselineIt == m_sectionMap.end()) {
+                    ReportViolationAndExit(
+                        L"", "DISK_PE_METADATA_MODIFIED",
+                        "Executable section RVA changed after the disk baseline was created");
+                    return false;
+                }
+
+                const auto& baseline = baselineIt->second;
+                if (current.name != baseline.name ||
+                    current.virtualSize != baseline.virtualSize ||
+                    current.rawDataOffset != baseline.rawDataOffset ||
+                    current.rawDataSize != baseline.rawDataSize ||
+                    current.characteristics != baseline.characteristics) {
+                    ReportViolationAndExit(
+                        L"", "DISK_PE_METADATA_MODIFIED",
+                        "Executable section metadata changed after the disk baseline was created: " +
+                            baseline.name);
+                    return false;
+                }
+            }
+        }
+
         return true;
     }
 
@@ -1161,6 +1201,31 @@ namespace Oblivion {
             appendField(baseline.memoryCRC32);
             const uint8_t isCodeSection = baseline.isCodeSection ? 1u : 0u;
             appendField(isCodeSection);
+        }
+
+        // The section map supplies raw disk offsets and extents used by later
+        // cross-verification. Include it in the checksum so an in-memory change
+        // cannot redirect verification to attacker-selected file ranges.
+        const uint32_t sectionCount =
+            static_cast<uint32_t>(m_sectionMap.size());
+        appendField(sectionCount);
+        for (const auto& entry : m_sectionMap) {
+            const uint32_t sectionRva = entry.first;
+            const auto& section = entry.second;
+            appendField(sectionRva);
+            appendField(section.virtualSize);
+            appendField(section.rawDataOffset);
+            appendField(section.rawDataSize);
+            appendField(section.characteristics);
+            const uint32_t nameLength =
+                static_cast<uint32_t>(section.name.size());
+            appendField(nameLength);
+            if (!section.name.empty()) {
+                const auto* nameBytes =
+                    reinterpret_cast<const uint8_t*>(section.name.data());
+                baselineData.insert(
+                    baselineData.end(), nameBytes, nameBytes + section.name.size());
+            }
         }
 
         return CalculateCRC32(baselineData.data(), baselineData.size());
