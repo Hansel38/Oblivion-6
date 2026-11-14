@@ -429,6 +429,82 @@ private:
     OVERLAPPED m_overlapped{};
     bool m_locked = false;
 };
+
+static bool AppendBanListEntryAtomically(
+    const std::string& banFilePath, const std::string& hwid) {
+    std::string currentContents;
+    std::error_code filesystemError;
+    const bool fileExists = std::filesystem::exists(banFilePath, filesystemError);
+    if (filesystemError) return false;
+    if (fileExists) {
+        std::ifstream input(banFilePath, std::ios::binary);
+        if (!input.is_open()) return false;
+        currentContents.assign(
+            std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>());
+        if (input.bad()) return false;
+    }
+
+    if (!currentContents.empty() && currentContents.back() != '\n') {
+        currentContents.push_back('\n');
+    }
+    currentContents += hwid;
+    currentContents.push_back('\n');
+
+    std::string temporaryPath;
+    HANDLE temporaryFile = INVALID_HANDLE_VALUE;
+    for (unsigned int attempt = 0; attempt < 16; ++attempt) {
+        temporaryPath = banFilePath + ".tmp." +
+            std::to_string(GetCurrentProcessId()) + "." +
+            std::to_string(GetTickCount64()) + "." + std::to_string(attempt);
+        temporaryFile = CreateFileA(
+            temporaryPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (temporaryFile != INVALID_HANDLE_VALUE) break;
+        const DWORD error = GetLastError();
+        if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) return false;
+    }
+    if (temporaryFile == INVALID_HANDLE_VALUE) return false;
+
+    bool writeSucceeded = true;
+    size_t totalWritten = 0;
+    while (totalWritten < currentContents.size()) {
+        const size_t remaining = currentContents.size() - totalWritten;
+        const DWORD request = static_cast<DWORD>((std::min)(
+            remaining, static_cast<size_t>((std::numeric_limits<DWORD>::max)())));
+        DWORD written = 0;
+        if (!WriteFile(temporaryFile, currentContents.data() + totalWritten,
+                       request, &written, nullptr) || written == 0) {
+            writeSucceeded = false;
+            break;
+        }
+        totalWritten += static_cast<size_t>(written);
+    }
+    if (writeSucceeded && !FlushFileBuffers(temporaryFile)) writeSucceeded = false;
+    CloseHandle(temporaryFile);
+    if (!writeSucceeded) {
+        DeleteFileA(temporaryPath.c_str());
+        return false;
+    }
+
+    const DWORD attributes = GetFileAttributesA(banFilePath.c_str());
+    bool replaced = false;
+    if (attributes != INVALID_FILE_ATTRIBUTES) {
+        replaced = ReplaceFileA(
+            banFilePath.c_str(), temporaryPath.c_str(), nullptr,
+            0, nullptr, nullptr) != FALSE;
+    } else {
+        const DWORD error = GetLastError();
+        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+            replaced = MoveFileExA(
+                temporaryPath.c_str(), banFilePath.c_str(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+        }
+    }
+
+    if (!replaced) DeleteFileA(temporaryPath.c_str());
+    return replaced;
+}
 #endif
 
 static bool IsSameBanListHwid(
