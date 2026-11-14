@@ -72,6 +72,14 @@ export OBLV_HB_RTT_WARN_MS=1500
 ./server
 ```
 
+The listener has no compiled-in port. Set a canonical TCP port before starting
+the server, and configure clients with the same value:
+
+```bash
+export OBLIVION_LISTEN_PORT=54321
+./oblivion-server
+```
+
 ### Server Secret
 The server requires a secret key. You can set it via:
 
@@ -157,6 +165,7 @@ ExecStart=/path/to/server/server
 Restart=always
 RestartSec=10
 Environment="OBLIVION_SECRET=your-secret-key"
+Environment="OBLIVION_LISTEN_PORT=54321"
 
 [Install]
 WantedBy=multi-user.target
@@ -173,7 +182,8 @@ sudo systemctl status oblivion-server
 ## Troubleshooting
 
 ### Port already in use
-If port 54321 is already in use, you can change it by modifying `DEFAULT_PORT` in `server_linux.cpp` or use a port forwarder.
+Set `OBLIVION_LISTEN_PORT` to an unused TCP port, then update each client's
+`OBLIVION_SERVER_PORT` to the same value.
 
 ### Permission denied
 Make sure the server executable has execute permissions:
@@ -196,7 +206,7 @@ make clean
 
 ## Notes
 
-- The server listens on port 54321 by default
+- The server requires `OBLIVION_LISTEN_PORT`; there is no default listener port
 - All logs and ban files are created in the same directory as the executable
 - The server supports multiple concurrent client connections
 - Heartbeat monitoring is enabled by default

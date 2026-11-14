@@ -22,6 +22,7 @@
 #include "include/heartbeat_protocol.h"
 #include "include/socket_framing.h"
 #include "include/protocol_validation.h"
+#include "../common/network_configuration.h"
 #include <bcrypt.h>
 
 #pragma comment(lib, "Ws2_32.lib")
@@ -32,7 +33,6 @@
 #define BCRYPT_ALG_HANDLE_HMAC 0x00000008
 #endif
 
-#define DEFAULT_PORT "54321"
 #define BUFFER_LEN 4096
 #define MAX_TYPE_LEN 64
 #define MAX_DETAILS_LEN 2048
@@ -1236,8 +1236,8 @@ void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbea
 }
 
 int main() {
-    if (SERVER_SECRET.empty() || SERVER_SECRET == "DEV_SECRET_NOT_SET") {
-        std::cerr << "[FATAL] OBLIVION_SECRET is not configured; refusing to start." << std::endl;
+    if (SERVER_SECRET.size() < 32) {
+        std::cerr << "[FATAL] OBLIVION_SECRET must contain at least 32 bytes; refusing to start." << std::endl;
         return 1;
     }
 
@@ -1264,7 +1264,17 @@ int main() {
     hints.ai_flags = AI_PASSIVE; // Untuk bind()
 
     // Resolve alamat server dan port
-    iResult = getaddrinfo(NULL, DEFAULT_PORT, &hints, &result);
+    const char* configuredPort = std::getenv("OBLIVION_LISTEN_PORT");
+    uint16_t listenPort = 0;
+    if (configuredPort == nullptr ||
+        !OblivionNet::ParseTcpPort(configuredPort, listenPort)) {
+        std::cerr << "[ERROR] OBLIVION_LISTEN_PORT must be configured with a TCP port from 1 through 65535." << std::endl;
+        WSACleanup();
+        return 1;
+    }
+    const std::string listenPortText = OblivionNet::FormatTcpPort(listenPort);
+
+    iResult = getaddrinfo(NULL, listenPortText.c_str(), &hints, &result);
     if (iResult != 0) {
         std::cerr << "getaddrinfo gagal dengan error: " << iResult << std::endl;
         WSACleanup();
@@ -1305,7 +1315,7 @@ int main() {
     std::cout << "  OBLIVION HACK SHIELD - Server Component" << std::endl;
     std::cout << "  Version 1.0 - Ragnarok Online Protection" << std::endl;
     std::cout << "==================================================" << std::endl;
-    std::cout << "[INFO] Server berjalan dan mendengarkan di port " << DEFAULT_PORT << std::endl;
+    std::cout << "[INFO] Server berjalan dan mendengarkan di port " << listenPortText << std::endl;
     std::cout << "[INFO] Ban list file: " << GetFilePath(BAN_LIST_FILE) << std::endl;
     std::cout << "[INFO] Violation log file: " << GetFilePath(VIOLATION_LOG_FILE) << std::endl;
     std::cout << "[INFO] Menunggu koneksi dari client..." << std::endl;

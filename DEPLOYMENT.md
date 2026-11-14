@@ -6,7 +6,7 @@ A successful CI build is not a production certification. The remaining blockers 
 
 ## Client endpoint
 
-The Release client no longer silently targets loopback. Set the process environment variable `OBLIVION_SERVER` to the deployed server's DNS name, IPv4 address, or IPv6 address before loading the DLL / calling `Oblivion_Entry()`.
+The client no longer silently targets loopback. Set the process environment variable `OBLIVION_SERVER` to the deployed server's DNS name, IPv4 address, or IPv6 address, and set `OBLIVION_SERVER_PORT` to its TCP port, before loading the DLL / calling `Oblivion_Entry()`.
 
 Examples:
 
@@ -14,15 +14,15 @@ Examples:
 - IPv4: `203.0.113.10`
 - IPv6: `2001:db8::10`
 
-Use an ASCII DNS name or an IDNA/Punycode hostname. The client rejects an empty, overlong, or unsupported-character value. The host name limit is 253 bytes. The default TCP port is `54321`; it is currently fixed in the client and defaults to the same value in both server implementations.
+Use an ASCII DNS name or an IDNA/Punycode hostname. The client rejects an empty, overlong, or unsupported-character value. The host name limit is 253 bytes. The port must be a canonical decimal value from 1 through 65535. Configure the server with the same value in `OBLIVION_LISTEN_PORT`.
 
-Release builds fail initialization when `OBLIVION_SERVER` is missing or invalid. Debug builds alone retain `127.0.0.1` as a local development default.
+All builds fail initialization when either endpoint variable is missing or invalid; local development must configure an explicit endpoint too.
 
 ## Shared secret configuration
 
 The Windows client reads `OBLIVION_SECRET` from its process environment or falls back to `secret.dat` beside the game executable. The Windows and Linux servers read `OBLIVION_SECRET` or `secret.dat` beside the server executable. The same key must be provisioned to client and server for the current protocol.
 
-The server refuses to start when no production secret is configured. Release clients fail initialization when no client secret is available. Do not put the secret in source control, command-line arguments, logs, or support tickets. Restrict access to server configuration and backups. A key of at least 32 random bytes is recommended; the current code does not enforce key entropy or minimum length.
+The server refuses to start when no secret is configured or when it has fewer than 32 bytes. Clients enforce the same minimum. This applies to Debug and Release builds; no development secret is embedded. Do not put the secret in source control, command-line arguments, logs, or support tickets. Restrict access to server configuration and backups. Use at least 32 random bytes; the code can enforce length, but cannot establish entropy quality for an operator-supplied value.
 
 **Critical limitation:** the current design still uses one long-lived shared secret available to an untrusted client. XOR-encoding `secret.dat` is obfuscation, not encryption, and a value held by the client can be extracted from the file or process memory. Challenge-response prevents sending the key over TCP but does not solve local extraction. This remains a P0 production blocker. A real trusted authentication service issuing per-account/per-session credentials, with server-side revocation and rotation, is required; that service is not implemented here.
 
@@ -30,8 +30,8 @@ Changing the shared key requires a coordinated client/server rollout because the
 
 ## Network exposure
 
-- Open inbound **TCP 54321** only from the game/client networks that are expected to connect. Apply equivalent restrictions in the cloud security group, perimeter firewall, and host firewall.
-- The server listener uses the default port documented above. Do not expose administrative access, secret files, ban files, or logs over the public network.
+- Open inbound TCP only on the configured `OBLIVION_LISTEN_PORT`, and only from the game/client networks that are expected to connect. Apply equivalent restrictions in the cloud security group, perimeter firewall, and host firewall.
+- The server listener has no default port. Do not expose administrative access, secret files, ban files, or logs over the public network.
 - Plain TCP is deliberate and TLS is out of scope. Network observers may read traffic metadata and message contents even though authenticated frames are MAC-protected. Use a trusted network path and firewall restrictions appropriate to that exposure.
 - Validate the deployed server address and routing from a real client host; a successful local build does not test DNS, routing, or firewall rules.
 
@@ -55,7 +55,7 @@ The file-integrity checks for `RRO.exe`, `Republic.grf`, and `DATA.ini` still ne
 
 Run these tests against the exact Release client, supported Windows versions, and the production-like server:
 
-1. Valid and invalid shared-secret check-in; missing `OBLIVION_SERVER` must fail closed in Release.
+1. Valid and invalid shared-secret check-in; missing or invalid client/server endpoint configuration must fail closed.
 2. TCP fragmentation/coalescing, delayed responses, partial sends, disconnects, invalid MACs, altered PONG status/timestamp, and replayed or stale frames.
 3. Startup status transition from unavailable to healthy and graceful shutdown back to unavailable; verify server logs and no false heartbeat-miss escalation.
 4. DLL host sequence: repeated `Oblivion_Entry()`, `Oblivion_Shutdown()`, and unload cycles, including cancellation during initialization.
@@ -64,3 +64,22 @@ Run these tests against the exact Release client, supported Windows versions, an
 7. Firewall allow/deny tests from the intended client networks and from untrusted networks.
 
 The current CI covers Linux GCC and Windows Debug/Release x86/x64 builds. It does not execute the game, injector, actual network protocol, Windows security APIs, or deployment environment.
+
+## Network endpoint configuration
+
+The endpoint is deliberately not compiled into either binary. Configure the
+same TCP port on both sides before starting production services:
+
+```text
+# Server
+OBLIVION_LISTEN_PORT=54321
+
+# Client host process before loading Oblivion.dll
+OBLIVION_SERVER=anti-cheat.example.com
+OBLIVION_SERVER_PORT=54321
+```
+
+All three values are required. Ports must be canonical decimal values from 1
+through 65535 (for example, `443`; not `0443`, `0`, or `65536`). The server
+exits before opening a listening socket when its value is missing or invalid;
+the client fails closed before opening a network connection.

@@ -35,6 +35,10 @@ jobs:
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -I server/include tests/protocol_validation_test.cpp -o /tmp/protocol_validation_test
           /tmp/protocol_validation_test
+      - name: Test network configuration validation
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror tests/network_configuration_test.cpp -o /tmp/network_configuration_test
+          /tmp/network_configuration_test
       - name: Build Linux server
         run: |
           make -C server clean

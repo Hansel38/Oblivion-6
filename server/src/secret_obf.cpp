@@ -145,25 +145,9 @@ namespace OblivionServer {
         }
 #endif
 
-        // Release builds must fail closed when no production secret is configured.
-#if defined(_DEBUG)
-        const char* devDefault = "DEV_SECRET_NOT_SET";
-        size_t len = strlen(devDefault);
-        std::vector<unsigned char> encoded(len);
-        for (size_t i = 0; i < len; ++i) {
-            unsigned char key = (unsigned char)(0x5A + ((i * 7) % 0x3F));
-            encoded[i] = (unsigned char)(devDefault[i] ^ key);
-        }
-        secret.reserve(len);
-        for (size_t i = 0; i < len; ++i) {
-            unsigned char key = (unsigned char)(0x5A + ((i * 7) % 0x3F));
-            secret += (char)(encoded[i] ^ key);
-        }
-
-        cached = secret;
-        return cached;
-#else
+        // Never compile a development fallback into a server binary. A server
+        // with no explicitly provisioned secret must refuse to start in every
+        // configuration, including Debug.
         return {};
-#endif
     }
 }

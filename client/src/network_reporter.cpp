@@ -297,7 +297,10 @@ namespace Oblivion {
 
     NetworkReporter::NetworkReporter(const std::string& serverIP, int serverPort, const std::string& secretKey)
         : m_serverIP(serverIP), m_serverPort(serverPort), m_secretKey(secretKey), m_hbSocket(INVALID_SOCKET) {
-        if (m_secretKey.empty()) throw std::invalid_argument("Client secret is not configured");
+        if (m_secretKey.size() < 32) {
+            throw std::invalid_argument(
+                "Client secret must contain at least 32 bytes of provisioned key material");
+        }
         // Generate HWID before acquiring Winsock state. These WMI/string operations
         // may allocate or throw; a constructor that fails must not leak a WSAStartup
         // reference because its destructor will not run.

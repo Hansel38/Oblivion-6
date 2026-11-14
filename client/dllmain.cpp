@@ -4,6 +4,7 @@
 #include "network_reporter.h"
 #include "self_integrity_guard.h"
 #include "secret_obf.h"
+#include "../common/network_configuration.h"
 #include <windows.h>
 #include <thread>
 #include <mutex>
@@ -22,8 +23,7 @@
 // Global instance dari ProcessWatcher
 static Oblivion::ProcessWatcher* g_pProcessWatcher = nullptr;
 
-// Buat instance global NetworkReporter agar bisa diakses
-// Ganti 127.0.0.1 dengan IP server Anda
+// Buat instance global NetworkReporter agar bisa diakses.
 static Oblivion::NetworkReporter* g_pNetworkReporter = nullptr;
 static Oblivion::SelfIntegrityGuard* g_pSelfIntegrityGuard = nullptr;
 static HMODULE g_hSelfModule = nullptr;
@@ -53,9 +53,15 @@ namespace {
 }
 
 namespace {
-    // The Release client must be explicitly pointed at its deployed server.
-    // Debug builds retain loopback as a local development default.
-    std::string GetConfiguredServerAddress() {
+    struct ServerEndpoint {
+        std::string host;
+        int port;
+    };
+
+    // Both host and port are deployment configuration. Keeping either value in
+    // the DLL would make a release binary environment-specific and forces a
+    // rebuild for a routine endpoint migration.
+    ServerEndpoint GetConfiguredServerEndpoint() {
         constexpr DWORD kServerNameCapacity = 256;
         char serverName[kServerNameCapacity] = {};
         SetLastError(ERROR_SUCCESS);
@@ -68,12 +74,7 @@ namespace {
                 throw std::runtime_error(
                     "Unable to read OBLIVION_SERVER; Win32 error=" + std::to_string(error));
             }
-#if defined(_DEBUG)
-            return "127.0.0.1";
-#else
-            throw std::runtime_error(
-                "OBLIVION_SERVER must be configured for Release builds");
-#endif
+            throw std::runtime_error("OBLIVION_SERVER must be configured");
         }
 
         if (length >= kServerNameCapacity) {
@@ -99,7 +100,35 @@ namespace {
             }
         }
 
-        return host;
+        SetLastError(ERROR_SUCCESS);
+        const DWORD portCapacity = GetEnvironmentVariableA(
+            "OBLIVION_SERVER_PORT", nullptr, 0);
+        if (portCapacity == 0) {
+            const DWORD error = GetLastError();
+            if (error == ERROR_ENVVAR_NOT_FOUND || error == ERROR_SUCCESS) {
+                throw std::runtime_error("OBLIVION_SERVER_PORT must be configured");
+            }
+            throw std::runtime_error(
+                "Unable to read OBLIVION_SERVER_PORT; Win32 error=" + std::to_string(error));
+        }
+        if (portCapacity > 7) {
+            throw std::runtime_error("OBLIVION_SERVER_PORT is invalid");
+        }
+
+        std::vector<char> portText(portCapacity);
+        const DWORD portLength = GetEnvironmentVariableA(
+            "OBLIVION_SERVER_PORT", portText.data(), portCapacity);
+        if (portLength == 0 || portLength >= portCapacity) {
+            throw std::runtime_error("OBLIVION_SERVER_PORT is invalid");
+        }
+
+        uint16_t parsedPort = 0;
+        if (!OblivionNet::ParseTcpPort(
+                std::string_view(portText.data(), portLength), parsedPort)) {
+            throw std::runtime_error("OBLIVION_SERVER_PORT must be a TCP port from 1 through 65535");
+        }
+
+        return ServerEndpoint{ host, static_cast<int>(parsedPort) };
     }
 }
 
@@ -430,10 +459,9 @@ void InitializeSecuritySystem() {
     try {
         // Ambil secret yang di-obfuscate (bukan string literal langsung)
         const std::string kClientSecret = Oblivion::GetClientSecret();
-        const std::string serverAddress = GetConfiguredServerAddress();
-        constexpr int kServerPort = 54321;
+        const ServerEndpoint serverEndpoint = GetConfiguredServerEndpoint();
         g_pNetworkReporter = new Oblivion::NetworkReporter(
-            serverAddress, kServerPort, kClientSecret);
+            serverEndpoint.host, serverEndpoint.port, kClientSecret);
         std::cout << "[INIT] Network reporter created" << std::endl;
     } catch (const std::exception& e) {
         std::cerr << "[ERROR] Failed to create network reporter: " << e.what() << std::endl;

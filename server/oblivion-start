@@ -8,6 +8,7 @@ SERVER_BIN="$SERVER_DIR/oblivion-server"
 PID_FILE="$SERVER_DIR/oblivion-server.pid"
 LOG_FILE="$SERVER_DIR/server.log"
 LOCK_FILE="$SERVER_DIR/oblivion-server.lock"
+LISTEN_PORT="${OBLIVION_LISTEN_PORT:-}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -39,6 +40,10 @@ is_running() {
 
 # Function to start server
 start_server() {
+    if [ -z "$LISTEN_PORT" ]; then
+        echo -e "${RED}[ERROR] OBLIVION_LISTEN_PORT must be set before starting the server${NC}"
+        return 1
+    fi
     if is_running; then
         echo -e "${YELLOW}[INFO] Server is already running (PID: $(cat $PID_FILE))${NC}"
         return 1
@@ -141,9 +146,9 @@ show_status() {
         echo ""
         echo "Port Status:"
         if command -v netstat > /dev/null 2>&1; then
-            netstat -tulpn 2>/dev/null | grep 54321 || echo "Port 54321 not found in netstat"
+            netstat -tulpn 2>/dev/null | grep -F ":$LISTEN_PORT" || echo "Port $LISTEN_PORT not found in netstat"
         elif command -v ss > /dev/null 2>&1; then
-            ss -tulpn 2>/dev/null | grep 54321 || echo "Port 54321 not found in ss"
+            ss -tulpn 2>/dev/null | grep -F ":$LISTEN_PORT" || echo "Port $LISTEN_PORT not found in ss"
         else
             echo "Cannot check port (netstat/ss not available)"
         fi

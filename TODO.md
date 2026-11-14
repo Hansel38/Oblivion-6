@@ -21,7 +21,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [x] **P1 — TCP client writes:** add a send-all loop so partial TCP sends do not silently truncate check-in or violation reports.
 - [x] **P1 — TCP heartbeat framing on client:** retain unread bytes between frames and read bounded semicolon-terminated heartbeat messages, including fragmented TCP frames.
 - [x] **P1 — File SHA-256 read loop:** distinguish successful EOF from failed `ReadFile`; do not interpret a stale `GetLastError()` after successful EOF as an I/O failure.
-- [x] **P0 — Public development secret fallback:** client and server no longer silently use `DEV_SECRET_NOT_SET` in non-debug builds.
+- [x] **P0 — Public development secret fallback:** client and server never compile or use a development-secret fallback; every build requires explicitly provisioned secret material.
 - [x] **P0 — Server startup configuration:** Windows and Linux server refuse to start when the secret is missing or is the development placeholder.
 - [x] **P0 — Secret disclosure:** remove logging of expected and received authentication secrets from both server implementations.
 - [x] **P1 — Windows environment secret length:** avoid including the `_dupenv_s` terminating NUL byte in the server authentication key.
@@ -79,7 +79,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [x] **P1 — Do not accept empty/unknown client status as healthy.** The client now reports separate anti-suspend and self-integrity states, initially unavailable and marked healthy only after both monitors start. Both servers require the exact `0|0`, `0|1`, `1|0`, or `1|1` bit format, authenticate it in the PONG MAC, and log transitions to/from unavailable without misclassifying a valid transport heartbeat as packet loss. Runtime initialization, shutdown, and server log-transition tests remain required.
 - [x] **P1 — Bound client TCP connection attempts.** Use nonblocking `connect()` plus `select()` / `SO_ERROR` with a single five-second deadline shared across all resolved addresses in both check-in and violation-report paths.
 - [x] **P1 — Bound DNS resolution duration.** Replace both synchronous `getaddrinfo()` calls with cancellable `GetAddrInfoExW()` completion-event resolution; cancel after five seconds and wait for cancellation completion before releasing query state.
-- [x] **P1 — Require an explicit production server endpoint.** Release builds now require a valid ASCII DNS name or IP address in `OBLIVION_SERVER`; only Debug builds default to loopback. The TCP port remains `54321`. Deployment/runtime endpoint validation remains required.
+- [x] **P1 — Require an explicit server endpoint.** All client builds require a valid ASCII DNS/IP host in `OBLIVION_SERVER` and a validated `OBLIVION_SERVER_PORT`; both server implementations require the matching `OBLIVION_LISTEN_PORT`. No endpoint or port is compiled into the binaries. Deployment/runtime endpoint validation remains required.
 - [x] **P1 — Resolve secret files only beside the executable.** Client/server Windows loaders now use bounded dynamic `GetModuleFileNameW` buffers and skip file fallback when the executable directory cannot be resolved; they no longer search the current working directory. The client also reads `OBLIVION_SECRET` dynamically with a size limit and validates UTF-8 conversion. Runtime path/long-secret tests remain required.
 
 ### P1 — Client lifecycle and stability
