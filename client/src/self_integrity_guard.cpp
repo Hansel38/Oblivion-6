@@ -122,7 +122,8 @@ namespace {
         }
 
         const size_t ntOffset = static_cast<size_t>(dos->e_lfanew);
-        if (ntOffset > image.size() || sizeof(IMAGE_NT_HEADERS) > image.size() - ntOffset)
+        if (ntOffset % alignof(IMAGE_NT_HEADERS) != 0 ||
+            ntOffset > image.size() || sizeof(IMAGE_NT_HEADERS) > image.size() - ntOffset)
             return false;
 
         const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(image.data() + ntOffset);
@@ -147,6 +148,8 @@ namespace {
             return false;
 
         sectionTableOffset = optionalOffset + nt->FileHeader.SizeOfOptionalHeader;
+        if (sectionTableOffset % alignof(IMAGE_SECTION_HEADER) != 0)
+            return false;
         const size_t sectionBytes =
             static_cast<size_t>(nt->FileHeader.NumberOfSections) * sizeof(IMAGE_SECTION_HEADER);
         if (sectionTableOffset > image.size() ||
@@ -178,7 +181,9 @@ namespace {
 
         const size_t ntOffset = static_cast<size_t>(dos->e_lfanew);
         const uintptr_t baseAddress = reinterpret_cast<uintptr_t>(base);
-        if (baseAddress > (std::numeric_limits<uintptr_t>::max)() - ntOffset)
+        if (ntOffset % alignof(IMAGE_NT_HEADERS) != 0 ||
+            baseAddress > (std::numeric_limits<uintptr_t>::max)() - ntOffset ||
+            (baseAddress + ntOffset) % alignof(IMAGE_NT_HEADERS) != 0)
             return false;
         const auto* ntAddress = reinterpret_cast<const uint8_t*>(baseAddress + ntOffset);
         if (!IsReadableRange(ntAddress, sizeof(IMAGE_NT_HEADERS))) return false;
@@ -211,6 +216,9 @@ namespace {
         if (nt->FileHeader.SizeOfOptionalHeader > imageSize - optionalOffset)
             return false;
         const size_t sectionOffset = optionalOffset + nt->FileHeader.SizeOfOptionalHeader;
+        if (sectionOffset % alignof(IMAGE_SECTION_HEADER) != 0 ||
+            (baseAddress + sectionOffset) % alignof(IMAGE_SECTION_HEADER) != 0)
+            return false;
         const size_t sectionBytes =
             static_cast<size_t>(nt->FileHeader.NumberOfSections) * sizeof(IMAGE_SECTION_HEADER);
         if (sectionOffset > imageSize || sectionBytes > imageSize - sectionOffset)
@@ -568,6 +576,9 @@ namespace Oblivion {
         if (!RvaToFileRange(relocDirectory.VirtualAddress, relocDirectory.Size, relocFileOffset))
             return false;
 
+        if (relocFileOffset % alignof(IMAGE_BASE_RELOCATION) != 0)
+            return false;
+
         size_t remaining = relocDirectory.Size;
         const uint8_t* cursor = m_diskImage.data() + relocFileOffset;
         const DWORD imageSize = ntHeaders->OptionalHeader.SizeOfImage;
@@ -576,6 +587,7 @@ namespace Oblivion {
             if (remaining < sizeof(IMAGE_BASE_RELOCATION)) return false;
             const auto* block = reinterpret_cast<const IMAGE_BASE_RELOCATION*>(cursor);
             if (block->SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION) ||
+                block->SizeOfBlock % alignof(IMAGE_BASE_RELOCATION) != 0 ||
                 block->SizeOfBlock > remaining ||
                 ((block->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) % sizeof(WORD)) != 0) {
                 return false;
