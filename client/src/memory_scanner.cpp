@@ -1328,10 +1328,22 @@ namespace Oblivion {
                         uint8_t* regionBase =
                             reinterpret_cast<uint8_t*>(queryAddress);
 
-                        if (mbi.State == MEM_COMMIT && 
-                            (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | 
-                                          PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) {
-                            
+                        const DWORD pageProtection = mbi.Protect & 0xFF;
+                        const bool isReadableProtection =
+                            pageProtection == PAGE_READONLY ||
+                            pageProtection == PAGE_READWRITE ||
+                            pageProtection == PAGE_EXECUTE_READ ||
+                            pageProtection == PAGE_EXECUTE_READWRITE ||
+                            pageProtection == PAGE_EXECUTE_WRITECOPY;
+                        const bool isExecutableProtection =
+                            pageProtection == PAGE_EXECUTE ||
+                            pageProtection == PAGE_EXECUTE_READ ||
+                            pageProtection == PAGE_EXECUTE_READWRITE ||
+                            pageProtection == PAGE_EXECUTE_WRITECOPY;
+
+                        if (mbi.State == MEM_COMMIT &&
+                            (isReadableProtection || isExecutableProtection)) {
+
                             // Detect RWX pages (very suspicious)
                             if (DetectSuspiciousMemoryRegion(regionBase, regionSize)) {
                                 // Extract executable filename from path
@@ -1357,8 +1369,10 @@ namespace Oblivion {
                                 return;
                             }
 
-                            // Verify executable regions integrity
-                            if (mbi.Protect & (PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)) {
+                            // Every executable protection must enter integrity validation.
+                            // PAGE_EXECUTE cannot be read for CRC, so an overlap with a
+                            // baseline code range becomes Incomplete instead of being skipped.
+                            if (isExecutableProtection) {
                                 uintptr_t rva = reinterpret_cast<uintptr_t>(regionBase) - m_moduleBaseAddress;
                                 
                                 const RegionIntegrityResult integrityResult =
