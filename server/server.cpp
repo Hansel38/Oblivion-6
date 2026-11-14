@@ -5,6 +5,7 @@
 #include <thread>
 #include <vector>
 #include <fstream>
+#include <iterator>
 #include <filesystem>
 #include <cctype>
 #include <sstream>
@@ -199,6 +200,119 @@ enum class BanListStatus {
 
 static std::mutex g_banListMutex;
 
+class BanListFileLock {
+public:
+    BanListFileLock(const std::string& banFilePath, bool exclusive) {
+        const std::string lockPath = banFilePath + ".lock";
+        m_handle = CreateFileA(
+            lockPath.c_str(), GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (m_handle == INVALID_HANDLE_VALUE) return;
+
+        const DWORD flags = exclusive ? LOCKFILE_EXCLUSIVE_LOCK : 0;
+        m_locked = LockFileEx(
+            m_handle, flags, 0, MAXDWORD, MAXDWORD, &m_overlapped) != FALSE;
+        if (!m_locked) {
+            CloseHandle(m_handle);
+            m_handle = INVALID_HANDLE_VALUE;
+        }
+    }
+
+    ~BanListFileLock() {
+        if (m_locked) {
+            UnlockFileEx(m_handle, 0, MAXDWORD, MAXDWORD, &m_overlapped);
+        }
+        if (m_handle != INVALID_HANDLE_VALUE) CloseHandle(m_handle);
+    }
+
+    BanListFileLock(const BanListFileLock&) = delete;
+    BanListFileLock& operator=(const BanListFileLock&) = delete;
+    explicit operator bool() const { return m_locked; }
+
+private:
+    HANDLE m_handle = INVALID_HANDLE_VALUE;
+    OVERLAPPED m_overlapped{};
+    bool m_locked = false;
+};
+
+static bool AppendBanListEntryAtomically(
+    const std::string& banFilePath, const std::string& hwid) {
+    std::string currentContents;
+    std::error_code filesystemError;
+    const bool fileExists = std::filesystem::exists(banFilePath, filesystemError);
+    if (filesystemError) return false;
+
+    if (fileExists) {
+        std::ifstream input(banFilePath, std::ios::binary);
+        if (!input.is_open()) return false;
+        currentContents.assign(
+            std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>());
+        if (input.bad()) return false;
+    }
+
+    if (!currentContents.empty() && currentContents.back() != '\n') {
+        currentContents.push_back('\n');
+    }
+    currentContents += hwid;
+    currentContents.push_back('\n');
+
+    std::string temporaryPath;
+    HANDLE temporaryFile = INVALID_HANDLE_VALUE;
+    for (unsigned int attempt = 0; attempt < 16; ++attempt) {
+        temporaryPath = banFilePath + ".tmp." +
+            std::to_string(GetCurrentProcessId()) + "." +
+            std::to_string(GetTickCount64()) + "." + std::to_string(attempt);
+        temporaryFile = CreateFileA(
+            temporaryPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (temporaryFile != INVALID_HANDLE_VALUE) break;
+        const DWORD error = GetLastError();
+        if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) return false;
+    }
+    if (temporaryFile == INVALID_HANDLE_VALUE) return false;
+
+    bool writeSucceeded = true;
+    size_t totalWritten = 0;
+    while (totalWritten < currentContents.size()) {
+        const size_t remaining = currentContents.size() - totalWritten;
+        const DWORD request = static_cast<DWORD>((std::min)(
+            remaining, static_cast<size_t>((std::numeric_limits<DWORD>::max)())));
+        DWORD written = 0;
+        if (!WriteFile(temporaryFile, currentContents.data() + totalWritten,
+                       request, &written, nullptr) || written == 0) {
+            writeSucceeded = false;
+            break;
+        }
+        totalWritten += static_cast<size_t>(written);
+    }
+    if (writeSucceeded && !FlushFileBuffers(temporaryFile)) writeSucceeded = false;
+    CloseHandle(temporaryFile);
+    if (!writeSucceeded) {
+        DeleteFileA(temporaryPath.c_str());
+        return false;
+    }
+
+    const DWORD attributes = GetFileAttributesA(banFilePath.c_str());
+    bool replaced = false;
+    if (attributes != INVALID_FILE_ATTRIBUTES) {
+        replaced = ReplaceFileA(
+            banFilePath.c_str(), temporaryPath.c_str(), nullptr,
+            0, nullptr, nullptr) != FALSE;
+    } else {
+        const DWORD error = GetLastError();
+        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+            replaced = MoveFileExA(
+                temporaryPath.c_str(), banFilePath.c_str(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+        }
+    }
+
+    if (!replaced) DeleteFileA(temporaryPath.c_str());
+    return replaced;
+}
+
 static bool IsSameBanListHwid(
     const std::string& left, const std::string& right) {
     if (left.size() != right.size()) return false;
@@ -224,7 +338,7 @@ static bool IsValidBanListHwid(const std::string& hwid) {
     return true;
 }
 
-// Caller must hold g_banListMutex.
+// Caller must hold g_banListMutex and the sidecar BanListFileLock.
 static BanListStatus CheckHWIDBanStatusUnlocked(const std::string& hwid) {
     if (!IsValidBanListHwid(hwid)) {
         return BanListStatus::Unavailable;
@@ -268,10 +382,14 @@ static BanListStatus CheckHWIDBanStatusUnlocked(const std::string& hwid) {
 
 static BanListStatus CheckHWIDBanStatus(const std::string& hwid) {
     std::lock_guard<std::mutex> lock(g_banListMutex);
+    const std::string banFilePath = GetFilePath(BAN_LIST_FILE);
+    if (banFilePath.empty()) return BanListStatus::Unavailable;
+    BanListFileLock fileLock(banFilePath, false);
+    if (!fileLock) return BanListStatus::Unavailable;
     return CheckHWIDBanStatusUnlocked(hwid);
 }
 
-// Append is serialized with checks and other appends in this server process.
+// Checks and updates use the same OS-level lock, including across server processes.
 void AddToBanList(const std::string& hwid) {
     if (!IsValidBanListHwid(hwid)) {
         std::cerr << "[ERROR] Menolak HWID tidak valid untuk ban list." << std::endl;
@@ -279,6 +397,18 @@ void AddToBanList(const std::string& hwid) {
     }
 
     std::lock_guard<std::mutex> lock(g_banListMutex);
+    const std::string banFilePath = GetFilePath(BAN_LIST_FILE);
+    if (banFilePath.empty()) {
+        std::cerr << "[ERROR] Path ban list tidak tersedia." << std::endl;
+        return;
+    }
+
+    BanListFileLock fileLock(banFilePath, true);
+    if (!fileLock) {
+        std::cerr << "[ERROR] Gagal memperoleh lock lintas proses untuk ban list." << std::endl;
+        return;
+    }
+
     const BanListStatus status = CheckHWIDBanStatusUnlocked(hwid);
     if (status == BanListStatus::Banned) return;
     if (status == BanListStatus::Unavailable) {
@@ -286,27 +416,13 @@ void AddToBanList(const std::string& hwid) {
         return;
     }
 
-    const std::string banFilePath = GetFilePath(BAN_LIST_FILE);
-    if (banFilePath.empty()) {
-        std::cerr << "[ERROR] Path ban list tidak tersedia." << std::endl;
+    if (!AppendBanListEntryAtomically(banFilePath, hwid)) {
+        std::cerr << "[ERROR] Gagal memperbarui ban list secara atomik." << std::endl;
         return;
     }
 
-    std::ofstream banFile(banFilePath, std::ios::app);
-    if (!banFile.is_open()) {
-        std::cerr << "[ERROR] Gagal membuka file ban list untuk menulis." << std::endl;
-        return;
-    }
-
-    banFile << hwid << '\n';
-    banFile.flush();
-    if (!banFile.good()) {
-        std::cerr << "[ERROR] Gagal menyimpan HWID ke ban list." << std::endl;
-        return;
-    }
     std::cout << "[BAN] HWID [" << hwid << "] ditambahkan ke ban list." << std::endl;
 }
-
 
 // Helper function untuk extract file/software name dari details
 std::string ExtractDetectedFile(const std::string& type, const std::string& details) {
