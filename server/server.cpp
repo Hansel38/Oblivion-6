@@ -1067,7 +1067,8 @@ void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbea
                                         const bool statusWellFormed =
                                             Oblivion::IsValidClientStatus(status);
 
-                                        if (pseq != seq || pnonce != ping_nonce || phwid != hwid ||
+                                        if (!Oblivion::IsExpectedHeartbeatSequence(pseq, seq) ||
+                                            pnonce != ping_nonce || phwid != hwid ||
                                             !statusWellFormed) {
                                             ++consecutiveMiss;
                                             ++totalMisses;

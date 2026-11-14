@@ -3,6 +3,7 @@
 #include <array>
 #include <cassert>
 #include <iostream>
+#include <limits>
 #include <string>
 
 int main() {
@@ -33,6 +34,16 @@ int main() {
     for (const auto& status : invalidStatuses) {
         assert(!Oblivion::IsValidClientStatus(status));
     }
+
+    // Sequence binding rejects duplicate and skipped/reordered exchanges.
+    assert(Oblivion::IsExpectedHeartbeatSequence(1, 1));
+    assert(!Oblivion::IsExpectedHeartbeatSequence(1, 2));
+    assert(!Oblivion::IsExpectedHeartbeatSequence(3, 2));
+    assert(Oblivion::IsExpectedHeartbeatSequence(
+        (std::numeric_limits<uint32_t>::max)(),
+        (std::numeric_limits<uint32_t>::max)()));
+    // Sequence wraparound is defined by uint32_t arithmetic on both peers.
+    assert(Oblivion::IsExpectedHeartbeatSequence(0, 0));
 
     const std::string canonical = Oblivion::BuildPongAuthData(
         17, "123456789", 998877, "1|1", "test-hwid");
