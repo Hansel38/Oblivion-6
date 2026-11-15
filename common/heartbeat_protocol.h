@@ -28,6 +28,13 @@ namespace Oblivion {
         uint32_t rtt_warn_ms = 1500;
     };
 
+    // A heartbeat frame must belong to the next exchange in this session.
+    // uint32_t wraparound is intentional and shared by both peers.
+    inline bool IsExpectedHeartbeatSequence(
+        uint32_t receivedSequence, uint32_t expectedSequence) noexcept {
+        return receivedSequence == expectedSequence;
+    }
+
     inline std::string SerializeClientStatus(bool antiSuspendOk, bool integrityOk) {
         return std::string(antiSuspendOk ? "1" : "0") + "|" +
                (integrityOk ? "1" : "0");
