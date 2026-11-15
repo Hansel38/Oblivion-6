@@ -175,9 +175,13 @@ This checklist tracks findings from a source review. A checked item means the co
 - [ ] Runtime fixture: relocation blocks with non-4-KiB-aligned `VirtualAddress` are rejected; x86 `DIR64` and x64 `HIGHLOW`/`HIGHADJ`/`HIGH`/`LOW` entries are rejected instead of generating skip intervals
 
 - [x] **P1 — Verify every executable page protection.** Include `PAGE_EXECUTE_WRITECOPY` in CRC verification and route `PAGE_EXECUTE` through the same integrity decision; if a baseline-overlapping execute-only page cannot be read, report `MEMORY_INTEGRITY_UNAVAILABLE` instead of skipping it. Runtime protection-change fixtures remain required.
+- [x] **P1 — Verify every executable baseline in a shared `VirtualQuery` region.** Check every complete baseline section contained in the region; a partial overlap or executable region without a matching baseline returns `Incomplete`, not `Clean`.
 
 - [ ] Runtime fixture: change a baseline code page to `PAGE_EXECUTE_WRITECOPY`, modify bytes through copy-on-write, and verify the CRC check detects the modification
 - [ ] Runtime fixture: change a baseline code page to `PAGE_EXECUTE` and verify the scanner reports `MEMORY_INTEGRITY_UNAVAILABLE`, never a clean result
+- [ ] Runtime fixture: two adjacent executable sections share one `VirtualQuery` region; keep the first unchanged, modify the second, and verify the second is detected
+- [ ] Runtime fixture: an executable region inside the main module image that overlaps no baseline section returns `Incomplete`, not `Clean`
+- [ ] Runtime fixture: a region containing a complete baseline section plus a second partially overlapping section returns `Incomplete`
 
 ## Verification checklist
 
