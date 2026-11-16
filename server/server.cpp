@@ -1238,54 +1238,41 @@ void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbea
 
 int main() {
     if (SERVER_SECRET.size() < 32) {
-        std::cerr << "[FATAL] OBLIVION_SECRET must contain at least 32 bytes; refusing to start." << std::endl;
+        std::cerr << "[FATAL] Server secret is unavailable or invalid; refusing to start." << std::endl;
         return 1;
     }
 
-    WSADATA wsaData;
-    int iResult;
+    OblivionServer::ServerRuntimeConfig runtimeConfig;
+    std::string configurationError;
+    if (!LoadServerRuntimeConfiguration(runtimeConfig, configurationError)) {
+        std::cerr << "[FATAL] Server configuration: " << configurationError << std::endl;
+        return 1;
+    }
+    if (!PrepareServerRuntimeConfiguration(runtimeConfig)) {
+        return 1;
+    }
+
+    WSADATA wsaData{};
+    const int startupResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (startupResult != 0) {
+        std::cerr << "WSAStartup failed with error: " << startupResult << std::endl;
+        return 1;
+    }
 
     SOCKET ListenSocket = INVALID_SOCKET;
     SOCKET ClientSocket = INVALID_SOCKET;
+    struct addrinfo* result = nullptr;
+    struct addrinfo hints{};
 
-    struct addrinfo* result = NULL;
-    struct addrinfo hints;
-
-    // Inisialisasi Winsock
-    iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if (iResult != 0) {
-        std::cerr << "WSAStartup gagal dengan error: " << iResult << std::endl;
-        return 1;
-    }
-
-    ZeroMemory(&hints, sizeof(hints));
-    hints.ai_family = AF_INET; // IPv4
-    hints.ai_socktype = SOCK_STREAM; // TCP
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
-    hints.ai_flags = AI_PASSIVE; // Untuk bind()
 
-    // Resolve alamat server dan port. Use the MSVC-safe environment API.
-    char* configuredPortValue = nullptr;
-    size_t configuredPortLength = 0;
-    const errno_t environmentResult =
-        _dupenv_s(&configuredPortValue, &configuredPortLength, "OBLIVION_LISTEN_PORT");
-    std::string configuredPort;
-    if (environmentResult == 0 && configuredPortValue != nullptr &&
-        configuredPortLength > 0) {
-        configuredPort.assign(configuredPortValue, configuredPortLength - 1);
-    }
-    std::free(configuredPortValue);
-
-    uint16_t listenPort = 0;
-    if (configuredPort.empty() ||
-        !OblivionNet::ParseTcpPort(configuredPort, listenPort)) {
-        std::cerr << "[ERROR] OBLIVION_LISTEN_PORT must be configured with a TCP port from 1 through 65535." << std::endl;
-        WSACleanup();
-        return 1;
-    }
-    const std::string listenPortText = OblivionNet::FormatTcpPort(listenPort);
-
-    iResult = getaddrinfo(NULL, listenPortText.c_str(), &hints, &result);
+    const std::string listenPortText =
+        OblivionNet::FormatTcpPort(runtimeConfig.listenPort);
+    const int iResult = getaddrinfo(
+        runtimeConfig.listenAddress.c_str(), listenPortText.c_str(),
+        &hints, &result);
     if (iResult != 0) {
         std::cerr << "getaddrinfo gagal dengan error: " << iResult << std::endl;
         WSACleanup();
@@ -1332,46 +1319,7 @@ int main() {
     std::cout << "[INFO] Menunggu koneksi dari client..." << std::endl;
     std::cout << "==================================================" << std::endl;
 
-    // Read heartbeat overrides using the same strict numeric parsing as the Linux server.
-    auto readEnvUint = [](const char* name, uint32_t defaultValue) {
-        char buffer[64] = {};
-        const DWORD length = GetEnvironmentVariableA(name, buffer, static_cast<DWORD>(sizeof(buffer)));
-        if (length == 0) return defaultValue;
-        if (length >= sizeof(buffer)) {
-            std::cerr << "[HB CFG] Invalid value for " << name
-                      << "; using default " << defaultValue << std::endl;
-            return defaultValue;
-        }
-
-        errno = 0;
-        char* end = nullptr;
-        const unsigned long long parsed = std::strtoull(buffer, &end, 10);
-        if (errno != 0 || end == buffer || *end != 0 ||
-            parsed > (std::numeric_limits<uint32_t>::max)()) {
-            std::cerr << "[HB CFG] Invalid value for " << name
-                      << "; using default " << defaultValue << std::endl;
-            return defaultValue;
-        }
-        return static_cast<uint32_t>(parsed);
-    };
-
-    Oblivion::HeartbeatConfig globalHbCfg;
-    globalHbCfg.interval_ms = readEnvUint("OBLV_HB_INTERVAL_MS", globalHbCfg.interval_ms);
-    globalHbCfg.jitter_ms = readEnvUint("OBLV_HB_JITTER_MS", globalHbCfg.jitter_ms);
-    globalHbCfg.timeout_ms = readEnvUint("OBLV_HB_TIMEOUT_MS", globalHbCfg.timeout_ms);
-    globalHbCfg.max_consecutive_miss = readEnvUint("OBLV_HB_MAX_MISS", globalHbCfg.max_consecutive_miss);
-    globalHbCfg.rtt_warn_ms = readEnvUint("OBLV_HB_RTT_WARN_MS", globalHbCfg.rtt_warn_ms);
-
-    if (globalHbCfg.interval_ms < 100 || globalHbCfg.interval_ms > 60000 ||
-        globalHbCfg.jitter_ms > 10000 ||
-        globalHbCfg.timeout_ms < 250 || globalHbCfg.timeout_ms > 120000 ||
-        globalHbCfg.max_consecutive_miss < 1 || globalHbCfg.max_consecutive_miss > 10 ||
-        globalHbCfg.rtt_warn_ms > 60000) {
-        std::cerr << "[FATAL] Heartbeat configuration outside supported bounds." << std::endl;
-        closesocket(ListenSocket);
-        WSACleanup();
-        return 1;
-    }
+    const Oblivion::HeartbeatConfig& globalHbCfg = runtimeConfig.heartbeat;
 
     std::cout << "[HB CFG] interval=" << globalHbCfg.interval_ms << "ms jitter=" << globalHbCfg.jitter_ms
               << "ms timeout=" << globalHbCfg.timeout_ms << "ms maxMiss=" << globalHbCfg.max_consecutive_miss
