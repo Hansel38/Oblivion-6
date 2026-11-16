@@ -39,6 +39,10 @@ jobs:
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror tests/network_configuration_test.cpp -o /tmp/network_configuration_test
           /tmp/network_configuration_test
+      - name: Test HWID WMI source validation
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror tests/hwid_source_validation_test.cpp -o /tmp/hwid_source_validation_test
+          /tmp/hwid_source_validation_test
       - name: Build Linux server
         run: |
           make -C server clean
