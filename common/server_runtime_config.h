@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <string>
 #include <string_view>
@@ -74,6 +75,31 @@ namespace OblivionServer {
             error = std::string(settingName) + " must be an absolute filesystem path";
             return false;
         }
+        return true;
+    }
+
+    inline bool ValidateServerStorageFiles(
+        const ServerRuntimeConfig& config, std::string& error) {
+        std::error_code filesystemError;
+        if (!std::filesystem::is_regular_file(
+                config.banListPath, filesystemError) || filesystemError) {
+            error = "OBLIVION_BAN_LIST_PATH must identify an existing regular file";
+            return false;
+        }
+
+        std::ifstream banList(config.banListPath);
+        if (!banList.is_open()) {
+            error = "OBLIVION_BAN_LIST_PATH cannot be opened for reading";
+            return false;
+        }
+
+        std::ofstream violationLog(
+            config.violationLogPath, std::ios::out | std::ios::app);
+        if (!violationLog.is_open()) {
+            error = "OBLIVION_VIOLATION_LOG_PATH cannot be opened for append";
+            return false;
+        }
+
         return true;
     }
 
