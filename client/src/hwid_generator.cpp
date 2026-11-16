@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "hwid_generator.h"
+#include "hwid_source_validation.h"
 #include <intrin.h> // Untuk __cpuid
 #include <vector>
 #include <sstream>
@@ -7,6 +8,7 @@
 #include <bcrypt.h> // Untuk hashing
 #include <comdef.h> // Untuk _bstr_t
 #include <Wbemidl.h>
+#include <memory>
 
 // Definisi NTSTATUS jika ntstatus.h tidak tersedia
 #ifndef STATUS_UNSUCCESSFUL
@@ -43,6 +45,12 @@ namespace {
         HRESULT result_;
         bool initialized_;
     };
+    template <typename T>
+    struct ComRelease final {
+        void operator()(T* value) const noexcept {
+            if (value != nullptr) value->Release();
+        }
+    };
 }
 
 namespace Oblivion {
@@ -57,12 +65,12 @@ namespace Oblivion {
         }
 
         // CPU brand is shared by many machines and cannot safely identify a
-        // client by itself. Do not hash the same pair of fallback markers into
-        // a reusable HWID when both device-specific WMI sources are unavailable.
+        // client by itself. Firmware placeholders are not device-specific IDs:
+        // do not hash CPU brand plus two unavailable WMI values into a reusable HWID.
         const bool hasMotherboardId =
-            !motherboardUuid.empty() && motherboardUuid != "UNKNOWN";
+            IsDeviceSpecificWmiValueAvailable(motherboardUuid);
         const bool hasDiskId =
-            !hddSerial.empty() && hddSerial != "UNKNOWN";
+            IsDeviceSpecificWmiValueAvailable(hddSerial);
         if (!hasMotherboardId && !hasDiskId) {
             return "";
         }
@@ -105,48 +113,67 @@ namespace Oblivion {
         hres = CoInitializeSecurity(NULL, -1, NULL, NULL, RPC_C_AUTHN_LEVEL_DEFAULT, RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE, NULL);
         if (FAILED(hres) && hres != RPC_E_TOO_LATE) { return result; }
 
-        // 3. Dapatkan pointer ke WbemLocator
-        IWbemLocator* pLoc = NULL;
-        hres = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID*)&pLoc);
-        if (FAILED(hres)) { return result; }
+        // 3. Dapatkan pointer ke WbemLocator. Keep COM interfaces under RAII
+        // so every error and exception path releases acquired references.
+        IWbemLocator* locatorRaw = nullptr;
+        hres = CoCreateInstance(
+            CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator,
+            reinterpret_cast<LPVOID*>(&locatorRaw));
+        std::unique_ptr<IWbemLocator, ComRelease<IWbemLocator>> locator(locatorRaw);
+        if (FAILED(hres) || !locator) return result;
 
-        // 4. Hubungkan ke WMI
-        IWbemServices* pSvc = NULL;
-        hres = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), NULL, NULL, 0, NULL, 0, 0, &pSvc);
-        if (FAILED(hres)) { pLoc->Release(); return result; }
+        // 4. Hubungkan ke WMI.
+        IWbemServices* servicesRaw = nullptr;
+        hres = locator->ConnectServer(
+            _bstr_t(L"ROOT\\CIMV2"), NULL, NULL, 0, NULL, 0, 0, &servicesRaw);
+        std::unique_ptr<IWbemServices, ComRelease<IWbemServices>> services(servicesRaw);
+        if (FAILED(hres) || !services) return result;
 
-        // 5. Set security levels untuk WMI connection
-        hres = CoSetProxyBlanket(pSvc, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, NULL, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE);
-        if (FAILED(hres)) { pSvc->Release(); pLoc->Release(); return result; }
+        // 5. Set security levels untuk WMI connection.
+        hres = CoSetProxyBlanket(
+            services.get(), RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, NULL,
+            RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE);
+        if (FAILED(hres)) return result;
 
-        // 6. Gunakan WMI query
-        IEnumWbemClassObject* pEnumerator = NULL;
-        std::wstring query = L"SELECT " + std::wstring(wmiProperty.begin(), wmiProperty.end()) + L" FROM " + std::wstring(wmiClass.begin(), wmiClass.end());
-        hres = pSvc->ExecQuery(bstr_t("WQL"), bstr_t(query.c_str()), WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnumerator);
-        if (FAILED(hres)) { pSvc->Release(); pLoc->Release(); return result; }
+        // 6. Gunakan WMI query.
+        IEnumWbemClassObject* enumeratorRaw = nullptr;
+        std::wstring query = L"SELECT " +
+            std::wstring(wmiProperty.begin(), wmiProperty.end()) +
+            L" FROM " + std::wstring(wmiClass.begin(), wmiClass.end());
+        hres = services->ExecQuery(
+            bstr_t("WQL"), bstr_t(query.c_str()),
+            WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+            NULL, &enumeratorRaw);
+        std::unique_ptr<IEnumWbemClassObject, ComRelease<IEnumWbemClassObject>>
+            enumerator(enumeratorRaw);
+        if (FAILED(hres) || !enumerator) return result;
 
-        // 7. Ambil data dari query
-        IWbemClassObject* pclsObj = NULL;
-        ULONG uReturn = 0;
-        while (pEnumerator) {
-            HRESULT hr = pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn);
-            if (0 == uReturn) break;
+        // 7. Read only the first result and bound the wait for a slow/stalled provider.
+        constexpr LONG kWmiEnumerationTimeoutMs = 10000;
+        IWbemClassObject* objectRaw = nullptr;
+        ULONG returned = 0;
+        const HRESULT nextResult = enumerator->Next(
+            kWmiEnumerationTimeoutMs, 1, &objectRaw, &returned);
+        std::unique_ptr<IWbemClassObject, ComRelease<IWbemClassObject>>
+            object(objectRaw);
+        if (FAILED(nextResult) || returned != 1 || !object) return result;
 
-            VARIANT vtProp;
-            VariantInit(&vtProp); // Inisialisasi VARIANT sebelum digunakan
-            hr = pclsObj->Get(_bstr_t(wmiProperty.c_str()), 0, &vtProp, 0, 0);
-            if (SUCCEEDED(hr) && vtProp.vt == VT_BSTR) {
-                result = _bstr_t(vtProp.bstrVal);
-            }
-            VariantClear(&vtProp);
-            pclsObj->Release();
-            break; // Hanya ambil yang pertama
+        VARIANT propertyValue;
+        VariantInit(&propertyValue);
+        struct VariantClearGuard {
+            VARIANT* value;
+            ~VariantClearGuard() { VariantClear(value); }
+        } propertyValueGuard{ &propertyValue };
+        (void)propertyValueGuard;
+
+        const HRESULT propertyResult = object->Get(
+            _bstr_t(wmiProperty.c_str()), 0, &propertyValue, 0, 0);
+        if (SUCCEEDED(propertyResult) &&
+            propertyValue.vt == VT_BSTR && propertyValue.bstrVal != nullptr) {
+            result = _bstr_t(propertyValue.bstrVal);
         }
 
-        // 8. Cleanup
-        pSvc->Release();
-        pLoc->Release();
-        pEnumerator->Release();
+        // COM interfaces and VARIANT are released/cleared automatically.
        
 
         return result;
