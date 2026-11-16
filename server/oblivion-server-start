@@ -33,6 +33,18 @@ if [ "$PID_FILE" = "$LOG_FILE" ]; then
     exit 1
 fi
 
+for output_path in "$PID_FILE" "$LOG_FILE"; do
+    output_dir=$(dirname "$output_path")
+    if [ ! -d "$output_dir" ] || [ ! -w "$output_dir" ]; then
+        echo "[ERROR] The parent directory for $output_path must exist and be writable"
+        exit 1
+    fi
+    if [ -e "$output_path" ] && [ ! -w "$output_path" ]; then
+        echo "[ERROR] $output_path exists but is not writable"
+        exit 1
+    fi
+done
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
