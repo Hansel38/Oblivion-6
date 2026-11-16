@@ -17,7 +17,7 @@ namespace Oblivion {
 
         for (const unsigned char character : value) {
             if (character <= 0x20 || character == 0x7F ||
-                character == '-' || character == '_' ||
+                character == '-' || character == '_' || character == '/' ||
                 character == '{' || character == '}' || character == '.') {
                 continue;
             }
