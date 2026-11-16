@@ -980,7 +980,7 @@ ParsedReport ParseProtocol(const std::string& report) {
 }
 
 
-void HandleClient(SocketType clientSocket) {
+void HandleClient(SocketType clientSocket, Oblivion::HeartbeatConfig sessionHeartbeatConfig) {
     // The accept loop reserves a slot before creating this handler thread.
     ActiveClientGuard activeGuard{ g_activeClientCount };
     std::string extractedHwid = "UNKNOWN";
@@ -1103,7 +1103,7 @@ void HandleClient(SocketType clientSocket) {
                     std::cout << "[BAN] HWID_ID [" << FormatHwidForLog(hwid) << "] terdeteksi di ban list. Perintah KICK dikirim." << std::endl;
                     std::cout << "[INFO] Untuk unban, hapus HWID dari configured ban-list file dan restart client." << std::endl;
                 } else {
-                    Oblivion::HeartbeatConfig cfg = GLOBAL_HB_CONFIG;
+                    const Oblivion::HeartbeatConfig& cfg = sessionHeartbeatConfig;
                     uint64_t sessionNonce = 0;
                     if (!OblivionNet::GenerateSecureNonce(sessionNonce)) {
                         LogViolation("RNG_FAILURE", "Unable to generate secure session nonce", hwid);
@@ -1373,40 +1373,42 @@ void HandleClient(SocketType clientSocket) {
 
 int main() {
     if (SERVER_SECRET.size() < 32) {
-        std::cerr << "[FATAL] OBLIVION_SECRET must contain at least 32 bytes; refusing to start." << std::endl;
+        std::cerr << "[FATAL] Server secret is unavailable or invalid; refusing to start." << std::endl;
+        return 1;
+    }
+
+    OblivionServer::ServerRuntimeConfig runtimeConfig;
+    std::string configurationError;
+    if (!LoadServerRuntimeConfiguration(runtimeConfig, configurationError)) {
+        std::cerr << "[FATAL] Server configuration: " << configurationError << std::endl;
+        return 1;
+    }
+    if (!PrepareServerRuntimeConfiguration(runtimeConfig)) {
         return 1;
     }
 
 #ifdef _WIN32
-    WSADATA wsaData;
-    int iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if (iResult != 0) {
-        std::cerr << "WSAStartup gagal dengan error: " << iResult << std::endl;
+    WSADATA wsaData{};
+    const int startupResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (startupResult != 0) {
+        std::cerr << "WSAStartup failed with error: " << startupResult << std::endl;
         return 1;
     }
 #endif
 
     SocketType ListenSocket = INVALID_SOCKET_VAL;
     SocketType ClientSocket = INVALID_SOCKET_VAL;
-
-    struct addrinfo* result = NULL;
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
+    struct addrinfo* result = nullptr;
+    struct addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
-    hints.ai_flags = AI_PASSIVE;
 
-    const char* configuredPort = std::getenv("OBLIVION_LISTEN_PORT");
-    uint16_t listenPort = 0;
-    if (configuredPort == nullptr ||
-        !OblivionNet::ParseTcpPort(configuredPort, listenPort)) {
-        std::cerr << "[ERROR] OBLIVION_LISTEN_PORT must be configured with a TCP port from 1 through 65535." << std::endl;
-        return 1;
-    }
-    const std::string listenPortText = OblivionNet::FormatTcpPort(listenPort);
-
-    int iResult = getaddrinfo(NULL, listenPortText.c_str(), &hints, &result);
+    const std::string listenPortText =
+        OblivionNet::FormatTcpPort(runtimeConfig.listenPort);
+    int iResult = getaddrinfo(
+        runtimeConfig.listenAddress.c_str(), listenPortText.c_str(),
+        &hints, &result);
     if (iResult != 0) {
         std::cerr << "getaddrinfo gagal dengan error: " << iResult << std::endl;
 #ifdef _WIN32
@@ -1465,40 +1467,7 @@ int main() {
     std::cout << "[INFO] Menunggu koneksi dari client..." << std::endl;
     std::cout << "==================================================" << std::endl;
 
-    auto readEnvUint = [](const char* name, uint32_t defaultValue) {
-        const char* envValue = std::getenv(name);
-        if (!envValue || !*envValue) return defaultValue;
-
-        errno = 0;
-        char* end = nullptr;
-        const unsigned long long parsed = std::strtoull(envValue, &end, 10);
-        if (errno != 0 || end == envValue || *end != 0 ||
-            parsed > (std::numeric_limits<uint32_t>::max)()) {
-            std::cerr << "[HB CFG] Invalid value for " << name << "; using default "
-                      << defaultValue << std::endl;
-            return defaultValue;
-        }
-        return static_cast<uint32_t>(parsed);
-    };
-
-    GLOBAL_HB_CONFIG.interval_ms = readEnvUint("OBLV_HB_INTERVAL_MS", GLOBAL_HB_CONFIG.interval_ms);
-    GLOBAL_HB_CONFIG.jitter_ms = readEnvUint("OBLV_HB_JITTER_MS", GLOBAL_HB_CONFIG.jitter_ms);
-    GLOBAL_HB_CONFIG.timeout_ms = readEnvUint("OBLV_HB_TIMEOUT_MS", GLOBAL_HB_CONFIG.timeout_ms);
-    GLOBAL_HB_CONFIG.max_consecutive_miss = readEnvUint("OBLV_HB_MAX_MISS", GLOBAL_HB_CONFIG.max_consecutive_miss);
-    GLOBAL_HB_CONFIG.rtt_warn_ms = readEnvUint("OBLV_HB_RTT_WARN_MS", GLOBAL_HB_CONFIG.rtt_warn_ms);
-
-    if (GLOBAL_HB_CONFIG.interval_ms < 100 || GLOBAL_HB_CONFIG.interval_ms > 60000 ||
-        GLOBAL_HB_CONFIG.jitter_ms > 10000 ||
-        GLOBAL_HB_CONFIG.timeout_ms < 250 || GLOBAL_HB_CONFIG.timeout_ms > 120000 ||
-        GLOBAL_HB_CONFIG.max_consecutive_miss < 1 || GLOBAL_HB_CONFIG.max_consecutive_miss > 10 ||
-        GLOBAL_HB_CONFIG.rtt_warn_ms > 60000) {
-        std::cerr << "[FATAL] Heartbeat configuration outside supported bounds." << std::endl;
-        closesocket_impl(ListenSocket);
-#ifdef _WIN32
-        WSACleanup();
-#endif
-        return 1;
-    }
+    GLOBAL_HB_CONFIG = runtimeConfig.heartbeat;
 
     std::cout << "[HB CFG] interval=" << GLOBAL_HB_CONFIG.interval_ms
               << "ms jitter=" << GLOBAL_HB_CONFIG.jitter_ms
@@ -1532,7 +1501,7 @@ int main() {
         // Pass the reserved slot to HandleClient; its ActiveClientGuard releases it.
         std::thread clientThread;
         try {
-            clientThread = std::thread(HandleClient, ClientSocket);
+            clientThread = std::thread(HandleClient, ClientSocket, runtimeConfig.heartbeat);
         } catch (const std::exception& e) {
             g_activeClientCount.fetch_sub(1, std::memory_order_relaxed);
             std::cerr << "[ERROR] Failed to start client handler thread: " << e.what() << std::endl;
