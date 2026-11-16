@@ -16,6 +16,7 @@ namespace {
         OblivionServer::ServerRuntimeConfigInput input;
         input.listenAddress = "127.0.0.1";
         input.listenPort = "61234";
+        input.listenBacklog = "128";
         input.banListPath = "/var/lib/oblivion/bans.txt";
         input.violationLogPath = "/var/log/oblivion/violations.log";
         input.maxConcurrentClients = "48";
@@ -37,6 +38,7 @@ int main() {
     Require(OblivionServer::ParseServerRuntimeConfig(valid, output, error),
             "complete valid configuration must parse");
     Require(output.listenPort == 61234, "listen port must be parsed");
+    Require(output.listenBacklog == 128, "listen backlog must be parsed");
     Require(output.maxConcurrentClients == 48, "max clients must be parsed");
     Require(output.requestTimeoutMs == 7000, "request timeout must be parsed");
     Require(output.heartbeat.interval_ms == 3500 &&
@@ -71,6 +73,24 @@ int main() {
     Require(!OblivionServer::ParseServerRuntimeConfig(
                 sharedStoragePath, output, error),
             "ban-list and violation-log paths must be different");
+
+    auto missingBacklog = valid;
+    missingBacklog.listenBacklog.clear();
+    Require(!OblivionServer::ParseServerRuntimeConfig(
+                missingBacklog, output, error),
+            "missing listen backlog must fail");
+
+    auto excessiveBacklog = valid;
+    excessiveBacklog.listenBacklog = "65536";
+    Require(!OblivionServer::ParseServerRuntimeConfig(
+                excessiveBacklog, output, error),
+            "out-of-range listen backlog must fail");
+
+    auto excessiveClients = valid;
+    excessiveClients.maxConcurrentClients = "1025";
+    Require(!OblivionServer::ParseServerRuntimeConfig(
+                excessiveClients, output, error),
+            "unsafe max-client count must fail");
 
     auto invalidPort = valid;
     invalidPort.listenPort = "0";
