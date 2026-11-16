@@ -805,14 +805,7 @@ ParsedReport ParseProtocol(const std::string& report) {
 
 // Fungsi untuk menangani setiap client yang terhubung
 void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbeatConfig) {
-    const uint32_t activeBefore = g_activeClientCount.fetch_add(1, std::memory_order_relaxed);
-    if (activeBefore >= kMaxConcurrentClients) {
-        g_activeClientCount.fetch_sub(1, std::memory_order_relaxed);
-        const char* busyResponse = "BUSY;";
-        OblivionNet::SendAll(clientSocket, busyResponse, strlen(busyResponse));
-        closesocket(clientSocket);
-        return;
-    }
+    // The accept loop reserves a slot before creating this handler thread.
     ActiveClientGuard activeGuard{ g_activeClientCount };
     int bytesReceived = 0;
     std::string extractedHwid = "UNKNOWN"; // Untuk logging jika parsing gagal
@@ -1397,17 +1390,41 @@ int main() {
             continue; // Jangan shutdown server, coba accept lagi
         }
 
+        // Reserve the concurrency slot before creating a thread so a connection
+        // flood cannot allocate an unbounded number of handler threads.
+        const uint32_t activeBefore =
+            g_activeClientCount.fetch_add(1, std::memory_order_relaxed);
+        if (activeBefore >= kMaxConcurrentClients) {
+            g_activeClientCount.fetch_sub(1, std::memory_order_relaxed);
+            const char* busyResponse = "BUSY;";
+            OblivionNet::SendAll(ClientSocket, busyResponse, strlen(busyResponse));
+            closesocket(ClientSocket);
+            continue;
+        }
+
+        // Only log connections that received a handler slot; rejected connection
+        // floods must not produce an unbounded stream of console messages.
         std::cout << "\n[CONNECTION] New client connected" << std::endl;
-        
-        // Buat thread baru untuk menangani client agar server bisa menerima client lain
-        // Pass the validated heartbeat configuration into each client session.
+
+        // Pass the reserved slot to HandleClient; its ActiveClientGuard releases it.
+        std::thread clientThread;
         try {
-            std::thread clientThread(HandleClient, ClientSocket, globalHbCfg);
-            clientThread.detach();
+            clientThread = std::thread(HandleClient, ClientSocket, globalHbCfg);
         } catch (const std::exception& e) {
+            g_activeClientCount.fetch_sub(1, std::memory_order_relaxed);
             std::cerr << "[ERROR] Failed to start client handler thread: " << e.what() << std::endl;
             closesocket(ClientSocket);
-        } // Lepaskan thread agar bisa berjalan mandiri
+            continue;
+        }
+
+        try {
+            clientThread.detach();
+        } catch (const std::exception& e) {
+            std::cerr << "[ERROR] Failed to detach client handler thread: " << e.what() << std::endl;
+            if (clientThread.joinable()) {
+                clientThread.join();
+            }
+        }
     }
 
     // Cleanup (tidak akan pernah tercapai dalam loop tak terbatas ini)
