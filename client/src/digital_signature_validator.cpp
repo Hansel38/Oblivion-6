@@ -19,6 +19,20 @@ extern void ReportViolationAndExit(const std::wstring& message, const std::strin
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "crypt32.lib")
 namespace {
+    // Resolve the module containing this implementation by code address.
+    // A basename is not a module identity: another DLL can also be named
+    // "client.dll". Use this exact HMODULE to exclude only our own DLL.
+    void DigitalSignatureValidatorModuleAnchor() {}
+
+    bool GetDigitalSignatureValidatorModuleHandle(HMODULE& module) {
+        module = nullptr;
+        return GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&DigitalSignatureValidatorModuleAnchor),
+            &module) != FALSE;
+    }
+
     std::wstring NormalizePathForComparison(std::wstring path) {
         std::replace(path.begin(), path.end(), L'/', L'\\');
         std::transform(path.begin(), path.end(), path.begin(),
@@ -241,7 +255,7 @@ const std::vector<std::wstring> Oblivion::DigitalSignatureValidator::m_allowedUn
     L"mfcm140u.dll",      // Microsoft Foundation Classes MFC (Unicode)
     
     // Game-specific DLLs
-    L"client.dll",        // Client DLL
+    // The anti-cheat's own client.dll is excluded by exact HMODULE above.
     L"BaseSDK.dll",       // Base SDK
     L"IAPSDK.dll",        // IAP SDK
     L"libcurl.dll",       // libcurl library
@@ -341,6 +355,16 @@ namespace Oblivion {
         programFiles = NormalizePathForComparison(programFiles);
         programFilesX86 = NormalizePathForComparison(programFilesX86);
 
+        HMODULE ownModule = nullptr;
+        if (!GetDigitalSignatureValidatorModuleHandle(ownModule)) {
+            const DWORD error = GetLastError();
+            ReportViolationAndExit(
+                L"", "MODULE_SIGNATURE_UNAVAILABLE",
+                "Unable to identify the anti-cheat module by address; error=" +
+                    std::to_string(error));
+            return;
+        }
+
         HANDLE snapshot = INVALID_HANDLE_VALUE;
         DWORD snapshotError = ERROR_SUCCESS;
         constexpr unsigned int kSnapshotAttempts = 5;
@@ -385,7 +409,8 @@ namespace Oblivion {
         }
 
         do {
-            if (moduleEntry.hModule == GetModuleHandleW(nullptr)) {
+            if (moduleEntry.hModule == GetModuleHandleW(nullptr) ||
+                moduleEntry.hModule == ownModule) {
                 SetLastError(ERROR_SUCCESS);
                 continue;
             }
