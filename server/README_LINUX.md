@@ -58,156 +58,46 @@ chmod +x oblivion-start
 ./oblivion-server
 ```
 
-## Configuration
+## Required runtime configuration
 
-### Environment Variables
-You can configure heartbeat settings via environment variables:
+The server has no listener, file-path, concurrency, request-timeout, or heartbeat defaults. Provision every required variable through the service manager or a protected environment file before starting the process.
 
-```bash
-export OBLV_HB_INTERVAL_MS=3000
-export OBLV_HB_JITTER_MS=250
-export OBLV_HB_TIMEOUT_MS=4000
-export OBLV_HB_MAX_MISS=3
-export OBLV_HB_RTT_WARN_MS=1500
-./server
-```
+| Environment variable | Required value |
+|---|---|
+| `OBLIVION_LISTEN_ADDRESS` | Explicit local IPv4/IPv6 address or resolvable local interface name |
+| `OBLIVION_LISTEN_PORT` | TCP port, canonical decimal, 1–65535 |
+| `OBLIVION_BAN_LIST_PATH` | Absolute path to an existing readable ban-list file |
+| `OBLIVION_VIOLATION_LOG_PATH` | Absolute path to a writable log file, different from the ban-list path |
+| `OBLIVION_MAX_CONCURRENT_CLIENTS` | Positive decimal integer |
+| `OBLIVION_REQUEST_TIMEOUT_MS` | Integer, 100–120000 |
+| `OBLIVION_HB_INTERVAL_MS` | Integer, 100–60000 |
+| `OBLIVION_HB_JITTER_MS` | Integer, 0–10000 |
+| `OBLIVION_HB_TIMEOUT_MS` | Integer, 250–120000 |
+| `OBLIVION_HB_MAX_MISS` | Integer, 1–10 |
+| `OBLIVION_HB_RTT_WARN_MS` | Integer, 0–60000 |
 
-The listener has no compiled-in port. Set a canonical TCP port before starting
-the server, and configure clients with the same value:
+All values are mandatory. A missing or malformed value causes startup to fail; the server never silently substitutes a compiled-in value.
 
-```bash
-export OBLIVION_LISTEN_PORT=54321
-./oblivion-server
-```
+Configure exactly one secret source:
 
-### Server Secret
-The server requires a secret key. You can set it via:
+- `OBLIVION_SECRET` — secret text supplied by the service environment.
+- `OBLIVION_SECRET_FILE` — absolute path to a plaintext secret file.
 
-1. **Environment variable** (recommended):
-   ```bash
-   export OBLIVION_SECRET="your-secret-key-here"
-   ./server
-   ```
+The two secret sources are mutually exclusive. The secret must contain at least 32 printable ASCII bytes. The secret file may end with one line ending. Restrict its permissions to the service account and authorized administrators. The client must be configured with the exact same secret text.
 
-2. **File-based** (secret.dat):
-   - Create a file named `secret.dat` in the same directory as the server executable
-   - The file should contain XOR-encoded secret (same format as Windows version)
+## Service integration
 
-## Files
+Use the service manager's protected environment/credential mechanism to provide the required configuration. Do not place secret values in this repository, command-line arguments, unit files committed to source control, or logs. Configure the actual service account and absolute storage paths for the host; do not use sample or placeholder paths.
 
-- `bans.txt` - Ban list (one HWID per line, comments with #)
-- `violations.log` - Log of all violations detected
-- `secret.dat` - Optional: XOR-encoded server secret
+Before starting, create the ban-list file at the configured path. It may be empty. Ensure the configured violation-log path is writable by the service account.
 
-## Server Management Script
+## Management script
 
-The `oblivion-start` script provides easy server management with interactive mode:
+The `oblivion-start` script can start, stop, restart, report status, and display the service log. It inherits the runtime environment from its caller. Start it from the service environment that supplies the required configuration.
 
-### Interactive Mode
-```bash
-# Run without arguments to enter interactive mode
-./oblivion-start
-# Output:
-# Usage: ./oblivion-start { start | stop | restart | status | watch | help | log }
-# Enter a valid option: 
-```
+## Operational notes
 
-### Direct Commands
-```bash
-# Start server
-./oblivion-start start
-
-# Stop server
-./oblivion-start stop
-
-# Restart server
-./oblivion-start restart
-
-# Check status
-./oblivion-start status
-
-# View log (last 50 lines)
-./oblivion-start log
-
-# View live log (follow mode)
-./oblivion-start watch
-# or
-./oblivion-start log tail
-
-# Show help
-./oblivion-start help
-```
-
-### Status Output
-The status command shows:
-- Server running status (RUNNING/STOPPED)
-- Process ID (PID)
-- Port listening status
-- Recent log entries
-- Process information
-
-## Running as a Service
-
-### Using systemd (recommended)
-
-Create `/etc/systemd/system/oblivion-server.service`:
-
-```ini
-[Unit]
-Description=Oblivion Hack Shield Server
-After=network.target
-
-[Service]
-Type=simple
-User=your-user
-WorkingDirectory=/path/to/server
-ExecStart=/path/to/server/server
-Restart=always
-RestartSec=10
-Environment="OBLIVION_SECRET=your-secret-key"
-Environment="OBLIVION_LISTEN_PORT=54321"
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Then:
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable oblivion-server
-sudo systemctl start oblivion-server
-sudo systemctl status oblivion-server
-```
-
-## Troubleshooting
-
-### Port already in use
-Set `OBLIVION_LISTEN_PORT` to an unused TCP port, then update each client's
-`OBLIVION_SERVER_PORT` to the same value.
-
-### Permission denied
-Make sure the server executable has execute permissions:
-```bash
-chmod +x server
-```
-
-### SSL library not found
-Install OpenSSL development package:
-```bash
-sudo apt-get install libssl-dev
-```
-
-## Clean Build
-
-To clean build artifacts:
-```bash
-make clean
-```
-
-## Notes
-
-- The server requires `OBLIVION_LISTEN_PORT`; there is no default listener port
-- All logs and ban files are created in the same directory as the executable
-- The server supports multiple concurrent client connections
-- Heartbeat monitoring is enabled by default
-
+- Bind only to the intended local interface and restrict inbound TCP with host/perimeter firewalls.
+- The transport is plain TCP; TLS is intentionally out of scope.
+- Keep server secret/configuration, ban list, and logs accessible only to authorized operators.
+- CI does not validate the game, actual client/server traffic, or the production host.
