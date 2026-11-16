@@ -2,13 +2,36 @@
 # Oblivion Server Management Script
 # Usage: ./oblivion-server-start {start|stop|restart|status|reload|log}
 
-# Configuration
-SERVER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SERVER_BIN="$SERVER_DIR/oblivion-server"
-PID_FILE="$SERVER_DIR/oblivion-server.pid"
-LOG_FILE="$SERVER_DIR/server.log"
-LOCK_FILE="$SERVER_DIR/oblivion-server.lock"
+# Required operator-managed paths. No paths are inferred from the script location.
+SERVER_BIN="${OBLIVION_SERVER_BINARY:-}"
+PID_FILE="${OBLIVION_SERVER_PID_PATH:-}"
+LOG_FILE="${OBLIVION_SERVER_STDOUT_LOG_PATH:-}"
 LISTEN_PORT="${OBLIVION_LISTEN_PORT:-}"
+
+for setting in OBLIVION_SERVER_BINARY OBLIVION_SERVER_PID_PATH OBLIVION_SERVER_STDOUT_LOG_PATH OBLIVION_LISTEN_PORT; do
+    if [ -z "${!setting}" ]; then
+        echo "[ERROR] $setting must be explicitly configured"
+        exit 1
+    fi
+done
+
+case "$SERVER_BIN" in /*) ;; *)
+    echo "[ERROR] OBLIVION_SERVER_BINARY must be an absolute path"
+    exit 1
+esac
+case "$PID_FILE" in /*) ;; *)
+    echo "[ERROR] OBLIVION_SERVER_PID_PATH must be an absolute path"
+    exit 1
+esac
+case "$LOG_FILE" in /*) ;; *)
+    echo "[ERROR] OBLIVION_SERVER_STDOUT_LOG_PATH must be an absolute path"
+    exit 1
+esac
+
+if [ "$PID_FILE" = "$LOG_FILE" ]; then
+    echo "[ERROR] PID and stdout log paths must be different"
+    exit 1
+fi
 
 # Colors for output
 RED='\033[0;31m'
@@ -17,7 +40,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Check if server binary exists
-if [ ! -f "$SERVER_BIN" ]; then
+if [ ! -x "$SERVER_BIN" ]; then
     echo -e "${RED}[ERROR] Server binary not found: $SERVER_BIN${NC}"
     echo "Please build the server first: make"
     exit 1
@@ -50,9 +73,6 @@ start_server() {
     fi
 
     echo -e "${GREEN}[INFO] Starting Oblivion Server...${NC}"
-    
-    # Change to server directory
-    cd "$SERVER_DIR"
     
     # Start server in background
     nohup "$SERVER_BIN" > "$LOG_FILE" 2>&1 &
@@ -105,7 +125,7 @@ stop_server() {
     fi
     
     # Clean up
-    rm -f "$PID_FILE" "$LOCK_FILE"
+    rm -f "$PID_FILE"
     
     if ! ps -p $PID > /dev/null 2>&1; then
         echo -e "${GREEN}[SUCCESS] Server stopped${NC}"
