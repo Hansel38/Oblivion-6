@@ -81,10 +81,8 @@ namespace OblivionServer {
         const char* environmentSecret = std::getenv("OBLIVION_SECRET");
         const char* configuredSecretFile = std::getenv("OBLIVION_SECRET_FILE");
 
-        const bool hasEnvironmentSecret =
-            environmentSecret != nullptr && *environmentSecret != '\0';
-        const bool hasSecretFile =
-            configuredSecretFile != nullptr && *configuredSecretFile != '\0';
+        const bool hasEnvironmentSecret = environmentSecret != nullptr;
+        const bool hasSecretFile = configuredSecretFile != nullptr;
 
         // Require exactly one provisioning source. Do not silently prefer one
         // when both are set, and do not fall back to a compiled-in filename.
