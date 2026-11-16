@@ -146,7 +146,9 @@ This checklist tracks findings from a source review. A checked item means the co
 
 ### P2 — Data handling and privacy
 
-- [ ] **P2 — Harden HWID generation.** Current HWID uses CPU brand, motherboard UUID, and disk serial, with `UNKNOWN` fallbacks. Handle COM initialization outcomes correctly, normalize values, and document privacy/retention policy.
+- [x] **P2 — Reject non-unique HWID fallback.** HWID generation refuses to hash CPU brand plus two unavailable (`UNKNOWN`/empty) device-specific WMI values, and `NetworkReporter` now fails initialization instead of replacing an unavailable ID with `UNKNOWN`. Valid source combinations retain the previous concatenation and hash to avoid an unnecessary HWID/ban-list migration. Firmware placeholder normalization and privacy/retention policy still need review.
+- [ ] Runtime fixture: when both motherboard UUID and disk serial WMI queries return empty/`UNKNOWN`, HWID generation returns unavailable rather than hashing CPU brand plus fallback markers; when either device-specific source is valid, existing HWID output remains byte-for-byte unchanged
+- [ ] Runtime fixture: `NetworkReporter` initialization fails when `HWIDGenerator::Generate()` throws or returns empty; it must not send `UNKNOWN` or any other shared fallback HWID in a check-in/violation frame
 - [x] **P2 — Fix COM apartment handling.** A scoped COM initializer treats both `S_OK` and `S_FALSE` as successful initialization and balances either with exactly one `CoUninitialize`; `RPC_E_CHANGED_MODE` leaves the caller's existing COM apartment untouched. Runtime validation under both apartment models remains required.
 - [ ] **P2 — Avoid leaking hardware identifiers in console output.** Redact or pseudonymize HWID in operational logs.
 - [ ] **P2 — Add log rotation and access controls.** `violations.log` currently grows without bound and may contain sensitive process/path data.
