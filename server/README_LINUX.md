@@ -66,9 +66,10 @@ The server has no listener, file-path, concurrency, request-timeout, or heartbea
 |---|---|
 | `OBLIVION_LISTEN_ADDRESS` | Explicit local IPv4/IPv6 address or resolvable local interface name |
 | `OBLIVION_LISTEN_PORT` | TCP port, canonical decimal, 1–65535 |
+| `OBLIVION_LISTEN_BACKLOG` | Integer, 1–65535 |
 | `OBLIVION_BAN_LIST_PATH` | Absolute path to an existing readable ban-list file |
 | `OBLIVION_VIOLATION_LOG_PATH` | Absolute path to a writable log file, different from the ban-list path |
-| `OBLIVION_MAX_CONCURRENT_CLIENTS` | Positive decimal integer |
+| `OBLIVION_MAX_CONCURRENT_CLIENTS` | Integer, 1–1024 |
 | `OBLIVION_REQUEST_TIMEOUT_MS` | Integer, 100–120000 |
 | `OBLIVION_HB_INTERVAL_MS` | Integer, 100–60000 |
 | `OBLIVION_HB_JITTER_MS` | Integer, 0–10000 |
