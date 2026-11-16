@@ -41,6 +41,7 @@
 #include "include/socket_framing.h"
 #include "include/protocol_validation.h"
 #include "../common/network_configuration.h"
+#include "../common/server_runtime_config.h"
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -65,19 +66,58 @@
     #define closesocket_impl close
 #endif
 
-#define BUFFER_LEN 4096
-#define MAX_TYPE_LEN 64
-#define MAX_DETAILS_LEN 2048
-#define MAX_HWID_LEN 128
+// TCP frame and field limits are protocol safety boundaries shared by both
+// server implementations; deployment-specific values are loaded at startup.
+static constexpr size_t BUFFER_LEN = 4096;
+static constexpr size_t MAX_TYPE_LEN = 64;
+static constexpr size_t MAX_DETAILS_LEN = 2048;
+static constexpr size_t MAX_HWID_LEN = 128;
 
 static std::string SERVER_SECRET = OblivionServer::GetServerSecret();
-#define BAN_LIST_FILE "bans.txt"
-#define VIOLATION_LOG_FILE "violations.log"
+static std::string g_banListFilePath;
+static std::string g_violationLogFilePath;
+static uint32_t g_maxConcurrentClients = 0;
+static uint32_t g_requestTimeoutMs = 0;
 
 static std::mutex g_violationLogMutex;
-
 static std::atomic<uint32_t> g_activeClientCount{ 0 };
-static constexpr uint32_t kMaxConcurrentClients = 256;
+
+static std::string ReadServerEnvironment(const char* name) {
+    const char* value = std::getenv(name);
+    return value == nullptr ? std::string() : std::string(value);
+}
+
+static bool LoadServerRuntimeConfiguration(
+    OblivionServer::ServerRuntimeConfig& config, std::string& error) {
+    OblivionServer::ServerRuntimeConfigInput input;
+    input.listenAddress = ReadServerEnvironment("OBLIVION_LISTEN_ADDRESS");
+    input.listenPort = ReadServerEnvironment("OBLIVION_LISTEN_PORT");
+    input.banListPath = ReadServerEnvironment("OBLIVION_BAN_LIST_PATH");
+    input.violationLogPath = ReadServerEnvironment("OBLIVION_VIOLATION_LOG_PATH");
+    input.maxConcurrentClients = ReadServerEnvironment("OBLIVION_MAX_CONCURRENT_CLIENTS");
+    input.requestTimeoutMs = ReadServerEnvironment("OBLIVION_REQUEST_TIMEOUT_MS");
+    input.heartbeatIntervalMs = ReadServerEnvironment("OBLIVION_HB_INTERVAL_MS");
+    input.heartbeatJitterMs = ReadServerEnvironment("OBLIVION_HB_JITTER_MS");
+    input.heartbeatTimeoutMs = ReadServerEnvironment("OBLIVION_HB_TIMEOUT_MS");
+    input.heartbeatMaxMiss = ReadServerEnvironment("OBLIVION_HB_MAX_MISS");
+    input.heartbeatRttWarnMs = ReadServerEnvironment("OBLIVION_HB_RTT_WARN_MS");
+    return OblivionServer::ParseServerRuntimeConfig(input, config, error);
+}
+
+static bool PrepareServerRuntimeConfiguration(
+    const OblivionServer::ServerRuntimeConfig& config) {
+    std::string error;
+    if (!OblivionServer::ValidateServerStorageFiles(config, error)) {
+        std::cerr << "[FATAL] " << error << std::endl;
+        return false;
+    }
+
+    g_banListFilePath = config.banListPath;
+    g_violationLogFilePath = config.violationLogPath;
+    g_maxConcurrentClients = config.maxConcurrentClients;
+    g_requestTimeoutMs = config.requestTimeoutMs;
+    return true;
+}
 
 struct ActiveClientGuard {
     std::atomic<uint32_t>& counter;
@@ -117,49 +157,6 @@ static bool ParseHelloFrame(const std::string& frame, std::string& hwid) {
         if (!std::isxdigit(c) && c != '-') return false;
     }
     return true;
-}
-
-// Cross-platform helper functions
-std::string GetExecutableDirectory() {
-#ifdef _WIN32
-    size_t capacity = 512;
-    while (capacity <= 32768) {
-        std::vector<char> exePath(capacity, '\0');
-        const DWORD length = GetModuleFileNameA(
-            NULL, exePath.data(), static_cast<DWORD>(exePath.size()));
-        if (length == 0) return "";
-        if (length < exePath.size() - 1) {
-            const std::string path(exePath.data(), length);
-            const size_t lastSlash = path.find_last_of("\\/");
-            return lastSlash == std::string::npos
-                ? std::string()
-                : path.substr(0, lastSlash + 1);
-        }
-        capacity *= 2;
-    }
-    return "";
-#else
-    size_t capacity = 512;
-    while (capacity <= 32768) {
-        std::vector<char> exePath(capacity);
-        const ssize_t length = readlink(
-            "/proc/self/exe", exePath.data(), exePath.size());
-        if (length < 0) return "";
-        if (static_cast<size_t>(length) < exePath.size()) {
-            const std::string path(exePath.data(), static_cast<size_t>(length));
-            const size_t lastSlash = path.find_last_of('/');
-            return lastSlash == std::string::npos
-                ? std::string()
-                : path.substr(0, lastSlash + 1);
-        }
-        capacity *= 2;
-    }
-    return "";
-#endif
-}
-std::string GetFilePath(const std::string& filename) {
-    const std::string exeDir = GetExecutableDirectory();
-    return exeDir.empty() ? std::string() : exeDir + filename;
 }
 
 std::string GetCurrentTimestamp() {
@@ -551,7 +548,7 @@ static BanListStatus CheckHWIDBanStatusUnlocked(const std::string& hwid) {
         return BanListStatus::Unavailable;
     }
 
-    const std::string banFilePath = GetFilePath(BAN_LIST_FILE);
+    const std::string banFilePath = g_banListFilePath;
     if (banFilePath.empty()) return BanListStatus::Unavailable;
 
     std::error_code filesystemError;
@@ -589,7 +586,7 @@ static BanListStatus CheckHWIDBanStatusUnlocked(const std::string& hwid) {
 
 static BanListStatus CheckHWIDBanStatus(const std::string& hwid) {
     std::lock_guard<std::mutex> lock(g_banListMutex);
-    const std::string banFilePath = GetFilePath(BAN_LIST_FILE);
+    const std::string banFilePath = g_banListFilePath;
     if (banFilePath.empty()) return BanListStatus::Unavailable;
     BanListFileLock fileLock(banFilePath, false);
     if (!fileLock) return BanListStatus::Unavailable;
@@ -604,7 +601,7 @@ void AddToBanList(const std::string& hwid) {
     }
 
     std::lock_guard<std::mutex> lock(g_banListMutex);
-    const std::string banFilePath = GetFilePath(BAN_LIST_FILE);
+    const std::string banFilePath = g_banListFilePath;
     if (banFilePath.empty()) {
         std::cerr << "[ERROR] Path ban list tidak tersedia." << std::endl;
         return;
@@ -826,7 +823,7 @@ std::string ExtractDetectedFile(const std::string& type, const std::string& deta
 
 void LogViolation(const std::string& type, const std::string& details, const std::string& hwid) {
     std::lock_guard<std::mutex> lock(g_violationLogMutex);
-    std::string logFilePath = GetFilePath(VIOLATION_LOG_FILE);
+    std::string logFilePath = g_violationLogFilePath;
     std::ofstream logFile(logFilePath, std::ios::app);
     if (logFile.is_open()) {
         // Extract file/software yang terdeteksi
@@ -992,7 +989,7 @@ void HandleClient(SocketType clientSocket) {
 
     try {
         if (!OblivionNet::ReceiveFrame(clientSocket, pendingNetworkData,
-                                       report, 5000, BUFFER_LEN - 1)) {
+                                       report, g_requestTimeoutMs, BUFFER_LEN - 1)) {
             LogViolation("FRAME_READ_FAILED", "Timed out or received an oversized/incomplete HELLO request", extractedHwid);
             closesocket_impl(clientSocket);
             return;
@@ -1031,7 +1028,7 @@ void HandleClient(SocketType clientSocket) {
         report.clear();
         pendingNetworkData.clear();
         if (!OblivionNet::ReceiveFrame(clientSocket, pendingNetworkData,
-                                       report, 5000, BUFFER_LEN - 1)) {
+                                       report, g_requestTimeoutMs, BUFFER_LEN - 1)) {
             LogViolation("FRAME_READ_FAILED", "Timed out or received an incomplete authenticated request", helloHwid);
             closesocket_impl(clientSocket);
             return;
@@ -1104,7 +1101,7 @@ void HandleClient(SocketType clientSocket) {
                     const std::string kickCommand = "KICK:" + kickMac + ";";
                     OblivionNet::SendAll(clientSocket, kickCommand.data(), kickCommand.size());
                     std::cout << "[BAN] HWID_ID [" << FormatHwidForLog(hwid) << "] terdeteksi di ban list. Perintah KICK dikirim." << std::endl;
-                    std::cout << "[INFO] Untuk unban, hapus HWID dari bans.txt dan restart client." << std::endl;
+                    std::cout << "[INFO] Untuk unban, hapus HWID dari configured ban-list file dan restart client." << std::endl;
                 } else {
                     Oblivion::HeartbeatConfig cfg = GLOBAL_HB_CONFIG;
                     uint64_t sessionNonce = 0;
@@ -1463,8 +1460,8 @@ int main() {
     std::cout << "  Version 1.0 - Ragnarok Online Protection" << std::endl;
     std::cout << "==================================================" << std::endl;
     std::cout << "[INFO] Server berjalan dan mendengarkan di port " << listenPortText << std::endl;
-    std::cout << "[INFO] Ban list file: " << GetFilePath(BAN_LIST_FILE) << std::endl;
-    std::cout << "[INFO] Violation log file: " << GetFilePath(VIOLATION_LOG_FILE) << std::endl;
+    std::cout << "[INFO] Ban list file: " << g_banListFilePath << std::endl;
+    std::cout << "[INFO] Violation log file: " << g_violationLogFilePath << std::endl;
     std::cout << "[INFO] Menunggu koneksi dari client..." << std::endl;
     std::cout << "==================================================" << std::endl;
 
@@ -1520,7 +1517,7 @@ int main() {
         // flood cannot allocate an unbounded number of handler threads.
         const uint32_t activeBefore =
             g_activeClientCount.fetch_add(1, std::memory_order_relaxed);
-        if (activeBefore >= kMaxConcurrentClients) {
+        if (activeBefore >= g_maxConcurrentClients) {
             g_activeClientCount.fetch_sub(1, std::memory_order_relaxed);
             const char* busyResponse = "BUSY;";
             OblivionNet::SendAll(ClientSocket, busyResponse, strlen(busyResponse));
