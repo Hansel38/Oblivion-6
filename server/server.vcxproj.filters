@@ -18,12 +18,15 @@
     <ClCompile Include="server.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\secret_obf.cpp">
+    <ClCompile Include="src\server_secret.cpp">
       <Filter>Resource Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="include\secret_obf.h">
+    <ClInclude Include="include\server_secret.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\common\server_runtime_config.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\protocol_validation.h">
