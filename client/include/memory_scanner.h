@@ -87,7 +87,7 @@ namespace Oblivion {
         
         // === Cryptographic Functions ===
         uint32_t CalculateCRC32(const uint8_t* data, size_t size);
-        uint64_t CalculateSHA256_32bit(const uint8_t* data, size_t size);
+        bool CalculateSHA256_32bit(const uint8_t* data, size_t size, uint64_t& result);
         
         // === Anti-Tampering Detection ===
         bool DetectBaselineModification();

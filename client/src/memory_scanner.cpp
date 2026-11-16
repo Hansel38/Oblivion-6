@@ -183,46 +183,53 @@ namespace Oblivion {
 
     // Simplified SHA256 implementation (32-bit truncated untuk efficiency)
     // Menggunakan Windows CryptoAPI untuk reliability
-    uint64_t MemoryScanner::CalculateSHA256_32bit(const uint8_t* data, size_t size) {
-        HCRYPTPROV hProv = 0;
-        HCRYPTHASH hHash = 0;
-        BYTE hash[32];
-        DWORD hashLen = 32;
-        uint64_t result = 0;
+    bool MemoryScanner::CalculateSHA256_32bit(
+        const uint8_t* data, size_t size, uint64_t& result) {
+        result = 0;
 
         if ((!data && size != 0) ||
             size > static_cast<size_t>((std::numeric_limits<DWORD>::max)())) {
-            return 0;
+            return false;
         }
 
-        if (!CryptAcquireContextW(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
-            return 0;
+        HCRYPTPROV hProv = 0;
+        if (!CryptAcquireContextW(
+                &hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
+            return false;
         }
 
-        if (!CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHash)) {
-            CryptReleaseContext(hProv, 0);
-            return 0;
-        }
+        HCRYPTHASH hHash = 0;
+        bool hashSucceeded = false;
+        do {
+            if (!CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHash)) {
+                break;
+            }
 
-        if (!CryptHashData(hHash, data, static_cast<DWORD>(size), 0)) {
+            if (!CryptHashData(hHash, data, static_cast<DWORD>(size), 0)) {
+                break;
+            }
+
+            BYTE hash[32]{};
+            DWORD hashLen = static_cast<DWORD>(sizeof(hash));
+            if (!CryptGetHashParam(hHash, HP_HASHVAL, hash, &hashLen, 0) ||
+                hashLen != static_cast<DWORD>(sizeof(hash))) {
+                break;
+            }
+
+            // Copy bytes instead of dereferencing a potentially unaligned uint64_t pointer.
+            std::memcpy(&result, hash, sizeof(result));
+            hashSucceeded = true;
+        } while (false);
+
+        if (hHash != 0) {
             CryptDestroyHash(hHash);
-            CryptReleaseContext(hProv, 0);
-            return 0;
         }
-
-        if (!CryptGetHashParam(hHash, HP_HASHVAL, hash, &hashLen, 0)) {
-            CryptDestroyHash(hHash);
-            CryptReleaseContext(hProv, 0);
-            return 0;
-        }
-
-        // Copy bytes instead of dereferencing a potentially unaligned uint64_t pointer.
-        std::memcpy(&result, hash, sizeof(result));
-
-        CryptDestroyHash(hHash);
         CryptReleaseContext(hProv, 0);
 
-        return result;
+        if (!hashSucceeded) {
+            result = 0;
+        }
+        return hashSucceeded;
     }
 
     // === LAYER 1: PE Structure Validation ===\n    
@@ -614,8 +621,13 @@ namespace Oblivion {
                 return false;
             }
 
-            const uint64_t textHash = CalculateSHA256_32bit(
-                fileData.data() + rawOffset, rawSize);
+            uint64_t textHash = 0;
+            if (!CalculateSHA256_32bit(
+                    fileData.data() + rawOffset, rawSize, textHash)) {
+                ReportViolationAndExit(L"", "SIGNATURE_HASH_UNAVAILABLE",
+                                       "Unable to calculate the executable text-section SHA-256 hash");
+                return false;
+            }
             if (static_cast<uint32_t>(textHash) != signature.textSectionHash) {
                 ReportViolationAndExit(L"", "SIGNATURE_MISMATCH",
                                        "Text section hash does not match embedded signature");
