@@ -1,9 +1,2 @@
-# Oblivion Hack Shield - Ban List
-# Format: Satu HWID per baris
-# Baris yang dimulai dengan # adalah komentar dan akan diabaikan
-# Case-insensitive (huruf besar/kecil tidak berpengaruh)
-#
-# Contoh:
-# abc123xyz456
-# def789ghi012
-
+# Active ban entries only: one 64-character hexadecimal HWID per line.
+# Configure the absolute path to this file with OBLIVION_BAN_LIST_PATH.

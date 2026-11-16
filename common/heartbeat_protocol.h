@@ -20,12 +20,15 @@ namespace Oblivion {
         std::string hmac;
     };
 
+    // No implicit timing policy is provided here. The server must load every
+    // field from its required deployment configuration; the client initializes
+    // this type from the server-authenticated session negotiation.
     struct HeartbeatConfig {
-        uint32_t interval_ms = 3000;
-        uint32_t jitter_ms = 250;
-        uint32_t timeout_ms = 4000;
-        uint32_t max_consecutive_miss = 3;
-        uint32_t rtt_warn_ms = 1500;
+        uint32_t interval_ms;
+        uint32_t jitter_ms;
+        uint32_t timeout_ms;
+        uint32_t max_consecutive_miss;
+        uint32_t rtt_warn_ms;
     };
 
     // A heartbeat frame must belong to the next exchange in this session.

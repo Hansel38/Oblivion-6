@@ -29,3 +29,12 @@ ipch/
 *.Build.CppClean.log
 *.FileListAbsolute.txt
 *.log
+
+# Runtime server credentials and operator-managed state/configuration
+/server/secret.dat
+/server/*.secret
+/server/*.key
+/server/*.env
+/server/violations.log
+/server/*.pid
+/server/*.lock

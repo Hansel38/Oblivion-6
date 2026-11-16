@@ -39,6 +39,18 @@ jobs:
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror tests/network_configuration_test.cpp -o /tmp/network_configuration_test
           /tmp/network_configuration_test
+      - name: Test server runtime configuration
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror tests/server_runtime_config_test.cpp -o /tmp/server_runtime_config_test
+          /tmp/server_runtime_config_test
+      - name: Test explicit server secret provisioning
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -I server/include tests/server_secret_config_test.cpp server/src/server_secret.cpp -o /tmp/server_secret_config_test
+          /tmp/server_secret_config_test
+      - name: Validate Linux management scripts
+        run: |
+          bash -n server/oblivion-start
+          bash -n server/oblivion-server-start
       - name: Test HWID WMI source validation
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror tests/hwid_source_validation_test.cpp -o /tmp/hwid_source_validation_test
