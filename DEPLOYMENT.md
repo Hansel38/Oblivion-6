@@ -44,6 +44,7 @@ The injector/game host must call exported `Oblivion_Entry()` after `LoadLibrary`
 The file-integrity checks for `RRO.exe`, `Republic.grf`, and `DATA.ini` still need hashes computed from the exact approved production distribution. Do not invent or reuse hashes from a different game build. The integrity manifest also needs a pinned public-key signature verification mechanism before it can be trusted against local modification. These are open release blockers until the approved files, signing key, and verification path exist.
 
 The current module-signature scan also contains an unsigned-DLL exception list matched by module basename before checking path, file identity, hash, or publisher. A malicious unsigned DLL can imitate an allowed name outside protected Windows/Program Files roots. Do not treat this allowlist as production trust; it must be replaced with verification against exact approved game-module hashes in the signed release manifest before deployment. This depends on the same approved distribution and signing material.
+Publisher checks also use substring matching on certificate display names. A validly signed file whose publisher name merely contains a trusted label may be accepted as that publisher. Production trust must be bound to exact approved signer identities, ideally certificate thumbprints/public-key identities, from the approved release environment.
 
 ## Operations
 
