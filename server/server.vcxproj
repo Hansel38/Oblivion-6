@@ -139,6 +139,7 @@
     <ClInclude Include="include\socket_framing.h" />
     <ClInclude Include="include\protocol_validation.h" />
     <ClInclude Include="..\common\heartbeat_protocol.h" />
+    <ClInclude Include="..\common\server_runtime_config.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
