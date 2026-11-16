@@ -139,7 +139,7 @@ void InitializeSecuritySystem();
 // the Windows loader lock.
 extern "C" __declspec(dllexport) void Oblivion_Entry() {
     LifecycleControl& lifecycle = GetLifecycleControl();
-    std::lock_guard<std::mutex> lock(lifecycle.mutex);
+    std::unique_lock<std::mutex> lock(lifecycle.mutex);
 
     if (lifecycle.state != LifecycleState::NotStarted) {
         return;
@@ -167,6 +167,7 @@ extern "C" __declspec(dllexport) void Oblivion_Entry() {
     } catch (...) {
         lifecycle.state = LifecycleState::Stopped;
         OutputDebugStringW(L"[FATAL] Failed to create Oblivion initialization thread; terminating unprotected client.");
+        lock.unlock();
         ExitProcess(1);
         return;
     }
