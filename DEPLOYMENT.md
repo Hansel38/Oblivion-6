@@ -18,71 +18,78 @@ Use an ASCII DNS name or an IDNA/Punycode hostname. The client rejects an empty,
 
 All builds fail initialization when either endpoint variable is missing or invalid; local development must configure an explicit endpoint too.
 
-## Shared secret configuration
+## Required server configuration
 
-The Windows client reads `OBLIVION_SECRET` from its process environment or falls back to `secret.dat` beside the game executable. The Windows and Linux servers read `OBLIVION_SECRET` or `secret.dat` beside the server executable. The same key must be provisioned to client and server for the current protocol.
+The server has no operational defaults for its listener, storage paths, concurrency limit, request timeout, or heartbeat policy. Windows and Linux use the same required environment variable names. Startup fails when any required value is missing, malformed, or outside its supported range.
 
-The server refuses to start when no secret is configured or when it has fewer than 32 bytes. Clients enforce the same minimum. This applies to Debug and Release builds; no development secret is embedded. Do not put the secret in source control, command-line arguments, logs, or support tickets. Restrict access to server configuration and backups. Use at least 32 random bytes; the code can enforce length, but cannot establish entropy quality for an operator-supplied value.
+| Variable | Requirement |
+|---|---|
+| `OBLIVION_LISTEN_ADDRESS` | Explicit local IPv4/IPv6 address or resolvable local interface name; printable ASCII, no whitespace |
+| `OBLIVION_LISTEN_PORT` | Canonical decimal TCP port, 1–65535 |
+| `OBLIVION_BAN_LIST_PATH` | Absolute path to an existing, readable regular file |
+| `OBLIVION_VIOLATION_LOG_PATH` | Absolute path to a writable append-only log destination; must differ from the ban-list path |
+| `OBLIVION_MAX_CONCURRENT_CLIENTS` | Required positive decimal integer |
+| `OBLIVION_REQUEST_TIMEOUT_MS` | Required integer, 100–120000 |
+| `OBLIVION_HB_INTERVAL_MS` | Required integer, 100–60000 |
+| `OBLIVION_HB_JITTER_MS` | Required integer, 0–10000 |
+| `OBLIVION_HB_TIMEOUT_MS` | Required integer, 250–120000 |
+| `OBLIVION_HB_MAX_MISS` | Required integer, 1–10 |
+| `OBLIVION_HB_RTT_WARN_MS` | Required integer, 0–60000 |
 
-**Critical limitation:** the current design still uses one long-lived shared secret available to an untrusted client. XOR-encoding `secret.dat` is obfuscation, not encryption, and a value held by the client can be extracted from the file or process memory. Challenge-response prevents sending the key over TCP but does not solve local extraction. This remains a P0 production blocker. A real trusted authentication service issuing per-account/per-session credentials, with server-side revocation and rotation, is required; that service is not implemented here.
+The listener binds only to the address supplied in `OBLIVION_LISTEN_ADDRESS`; it does not choose a wildcard address automatically. Configure a local address that exists on the host. Clients must use the reachable server address and the same TCP port.
 
-Changing the shared key requires a coordinated client/server rollout because the current deployment supports one active shared key. Treat rotation as a maintenance operation: prepare the new key, update the server and all client deployments together, verify check-in and heartbeat, then retire the old key. There is no overlapping-key migration mechanism at present.
+The ban-list file must exist before startup. An empty file represents an empty ban list. The server no longer searches for a fixed `bans.txt` beside its executable. The violation log is opened at the configured absolute path; the server no longer chooses a fixed `violations.log` path.
+
+## Server secret provisioning
+
+Configure exactly one of these sources:
+
+- `OBLIVION_SECRET`: the secret text supplied by the service environment.
+- `OBLIVION_SECRET_FILE`: an absolute path to a plaintext secret file.
+
+Do not set both. Do not omit both. The secret must contain at least 32 printable ASCII bytes and must not contain placeholder markers. A secret file may end with one line ending; no other whitespace is accepted. Restrict its filesystem permissions to the server service account and authorized administrators.
+
+The server no longer searches for `secret.dat`, no longer assumes a secret-file location beside the executable, and no longer XOR-decodes server-side secret files. The client must still be provisioned with the exact same secret text. The client supports its existing `OBLIVION_SECRET` environment source or its existing client-side secret-file format; do not copy the server plaintext file into the client deployment unless the client is explicitly configured to read plaintext.
+
+**Critical limitation:** the protocol still uses one long-lived shared secret available to an untrusted client. Challenge-response prevents transmitting the key over TCP but does not prevent extraction from the client process or its local configuration. This remains a P0 production blocker. Per-account/per-session credentials from a trusted authentication service, with server-side revocation and rotation, are not implemented.
+
+The server's environment and file sources are mutually exclusive to avoid ambiguity. Changing the shared key requires a coordinated server/client rollout because overlapping-key migration is not implemented.
+
+## Protocol invariants versus deployment configuration
+
+The following remain code-defined intentionally and must not be overridden independently on the server: frame delimiter and message grammar, HMAC algorithm/domain labels, SHA-256 digest width, HWID syntax, status encoding, and maximum protocol field/frame sizes. These are wire-format and security invariants shared with the client, not deployment placeholders.
+
+Operating-system constants and cryptographic API flags are also not runtime configuration. They are selected by the platform and must remain tied to the implementation.
 
 ## Network exposure
 
-- Open inbound TCP only on the configured `OBLIVION_LISTEN_PORT`, and only from the game/client networks that are expected to connect. Apply equivalent restrictions in the cloud security group, perimeter firewall, and host firewall.
-- The server listener has no default port. Do not expose administrative access, secret files, ban files, or logs over the public network.
-- Plain TCP is deliberate and TLS is out of scope. Network observers may read traffic metadata and message contents even though authenticated frames are MAC-protected. Use a trusted network path and firewall restrictions appropriate to that exposure.
-- Validate the deployed server address and routing from a real client host; a successful local build does not test DNS, routing, or firewall rules.
-
-## DLL host lifecycle
-
-The injector/game host must call exported `Oblivion_Entry()` after `LoadLibrary` succeeds. Before orderly unload, it must call `Oblivion_Shutdown()` and wait for it to return, then call `FreeLibrary`. Do not call either export while holding the Windows loader lock. Unloading without the shutdown export is unsupported.
+- Restrict inbound TCP to the configured listener address/port and expected client networks using the host firewall and perimeter/security-group rules.
+- Do not expose the secret file, ban list, logs, or administrative access publicly.
+- Plain TCP is deliberate; TLS remains out of scope. Network observers can see message contents and metadata even though authenticated frames are MAC-protected.
+- Validate DNS/routing and firewall access from a real client host. CI does not validate network deployment.
 
 ## Release integrity data
 
-The file-integrity checks for `RRO.exe`, `Republic.grf`, and `DATA.ini` still need hashes computed from the exact approved production distribution. Do not invent or reuse hashes from a different game build. The integrity manifest also needs a pinned public-key signature verification mechanism before it can be trusted against local modification. These are open release blockers until the approved files, signing key, and verification path exist.
+The file-integrity checks for `RRO.exe`, `Republic.grf`, and `DATA.ini` still require hashes from the exact approved production distribution. Do not invent or reuse hashes from another game build. The manifest also needs signature verification using a pinned public key before it can be trusted against local modification.
 
-The current module-signature scan also contains an unsigned-DLL exception list matched by module basename before checking path, file identity, hash, or publisher. A malicious unsigned DLL can imitate an allowed name outside protected Windows/Program Files roots. Do not treat this allowlist as production trust; it must be replaced with verification against exact approved game-module hashes in the signed release manifest before deployment. This depends on the same approved distribution and signing material.
-Publisher checks also use substring matching on certificate display names. A validly signed file whose publisher name merely contains a trusted label may be accepted as that publisher. Production trust must be bound to exact approved signer identities, ideally certificate thumbprints/public-key identities, from the approved release environment.
+The unsigned-module allowlist must be replaced with exact approved module identities/hashes from that signed release manifest. Publisher trust must be pinned to approved signer identities, not display-name text. These remain production blockers until the approved distribution and signing material are available.
 
 ## Operations
 
-- Run the server under a dedicated, least-privilege service account. Keep the secret, `bans.txt`, `violations.log`, and backups readable only by authorized operators.
-- Back up the ban list and server configuration before deployment and before changes. Test restore procedures.
-- Review ban decisions against server-side evidence; do not permanently ban solely on one weak heuristic signal.
-- Preserve logs during incident response and restrict access because process paths and violation details can contain sensitive information. Windows and Linux server console output and `violations.log` use a domain-separated HMAC `HWID_ID` pseudonym instead of the raw HWID; the original identifier is still used internally for authentication and ban-list matching. The HMAC key is the existing shared client/server secret, so this redaction limits exposure to ordinary log readers but does not protect the identifier from clients or anyone who extracts that shared secret. Log rotation, file access controls, and retention policy remain incomplete.
-- On suspected shared-key compromise, isolate the server, preserve relevant logs, coordinate key rotation, and redeploy clients before reopening access.
+Run the server under a dedicated least-privilege service account. Keep the secret, configured ban list, violation log, and backups readable only by authorized operators. Back up the ban list and configuration before changes and test restoration. Review ban decisions against server-side evidence; do not permanently ban based on a single weak heuristic.
+
+Windows and Linux operational logs use the domain-separated HMAC `HWID_ID` pseudonym instead of raw HWID. The HMAC key is still the shared client/server secret and therefore does not protect the identifier from clients or anyone who extracts that key. Log rotation, file access control, and retention policy remain operator responsibilities.
 
 ## Required pre-production validation
 
-Run these tests against the exact Release client, supported Windows versions, and the production-like server:
+Test the exact Release client and target server environment for:
 
-1. Valid and invalid shared-secret check-in; missing or invalid client/server endpoint configuration must fail closed.
-2. TCP fragmentation/coalescing, delayed responses, partial sends, disconnects, invalid MACs, altered PONG status/timestamp, and replayed or stale frames.
-3. Startup status transition from unavailable to healthy and graceful shutdown back to unavailable; verify server logs and no false heartbeat-miss escalation.
-4. DLL host sequence: repeated `Oblivion_Entry()`, `Oblivion_Shutdown()`, and unload cycles, including cancellation during initialization.
-5. Process/module enumeration under access-denied, process-exit, and 32/64-bit boundary conditions; verify unavailable inspection is not silently treated as clean and not misreported as cheating.
-6. Self-integrity and file-integrity pass/fail tests against clean, approved fixtures; verify legitimate relocation and runtime loader changes do not create false positives.
-7. Firewall allow/deny tests from the intended client networks and from untrusted networks.
+1. Missing, duplicate, invalid, and valid configuration sources; every missing required server setting must prevent startup.
+2. Unreadable/missing ban list, unwritable log path, same ban/log path, and secret-file permission failures.
+3. Valid/invalid secret authentication, TCP fragmentation/coalescing, partial sends, delayed responses, disconnects, invalid MACs, and replayed/stale frames.
+4. Heartbeat status transitions and graceful shutdown without false timeout escalation.
+5. DLL host lifecycle and cancellation during initialization.
+6. Process/module enumeration under access-denied, process-exit, and architecture-boundary conditions.
+7. File/self-integrity pass/fail tests against approved fixtures and firewall allow/deny behavior.
 
-The current CI covers Linux GCC and Windows Debug/Release x86/x64 builds. It does not execute the game, injector, actual network protocol, Windows security APIs, or deployment environment.
-
-## Network endpoint configuration
-
-The endpoint is deliberately not compiled into either binary. Configure the
-same TCP port on both sides before starting production services:
-
-```text
-# Server
-OBLIVION_LISTEN_PORT=54321
-
-# Client host process before loading Oblivion.dll
-OBLIVION_SERVER=anti-cheat.example.com
-OBLIVION_SERVER_PORT=54321
-```
-
-All three values are required. Ports must be canonical decimal values from 1
-through 65535 (for example, `443`; not `0443`, `0`, or `65536`). The server
-exits before opening a listening socket when its value is missing or invalid;
-the client fails closed before opening a network connection.
+CI builds Linux GCC and Windows Debug/Release x86/x64 and runs portable configuration/protocol tests. It does not execute the game, injector, Windows security APIs, or the production network environment.
