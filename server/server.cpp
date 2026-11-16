@@ -1270,7 +1270,7 @@ int main() {
 
     const std::string listenPortText =
         OblivionNet::FormatTcpPort(runtimeConfig.listenPort);
-    const int iResult = getaddrinfo(
+    int iResult = getaddrinfo(
         runtimeConfig.listenAddress.c_str(), listenPortText.c_str(),
         &hints, &result);
     if (iResult != 0) {
