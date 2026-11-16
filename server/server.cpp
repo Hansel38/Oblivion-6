@@ -1311,7 +1311,6 @@ int main() {
 
     std::cout << "==================================================" << std::endl;
     std::cout << "  OBLIVION HACK SHIELD - Server Component" << std::endl;
-    std::cout << "  Version 1.0 - Ragnarok Online Protection" << std::endl;
     std::cout << "==================================================" << std::endl;
     std::cout << "[INFO] Server berjalan dan mendengarkan di port " << listenPortText << std::endl;
     std::cout << "[INFO] Ban list file: " << g_banListFilePath << std::endl;
