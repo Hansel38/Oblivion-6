@@ -153,7 +153,9 @@ extern "C" __declspec(dllexport) void Oblivion_Entry() {
             try {
                 InitializeSecuritySystem();
             } catch (...) {
-                OutputDebugStringW(L"[ERROR] Unhandled exception during Oblivion initialization.");
+                OutputDebugStringW(L"[FATAL] Unhandled exception during Oblivion initialization; terminating unprotected client.");
+                ExitProcess(1);
+                return;
             }
 
             LifecycleControl& state = GetLifecycleControl();
@@ -164,7 +166,9 @@ extern "C" __declspec(dllexport) void Oblivion_Entry() {
         });
     } catch (...) {
         lifecycle.state = LifecycleState::Stopped;
-        OutputDebugStringW(L"[ERROR] Failed to create Oblivion initialization thread.");
+        OutputDebugStringW(L"[FATAL] Failed to create Oblivion initialization thread; terminating unprotected client.");
+        ExitProcess(1);
+        return;
     }
 }
 
