@@ -973,14 +973,7 @@ ParsedReport ParseProtocol(const std::string& report) {
 
 
 void HandleClient(SocketType clientSocket) {
-    const uint32_t activeBefore = g_activeClientCount.fetch_add(1, std::memory_order_relaxed);
-    if (activeBefore >= kMaxConcurrentClients) {
-        g_activeClientCount.fetch_sub(1, std::memory_order_relaxed);
-        const char* busyResponse = "BUSY;";
-        OblivionNet::SendAll(clientSocket, busyResponse, strlen(busyResponse));
-        closesocket_impl(clientSocket);
-        return;
-    }
+    // The accept loop reserves a slot before creating this handler thread.
     ActiveClientGuard activeGuard{ g_activeClientCount };
     std::string extractedHwid = "UNKNOWN";
     std::string pendingNetworkData;
@@ -1512,14 +1505,40 @@ int main() {
             continue;
         }
 
+        // Reserve the concurrency slot before creating a thread so a connection
+        // flood cannot allocate an unbounded number of handler threads.
+        const uint32_t activeBefore =
+            g_activeClientCount.fetch_add(1, std::memory_order_relaxed);
+        if (activeBefore >= kMaxConcurrentClients) {
+            g_activeClientCount.fetch_sub(1, std::memory_order_relaxed);
+            const char* busyResponse = "BUSY;";
+            OblivionNet::SendAll(ClientSocket, busyResponse, strlen(busyResponse));
+            closesocket_impl(ClientSocket);
+            continue;
+        }
+
+        // Only log connections that received a handler slot; rejected connection
+        // floods must not produce an unbounded stream of console messages.
         std::cout << "\n[CONNECTION] New client connected" << std::endl;
-        
+
+        // Pass the reserved slot to HandleClient; its ActiveClientGuard releases it.
+        std::thread clientThread;
         try {
-            std::thread clientThread(HandleClient, ClientSocket);
-            clientThread.detach();
+            clientThread = std::thread(HandleClient, ClientSocket);
         } catch (const std::exception& e) {
+            g_activeClientCount.fetch_sub(1, std::memory_order_relaxed);
             std::cerr << "[ERROR] Failed to start client handler thread: " << e.what() << std::endl;
             closesocket_impl(ClientSocket);
+            continue;
+        }
+
+        try {
+            clientThread.detach();
+        } catch (const std::exception& e) {
+            std::cerr << "[ERROR] Failed to detach client handler thread: " << e.what() << std::endl;
+            if (clientThread.joinable()) {
+                clientThread.join();
+            }
         }
     }
 
