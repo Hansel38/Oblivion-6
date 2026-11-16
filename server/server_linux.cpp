@@ -1,5 +1,5 @@
 // Cross-platform server implementation
-// Compile with: g++ -std=c++17 -o server server_linux.cpp src/secret_obf.cpp -lssl -lcrypto -lpthread
+// Build with `make`; server runtime values and credential sources are required from deployment configuration.
 
 #include <iostream>
 #include <string>
