@@ -14,6 +14,7 @@ namespace OblivionServer {
     struct ServerRuntimeConfigInput {
         std::string listenAddress;
         std::string listenPort;
+        std::string listenBacklog;
         std::string banListPath;
         std::string violationLogPath;
         std::string maxConcurrentClients;
@@ -28,6 +29,7 @@ namespace OblivionServer {
     struct ServerRuntimeConfig {
         std::string listenAddress;
         uint16_t listenPort = 0;
+        uint32_t listenBacklog = 0;
         std::string banListPath;
         std::string violationLogPath;
         uint32_t maxConcurrentClients = 0;
@@ -100,6 +102,13 @@ namespace OblivionServer {
             return false;
         }
 
+        const bool sameFile = std::filesystem::equivalent(
+            config.banListPath, config.violationLogPath, filesystemError);
+        if (filesystemError || sameFile) {
+            error = "OBLIVION_BAN_LIST_PATH and OBLIVION_VIOLATION_LOG_PATH must not resolve to the same file";
+            return false;
+        }
+
         return true;
     }
 
@@ -123,6 +132,17 @@ namespace OblivionServer {
         uint16_t port = 0;
         if (!OblivionNet::ParseTcpPort(input.listenPort, port)) {
             error = "OBLIVION_LISTEN_PORT is required and must be a canonical TCP port from 1 through 65535";
+            return false;
+        }
+
+        uint32_t listenBacklog = 0;
+        if (!ParseRequiredUInt32(input.listenBacklog,
+                                 "OBLIVION_LISTEN_BACKLOG",
+                                 listenBacklog, error)) {
+            return false;
+        }
+        if (listenBacklog == 0 || listenBacklog > 65535) {
+            error = "OBLIVION_LISTEN_BACKLOG must be between 1 and 65535";
             return false;
         }
 
@@ -174,8 +194,8 @@ namespace OblivionServer {
             return false;
         }
 
-        if (maxClients == 0) {
-            error = "OBLIVION_MAX_CONCURRENT_CLIENTS must be greater than zero";
+        if (maxClients == 0 || maxClients > 1024) {
+            error = "OBLIVION_MAX_CONCURRENT_CLIENTS must be between 1 and 1024";
             return false;
         }
         if (requestTimeout < 100 || requestTimeout > 120000) {
@@ -193,6 +213,7 @@ namespace OblivionServer {
 
         output.listenAddress = input.listenAddress;
         output.listenPort = port;
+        output.listenBacklog = listenBacklog;
         output.banListPath = banPath.string();
         output.violationLogPath = logPath.string();
         output.maxConcurrentClients = maxClients;
