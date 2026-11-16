@@ -902,6 +902,18 @@ namespace Oblivion {
         m_verifiedSections.clear();
 
         for (const auto& baseline : m_diskBaseline) {
+            // PE section RVAs are 32-bit values. The in-memory baseline stores
+            // them in uintptr_t for address arithmetic, so validate the width
+            // before using the value as a key in 32-bit PE section containers.
+            if (baseline.rva >
+                static_cast<uintptr_t>((std::numeric_limits<uint32_t>::max)())) {
+                ReportViolationAndExit(
+                    L"", "BASELINE_TAMPERING",
+                    "Executable baseline RVA exceeds the 32-bit PE RVA range");
+                return false;
+            }
+            const uint32_t sectionRva = static_cast<uint32_t>(baseline.rva);
+
             if (baseline.rva >
                 (std::numeric_limits<uintptr_t>::max)() - m_moduleBaseAddress) {
                 ReportViolationAndExit(L"", "MEMORY_RANGE_OVERFLOW", "Executable section address overflow");
@@ -916,7 +928,7 @@ namespace Oblivion {
                 return false;
             }
 
-            const auto it = m_sectionMap.find(static_cast<uint32_t>(baseline.rva));
+            const auto it = m_sectionMap.find(sectionRva);
             if (it == m_sectionMap.end()) {
                 ReportViolationAndExit(
                     L"", "PE_SECTION_METADATA_UNAVAILABLE",
@@ -973,9 +985,8 @@ namespace Oblivion {
 
             // Verifikasi bahwa file disk belum diubah (optional check)
             // Ini memastikan file di disk masih sama dengan baseline
-            auto it_disk_check = m_sectionMap.find(baseline.rva);
-            if (it_disk_check != m_sectionMap.end() && !fileData.empty()) {
-                const auto& section = it_disk_check->second;
+            if (it != m_sectionMap.end() && !fileData.empty()) {
+                const auto& section = it->second;
                 if (section.rawDataOffset <= fileData.size() &&
                     section.rawDataSize <= fileData.size() - section.rawDataOffset) {
                     uint32_t currentDiskCRC32 = CalculateSectionHashFromDisk(fileData, section);
@@ -1007,7 +1018,7 @@ namespace Oblivion {
                 }
             }
 
-            m_verifiedSections.insert(baseline.rva);
+            m_verifiedSections.insert(sectionRva);
         }
 
         return true;
