@@ -376,7 +376,7 @@ namespace Oblivion {
         if (connectSocket == INVALID_SOCKET) {
             // Gagal terhubung - Fail-Closed
             MessageBoxW(NULL, L"Tidak dapat terhubung ke server keamanan.\n\nClient akan ditutup.", L"Oblivion Hack Shield - Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
-            ExitProcess(0);
+            ExitProcess(1);
         }
 
         std::string challengeNonce;
@@ -709,7 +709,7 @@ namespace Oblivion {
             // --- GAGAL TERHUBUNG ---
             // Kebijakan "Fail-Closed": Jika tidak bisa hubungi server, anggap sebagai pelanggaran.
             MessageBoxW(NULL, L"Tidak dapat terhubung ke server keamanan.\n\nClient akan ditutup.", L"Oblivion Hack Shield - Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
-            ExitProcess(0);
+            ExitProcess(1);
             return;
         }
 
@@ -755,7 +755,7 @@ namespace Oblivion {
             closesocket(connectSocket);
             MessageBoxW(NULL, L"Timeout atau respons server tidak lengkap saat mengirim laporan.",
                         L"Oblivion Hack Shield - Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
-            ExitProcess(0);
+            ExitProcess(1);
             return;
         }
 
@@ -770,7 +770,7 @@ namespace Oblivion {
             closesocket(connectSocket);
             MessageBoxW(NULL, L"Respons server tidak valid saat mengirim laporan.",
                         L"Oblivion Hack Shield - Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
-            ExitProcess(0);
+            ExitProcess(1);
             return;
         }
 
