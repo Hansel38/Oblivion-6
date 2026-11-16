@@ -88,6 +88,7 @@ This checklist tracks findings from a source review. A checked item means the co
 
 - [x] **P1 — Remove heavy cleanup from `DllMain`.** `DllMain` now only records the module handle and disables thread notifications on process attach. Export `Oblivion_Shutdown()` performs worker joins and object destruction outside the loader lock; the host must call it before unloading. Host integration and repeated unload tests remain required.
 - [x] **P1 — Synchronize initialization and shutdown.** Replace the detached initialization thread with an owned thread; add explicit `NotStarted/Starting/Started/Stopping/Stopped` states, shutdown cancellation checkpoints, serialized shutdown, and join initialization before cleaning shared objects. Runtime race/stress tests remain required.
+- [x] **P1 — Fail closed when security initialization cannot start or throws unexpectedly.** Failure to create the initialization thread and any unhandled exception from `InitializeSecuritySystem()` now terminate the client with a nonzero exit status instead of leaving the game running without confirmed protection. Windows fault-injection runtime fixtures remain required.
 - [x] **P1 — Fix partial-construction leaks in `ProcessWatcher`.** Scanner ownership now uses `std::unique_ptr` and constructor unwinding cleans up completed components.
 - [x] **P1 — Make watcher stop interruptible.** Replace the 500–3000 ms sleep with a condition-variable wait that is notified by `Stop()`, preserving the normal scan interval while allowing prompt shutdown.
 - [x] **P1 — Avoid blocking joins during loader-lock detach.** `DllMain` no longer joins workers. The host calls `Oblivion_Shutdown()` before `FreeLibrary`; repeated load/unload validation remains open in the verification checklist.
@@ -219,6 +220,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [ ] Runtime fixture: split an executable baseline section into multiple `VirtualQuery` regions, modify a later page, and verify the scan reports incomplete rather than clean
 - [ ] Runtime fixture: force the first `VirtualQuery` region to be shorter than the baseline section and verify whole-section CRC is not compared to a truncated prefix
 - [ ] Runtime test: call `Oblivion_Entry()`, then `Oblivion_Shutdown()`, then unload the DLL across repeated cycles
+- [ ] Runtime fault-injection test: fail initialization-thread creation and throw before/after reporter/scanner creation; the process must terminate nonzero rather than continue with protection inactive.
 - [ ] Runtime fixture: baseline checksum remains stable across repeated scans and detects changes to each stored `ExecutableRegion` field
 - [ ] Runtime test: file integrity pass/fail with known test fixtures
 - [ ] Runtime fixture: reject a mapped PE with a `SizeOfImage` that would overflow `uintptr_t` from its supplied base before computing any section-table or section-data pointer
