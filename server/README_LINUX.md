@@ -102,3 +102,15 @@ The `oblivion-start` script can start, stop, restart, report status, and display
 - The transport is plain TCP; TLS is intentionally out of scope.
 - Keep server secret/configuration, ban list, and logs accessible only to authorized operators.
 - CI does not validate the game, actual client/server traffic, or the production host.
+
+## Management script paths
+
+When using either management script, also provide these required absolute paths:
+
+| Environment variable | Purpose |
+|---|---|
+| `OBLIVION_SERVER_BINARY` | Absolute path to the server executable |
+| `OBLIVION_SERVER_PID_PATH` | Absolute path for the process ID file |
+| `OBLIVION_SERVER_STDOUT_LOG_PATH` | Absolute path for captured standard output/error |
+
+The script does not infer paths from its own directory. The parent directories for the PID and stdout log files must already exist and be writable by the operator/service account.
