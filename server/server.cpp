@@ -18,7 +18,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <windows.h>
-#include "secret_obf.h"
+#include "server_secret.h"
 #include "include/heartbeat_protocol.h"
 #include "include/socket_framing.h"
 #include "include/protocol_validation.h"
