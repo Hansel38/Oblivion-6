@@ -124,8 +124,6 @@ struct ActiveClientGuard {
     ~ActiveClientGuard() { counter.fetch_sub(1, std::memory_order_relaxed); }
 };
 
-static Oblivion::HeartbeatConfig GLOBAL_HB_CONFIG;
-
 bool ConstantTimeEquals(const std::string& left, const std::string& right) {
     if (left.size() != 64 || right.size() != 64) return false;
     unsigned char difference = 0;
@@ -1467,13 +1465,11 @@ int main() {
     std::cout << "[INFO] Menunggu koneksi dari client..." << std::endl;
     std::cout << "==================================================" << std::endl;
 
-    GLOBAL_HB_CONFIG = runtimeConfig.heartbeat;
-
-    std::cout << "[HB CFG] interval=" << GLOBAL_HB_CONFIG.interval_ms
-              << "ms jitter=" << GLOBAL_HB_CONFIG.jitter_ms
-              << "ms timeout=" << GLOBAL_HB_CONFIG.timeout_ms
-              << "ms maxMiss=" << GLOBAL_HB_CONFIG.max_consecutive_miss
-              << " rttWarn=" << GLOBAL_HB_CONFIG.rtt_warn_ms << "ms" << std::endl;
+    std::cout << "[HB CFG] interval=" << runtimeConfig.heartbeat.interval_ms
+              << "ms jitter=" << runtimeConfig.heartbeat.jitter_ms
+              << "ms timeout=" << runtimeConfig.heartbeat.timeout_ms
+              << "ms maxMiss=" << runtimeConfig.heartbeat.max_consecutive_miss
+              << " rttWarn=" << runtimeConfig.heartbeat.rtt_warn_ms << "ms" << std::endl;
 
     while (true) {
         ClientSocket = accept(ListenSocket, NULL, NULL);
