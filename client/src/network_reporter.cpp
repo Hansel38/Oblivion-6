@@ -589,9 +589,11 @@ namespace Oblivion {
                     return;
                 }
 
-                Oblivion::HeartbeatConfig cfg;
-                cfg.interval_ms = m_hbIntervalMs;
-                cfg.timeout_ms = m_hbTimeoutMs;
+                // The client consumes only the negotiated interval/timeout here;
+                // unused server policy fields are explicitly zero-initialized.
+                const Oblivion::HeartbeatConfig cfg{
+                    m_hbIntervalMs, 0, m_hbTimeoutMs, 0, 0
+                };
                 uint32_t expectedPingSequence = 1;
                 while (m_hbRunning.load()) {
                     std::string frame;
