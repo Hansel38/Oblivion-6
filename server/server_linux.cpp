@@ -42,6 +42,7 @@
 #include "include/protocol_validation.h"
 #include "../common/network_configuration.h"
 #include "../common/server_runtime_config.h"
+#include "../common/ban_list_file.h"
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -550,10 +551,12 @@ static BanListStatus CheckHWIDBanStatusUnlocked(const std::string& hwid) {
     const std::string banFilePath = g_banListFilePath;
     if (banFilePath.empty()) return BanListStatus::Unavailable;
 
-    std::error_code filesystemError;
-    const bool fileExists = std::filesystem::exists(banFilePath, filesystemError);
-    if (filesystemError) return BanListStatus::Unavailable;
-    if (!fileExists) return BanListStatus::NotBanned;
+    // The configured ban list must remain present and regular while the
+    // server is running. A missing file is an operational failure, not an
+    // empty list; accepting clients in that state would fail open.
+    if (!OblivionServer::IsBanListFileAvailable(banFilePath)) {
+        return BanListStatus::Unavailable;
+    }
 
     std::ifstream banFile(banFilePath);
     if (!banFile.is_open()) return BanListStatus::Unavailable;
