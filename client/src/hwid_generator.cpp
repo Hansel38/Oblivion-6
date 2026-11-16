@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "hwid_generator.h"
+#include "hwid_source_validation.h"
 #include <intrin.h> // Untuk __cpuid
 #include <vector>
 #include <sstream>
@@ -64,12 +65,12 @@ namespace Oblivion {
         }
 
         // CPU brand is shared by many machines and cannot safely identify a
-        // client by itself. Do not hash the same pair of fallback markers into
-        // a reusable HWID when both device-specific WMI sources are unavailable.
+        // client by itself. Firmware placeholders are not device-specific IDs:
+        // do not hash CPU brand plus two unavailable WMI values into a reusable HWID.
         const bool hasMotherboardId =
-            !motherboardUuid.empty() && motherboardUuid != "UNKNOWN";
+            IsDeviceSpecificWmiValueAvailable(motherboardUuid);
         const bool hasDiskId =
-            !hddSerial.empty() && hddSerial != "UNKNOWN";
+            IsDeviceSpecificWmiValueAvailable(hddSerial);
         if (!hasMotherboardId && !hasDiskId) {
             return "";
         }
