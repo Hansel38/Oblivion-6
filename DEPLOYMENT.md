@@ -26,9 +26,10 @@ The server has no operational defaults for its listener, storage paths, concurre
 |---|---|
 | `OBLIVION_LISTEN_ADDRESS` | Explicit local IPv4/IPv6 address or resolvable local interface name; printable ASCII, no whitespace |
 | `OBLIVION_LISTEN_PORT` | Canonical decimal TCP port, 1–65535 |
+| `OBLIVION_LISTEN_BACKLOG` | Required integer, 1–65535 |
 | `OBLIVION_BAN_LIST_PATH` | Absolute path to an existing, readable regular file |
 | `OBLIVION_VIOLATION_LOG_PATH` | Absolute path to a writable append-only log destination; must differ from the ban-list path |
-| `OBLIVION_MAX_CONCURRENT_CLIENTS` | Required positive decimal integer |
+| `OBLIVION_MAX_CONCURRENT_CLIENTS` | Required integer, 1–1024 |
 | `OBLIVION_REQUEST_TIMEOUT_MS` | Required integer, 100–120000 |
 | `OBLIVION_HB_INTERVAL_MS` | Required integer, 100–60000 |
 | `OBLIVION_HB_JITTER_MS` | Required integer, 0–10000 |
