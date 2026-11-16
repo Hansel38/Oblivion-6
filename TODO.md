@@ -48,7 +48,9 @@ This checklist tracks findings from a source review. A checked item means the co
 - [x] **P1 — Negotiated heartbeat timing:** server sends active interval/timeout to the client; client validates and uses the negotiated values.
 - [x] **P1 — Heartbeat threshold configuration:** use configured consecutive-miss thresholds consistently in both server variants.
 - [x] **P1 — Heartbeat server configuration:** Linux server validates supported environment values and passes the resulting config into each session.
-- [x] **P1 — Bounded server concurrency:** cap active client handlers at 256 and handle thread-creation failures without terminating the listener.
+- [x] **P1 — Bounded server concurrency:** reserve one of the 256 handler slots atomically in the accept loop before creating a thread; reject excess sockets before allocating handler threads, release reservations on thread-construction failure, and release active slots through `ActiveClientGuard` on handler exit. Runtime burst/stress fixture remains required.
+- [ ] Runtime fixture: hold 256 TCP client handlers active, then open additional connections; verify excess clients receive `BUSY`, no more than 256 handler threads are started, and slots are released after disconnects and thread-creation failures
+
 - [x] **P2 — Concurrent violation logging:** serialize writes to `violations.log` in Windows and Linux server variants.
 - [x] **P2 — Log injection:** strip control characters from client details and stop logging raw malformed protocol bytes.
 - [x] **P1 — HMAC provider failures:** check BCrypt property retrieval and OpenSSL HMAC return values before consuming digest data.
