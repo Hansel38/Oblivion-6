@@ -56,6 +56,19 @@ namespace Oblivion {
             hddSerial = hddSerial.substr(0, hddSerial.find(","));
         }
 
+        // CPU brand is shared by many machines and cannot safely identify a
+        // client by itself. Do not hash the same pair of fallback markers into
+        // a reusable HWID when both device-specific WMI sources are unavailable.
+        const bool hasMotherboardId =
+            !motherboardUuid.empty() && motherboardUuid != "UNKNOWN";
+        const bool hasDiskId =
+            !hddSerial.empty() && hddSerial != "UNKNOWN";
+        if (!hasMotherboardId && !hasDiskId) {
+            return "";
+        }
+
+        // Keep the existing concatenation for valid source combinations so
+        // existing, successfully generated HWIDs do not change.
         std::string combined = cpuBrand + motherboardUuid + hddSerial;
         return HashString(combined);
     }
