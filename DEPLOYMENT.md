@@ -94,3 +94,13 @@ Test the exact Release client and target server environment for:
 7. File/self-integrity pass/fail tests against approved fixtures and firewall allow/deny behavior.
 
 CI builds Linux GCC and Windows Debug/Release x86/x64 and runs portable configuration/protocol tests. It does not execute the game, injector, Windows security APIs, or the production network environment.
+
+## Linux management script
+
+When launching with `oblivion-start` or `oblivion-server-start`, provide these additional required variables to the script:
+
+- `OBLIVION_SERVER_BINARY`: absolute path to the server executable.
+- `OBLIVION_SERVER_PID_PATH`: absolute PID-file path.
+- `OBLIVION_SERVER_STDOUT_LOG_PATH`: absolute stdout/stderr log path.
+
+Their parent directories must exist and be writable. The script does not infer binary or state-file locations from its own directory.
