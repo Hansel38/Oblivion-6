@@ -92,6 +92,7 @@ static bool LoadServerRuntimeConfiguration(
     OblivionServer::ServerRuntimeConfigInput input;
     input.listenAddress = ReadServerEnvironment("OBLIVION_LISTEN_ADDRESS");
     input.listenPort = ReadServerEnvironment("OBLIVION_LISTEN_PORT");
+    input.listenBacklog = ReadServerEnvironment("OBLIVION_LISTEN_BACKLOG");
     input.banListPath = ReadServerEnvironment("OBLIVION_BAN_LIST_PATH");
     input.violationLogPath = ReadServerEnvironment("OBLIVION_VIOLATION_LOG_PATH");
     input.maxConcurrentClients = ReadServerEnvironment("OBLIVION_MAX_CONCURRENT_CLIENTS");
@@ -1445,7 +1446,7 @@ int main() {
 
     freeaddrinfo(result);
 
-    iResult = listen(ListenSocket, SOMAXCONN);
+    iResult = listen(ListenSocket, static_cast<int>(runtimeConfig.listenBacklog));
     if (iResult == SOCKET_ERROR_VAL) {
         std::cerr << "Listen gagal" << std::endl;
         closesocket_impl(ListenSocket);
