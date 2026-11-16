@@ -9,6 +9,34 @@
 #include <string>
 
 namespace {
+    struct EnvironmentValue {
+        bool isSet = false;
+        std::string value;
+    };
+
+    EnvironmentValue ReadEnvironmentValue(const char* name) {
+        EnvironmentValue output;
+#ifdef _WIN32
+        char* value = nullptr;
+        size_t valueLength = 0;
+        const errno_t result = _dupenv_s(&value, &valueLength, name);
+        if (result == 0 && value != nullptr) {
+            output.isSet = true;
+            const size_t contentLength =
+                valueLength > 0 ? valueLength - 1 : std::char_traits<char>::length(value);
+            output.value.assign(value, contentLength);
+        }
+        std::free(value);
+#else
+        const char* value = std::getenv(name);
+        if (value != nullptr) {
+            output.isSet = true;
+            output.value.assign(value);
+        }
+#endif
+        return output;
+    }
+
     bool ContainsPlaceholderMarker(const std::string& value) {
         std::string normalized;
         normalized.reserve(value.size());
@@ -78,21 +106,20 @@ namespace {
 
 namespace OblivionServer {
     std::string GetServerSecret() {
-        const char* environmentSecret = std::getenv("OBLIVION_SECRET");
-        const char* configuredSecretFile = std::getenv("OBLIVION_SECRET_FILE");
-
-        const bool hasEnvironmentSecret = environmentSecret != nullptr;
-        const bool hasSecretFile = configuredSecretFile != nullptr;
+        const EnvironmentValue environmentSecret =
+            ReadEnvironmentValue("OBLIVION_SECRET");
+        const EnvironmentValue configuredSecretFile =
+            ReadEnvironmentValue("OBLIVION_SECRET_FILE");
 
         // Require exactly one provisioning source. Do not silently prefer one
         // when both are set, and do not fall back to a compiled-in filename.
-        if (hasEnvironmentSecret == hasSecretFile) return {};
+        if (environmentSecret.isSet == configuredSecretFile.isSet) return {};
 
-        if (hasEnvironmentSecret) {
-            const std::string secret(environmentSecret);
-            return IsUsableSecretText(secret) ? secret : std::string();
+        if (environmentSecret.isSet) {
+            return IsUsableSecretText(environmentSecret.value)
+                ? environmentSecret.value : std::string();
         }
 
-        return ReadSecretFile(configuredSecretFile);
+        return ReadSecretFile(configuredSecretFile.value);
     }
 }
