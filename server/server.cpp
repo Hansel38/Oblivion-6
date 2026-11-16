@@ -109,6 +109,17 @@ static std::string HmacSha256(const std::string& key, const std::string& data) {
     return output;
 }
 
+// Preserve same-client event correlation without writing the raw hardware identifier.
+// This uses the existing shared client/server secret; it is not private from clients
+// or anyone who extracts that secret, but avoids exposing raw HWIDs to ordinary log readers.
+static std::string FormatHwidForLog(const std::string& hwid) {
+    if (hwid.empty() || hwid == "UNKNOWN") return "UNKNOWN";
+    const std::string fingerprint =
+        HmacSha256(SERVER_SECRET, "LOG_HWID:v1:" + hwid);
+    if (fingerprint.size() != 64) return "[REDACTED]";
+    return fingerprint.substr(0, 16);
+}
+
 static std::string BuildRequestAuthData(
     const std::string& type, const std::string& details,
     const std::string& hwid, const std::string& challengeNonce) {
@@ -421,7 +432,7 @@ void AddToBanList(const std::string& hwid) {
         return;
     }
 
-    std::cout << "[BAN] HWID [" << hwid << "] ditambahkan ke ban list." << std::endl;
+    std::cout << "[BAN] HWID_ID [" << FormatHwidForLog(hwid) << "] ditambahkan ke ban list." << std::endl;
 }
 
 // Helper function untuk extract file/software name dari details
@@ -628,14 +639,14 @@ void LogViolation(const std::string& type, const std::string& details, const std
         
         // Log dengan format yang lebih jelas
         logFile << "[" << GetCurrentTimestamp() << "] TYPE: " << type 
-                << " | HWID: " << hwid 
+                << " | HWID_ID: " << FormatHwidForLog(hwid) 
                 << " | DETECTED_FILE/SOFTWARE: " << detectedFile
                 << " | DETAILS: " << details << std::endl;
         logFile.close();
         
         // Also log to console dengan format yang jelas
         std::cout << "[VIOLATION] TYPE: " << type 
-                  << " | HWID: " << hwid 
+                  << " | HWID_ID: " << FormatHwidForLog(hwid) 
                   << " | FILE/SOFTWARE: " << detectedFile << std::endl;
     } else {
         std::cerr << "[ERROR] Gagal membuka file log untuk menulis." << std::endl;
@@ -863,7 +874,7 @@ void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbea
         bytesReceived = static_cast<int>(report.size());
         if (bytesReceived > 0) {
             std::cout << "[DEBUG] Received authenticated request (" << bytesReceived
-                      << " bytes) from HWID: " << extractedHwid << std::endl;
+                      << " bytes) from HWID_ID: " << FormatHwidForLog(extractedHwid) << std::endl;
 
             ParsedReport parsed = ParseProtocol(report);
             
@@ -892,7 +903,7 @@ void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbea
                 hwid == helloHwid && parsed.challengeNonce == challengeNonce &&
                 ConstantTimeEquals(expectedRequestMac, parsed.mac);
 
-            std::cout << "[PARSE] TYPE: " << type << " | HWID: " << hwid
+            std::cout << "[PARSE] TYPE: " << type << " | HWID_ID: " << FormatHwidForLog(hwid)
                       << " | DETAILS_LEN: " << details.length() << std::endl;
 
             if (!requestAuthenticated) {
@@ -904,7 +915,7 @@ void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbea
             }
             else if (type == "CHECKIN") {
                 // Ini adalah check-in dari client saat pertama kali start
-                std::cout << "[CHECKIN] Client check-in dari HWID [" << hwid << "]" << std::endl;
+                std::cout << "[CHECKIN] Client check-in dari HWID_ID [" << FormatHwidForLog(hwid) << "]" << std::endl;
                 
                 // Cek apakah HWID sudah di-ban (file dibaca fresh setiap kali, tidak ada cache)
                 const BanListStatus banStatus = CheckHWIDBanStatus(hwid);
@@ -926,7 +937,7 @@ void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbea
                     }
                     const std::string kickCommand = "KICK:" + kickMac + ";";
                     OblivionNet::SendAll(clientSocket, kickCommand.data(), kickCommand.size());
-                    std::cout << "[BAN] HWID [" << hwid << "] terdeteksi di ban list. Perintah KICK dikirim." << std::endl;
+                    std::cout << "[BAN] HWID_ID [" << FormatHwidForLog(hwid) << "] terdeteksi di ban list. Perintah KICK dikirim." << std::endl;
                     std::cout << "[INFO] Untuk unban, hapus HWID dari bans.txt dan restart client." << std::endl;
                 } else {
                     // Negotiate the exact heartbeat timing used by this server session.
@@ -962,7 +973,7 @@ void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbea
                         closesocket(clientSocket);
                         return;
                     }
-                    std::cout << "[OK] HWID [" << hwid << "] diizinkan. Memulai heartbeat ping." << std::endl;
+                    std::cout << "[OK] HWID_ID [" << FormatHwidForLog(hwid) << "] diizinkan. Memulai heartbeat ping." << std::endl;
 
                     // Basic ping scheduler over the same socket (line-based)
                     uint32_t seq = 1;
@@ -1003,7 +1014,7 @@ void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbea
                         return;
                     }
                     
-                    std::cout << "[HEARTBEAT] Started for HWID [" << hwid << "]" << std::endl;
+                    std::cout << "[HEARTBEAT] Started for HWID_ID [" << FormatHwidForLog(hwid) << "]" << std::endl;
 
                     while (true) {
                         // Authenticate each server PING with the active session key.
@@ -1025,7 +1036,7 @@ void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbea
                         const std::string ping = pingAuthData + ":" + pingMac + ";";
                         const bool pingSent = OblivionNet::SendAll(clientSocket, ping.data(), ping.size());
                         if (!pingSent) { 
-                            std::cout << "[HEARTBEAT] Connection closed for HWID [" << hwid << "] - send failed" << std::endl; 
+                            std::cout << "[HEARTBEAT] Connection closed for HWID_ID [" << FormatHwidForLog(hwid) << "] - send failed" << std::endl; 
                             break; 
                         }
 
@@ -1152,7 +1163,7 @@ void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbea
                             state = HbState::Flagged;
                             const double avgCumSnap = rttCountCumulative
                                 ? static_cast<double>(rttSumCumulative) / rttCountCumulative : 0.0;
-                            std::cout << "[HEARTBEAT] FLAGGED for HWID [" << hwid << "] - "
+                            std::cout << "[HEARTBEAT] FLAGGED for HWID_ID [" << FormatHwidForLog(hwid) << "] - "
                                       << consecutiveMiss << " consecutive misses" << std::endl;
                             LogViolation("HB_FLAGGED",
                                 std::to_string(consecutiveMiss) + " consecutive heartbeat misses | avgCum=" +
@@ -1163,7 +1174,7 @@ void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbea
                             state = HbState::Warning;
                             const double avgCumSnap = rttCountCumulative
                                 ? static_cast<double>(rttSumCumulative) / rttCountCumulative : 0.0;
-                            std::cout << "[HEARTBEAT] WARNING for HWID [" << hwid << "] - "
+                            std::cout << "[HEARTBEAT] WARNING for HWID_ID [" << FormatHwidForLog(hwid) << "] - "
                                       << consecutiveMiss << " consecutive misses" << std::endl;
                             LogViolation("HB_WARNING",
                                 std::to_string(consecutiveMiss) + " consecutive heartbeat misses | avgCum=" +
@@ -1176,7 +1187,7 @@ void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbea
                 }
             } else {
                 // Handler untuk violation reports lainnya
-                std::cout << "[INFO] Laporan diterima dari HWID [" << hwid << "]: " << type << " - " << details << std::endl;
+                std::cout << "[INFO] Laporan diterima dari HWID_ID [" << FormatHwidForLog(hwid) << "]: " << type << " - " << details << std::endl;
                 
                 // --- LOGIKA SERVER: CEK BAN LIST DAN LOG PELANGGARAN ---
                 
@@ -1197,7 +1208,7 @@ void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbea
                 // if (isSerious && !isBanned) {
                 //     AddToBanList(hwid);
                 //     isBanned = true;
-                //     std::cout << "[BAN] Pelanggaran serius terdeteksi! HWID [" << hwid << "] di-ban otomatis." << std::endl;
+                //     std::cout << "[BAN] Pelanggaran serius terdeteksi! HWID_ID [" << FormatHwidForLog(hwid) << "] di-ban otomatis." << std::endl;
                 // }
                 
                 // 4. Kirim perintah KICK hanya jika sudah di-ban secara manual
@@ -1212,9 +1223,9 @@ void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbea
                 const std::string responseFrame = responseStatus + ":" + responseMac + ";";
                 OblivionNet::SendAll(clientSocket, responseFrame.data(), responseFrame.size());
                 if (isBanned) {
-                    std::cout << "[INFO] Perintah KICK dikirim ke client (HWID: " << hwid << ") - sudah ada di ban list." << std::endl;
+                    std::cout << "[INFO] Perintah KICK dikirim ke client (HWID_ID: " << FormatHwidForLog(hwid) << ") - sudah ada di ban list." << std::endl;
                 } else {
-                    std::cout << "[WARNING] Pelanggaran terdeteksi dari HWID [" << hwid
+                    std::cout << "[WARNING] Pelanggaran terdeteksi dari HWID_ID [" << FormatHwidForLog(hwid)
                               << "], dicatat ke log (menunggu review manual)." << std::endl;
                 }
             }
