@@ -558,7 +558,7 @@ namespace Oblivion {
             std::transform(
                 trustedLower.begin(), trustedLower.end(), trustedLower.begin(),
                 [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
-            if (publisherName.find(trustedLower) != std::wstring::npos) {
+            if (publisherName == trustedLower) {
                 return ModuleTrustResult::Trusted;
             }
         }
@@ -822,7 +822,7 @@ namespace Oblivion {
             [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
 
         // Keep the existing comparison semantics unchanged in this bug fix.
-        if (lowerActual.find(lowerExpected) != std::wstring::npos) {
+        if (lowerActual == lowerExpected) {
             return ProcessSignatureResult::Trusted;
         }
 
