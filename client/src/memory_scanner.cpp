@@ -590,7 +590,7 @@ namespace Oblivion {
     bool MemoryScanner::VerifyEmbeddedSignature(const std::vector<uint8_t>& fileData) {
         EmbeddedSignature signature{};
         if (!ExtractEmbeddedSignature(fileData, signature)) {
-#ifdef OBLIVION_RELEASE
+#if defined(OBLIVION_RELEASE) || defined(NDEBUG)
             ReportViolationAndExit(L"", "SIGNATURE_MISSING",
                                    "Embedded signature not found or invalid");
             return false;
