@@ -163,6 +163,7 @@ namespace Oblivion {
             VARIANT* value;
             ~VariantClearGuard() { VariantClear(value); }
         } propertyValueGuard{ &propertyValue };
+        (void)propertyValueGuard;
 
         const HRESULT propertyResult = object->Get(
             _bstr_t(wmiProperty.c_str()), 0, &propertyValue, 0, 0);
