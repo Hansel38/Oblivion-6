@@ -48,7 +48,7 @@ The file-integrity checks for `RRO.exe`, `Republic.grf`, and `DATA.ini` still ne
 - Run the server under a dedicated, least-privilege service account. Keep the secret, `bans.txt`, `violations.log`, and backups readable only by authorized operators.
 - Back up the ban list and server configuration before deployment and before changes. Test restore procedures.
 - Review ban decisions against server-side evidence; do not permanently ban solely on one weak heuristic signal.
-- Preserve logs during incident response. Restrict access because process paths and hardware identifiers can be sensitive. Log rotation, redaction, and retention controls remain incomplete in the current implementation.
+- Preserve logs during incident response and restrict access because process paths and violation details can contain sensitive information. Windows and Linux server console output and `violations.log` now use a domain-separated HMAC `HWID_ID` pseudonym instead of the raw HWID; the original identifier is still used internally for authentication and ban-list matching. The HMAC key is the existing shared client/server secret, so this redaction limits exposure to ordinary log readers but does not protect the identifier from clients or anyone who extracts that shared secret. Log rotation, file access controls, and retention policy remain incomplete.
 - On suspected shared-key compromise, isolate the server, preserve relevant logs, coordinate key rotation, and redeploy clients before reopening access.
 
 ## Required pre-production validation
