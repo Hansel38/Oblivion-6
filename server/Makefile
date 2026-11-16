@@ -13,7 +13,7 @@ INCLUDE_DIR = include
 BUILD_DIR = build
 
 # Source files
-SOURCES = server_linux.cpp $(SRC_DIR)/secret_obf.cpp
+SOURCES = server_linux.cpp $(SRC_DIR)/server_secret.cpp
 OBJECTS = $(SOURCES:.cpp=.o)
 TARGET = oblivion-server
 
