@@ -306,11 +306,13 @@ namespace Oblivion {
         // reference because its destructor will not run.
         try {
             m_hwid = HWIDGenerator::Generate();
-            if (m_hwid.empty()) {
-                m_hwid = "UNKNOWN";
-            }
         } catch (...) {
-            m_hwid = "UNKNOWN";
+            throw std::runtime_error(
+                "Unable to generate a unique hardware identifier");
+        }
+        if (m_hwid.empty()) {
+            throw std::runtime_error(
+                "Unable to generate a unique hardware identifier");
         }
 
         // Acquire Winsock only after all potentially throwing HWID initialization.
