@@ -51,8 +51,23 @@ static std::mutex g_violationLogMutex;
 static std::atomic<uint32_t> g_activeClientCount{ 0 };
 
 static std::string ReadServerEnvironment(const char* name) {
+#ifdef _WIN32
+    char* value = nullptr;
+    size_t valueLength = 0;
+    const errno_t result = _dupenv_s(&value, &valueLength, name);
+    if (result != 0 || value == nullptr) {
+        std::free(value);
+        return {};
+    }
+    const size_t contentLength =
+        valueLength > 0 ? valueLength - 1 : std::strlen(value);
+    std::string output(value, contentLength);
+    std::free(value);
+    return output;
+#else
     const char* value = std::getenv(name);
     return value == nullptr ? std::string() : std::string(value);
+#endif
 }
 
 static bool LoadServerRuntimeConfiguration(
