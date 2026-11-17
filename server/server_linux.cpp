@@ -39,6 +39,7 @@
 #include "server_secret.h"
 #include "include/heartbeat_protocol.h"
 #include "include/socket_framing.h"
+#include "include/listener_socket.h"
 #include "include/protocol_validation.h"
 #include "../common/network_configuration.h"
 #include "../common/server_runtime_config.h"
@@ -1419,28 +1420,13 @@ int main() {
         return 1;
     }
 
-    ListenSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-    if (ListenSocket == INVALID_SOCKET_VAL) {
-        std::cerr << "Socket gagal dibuat" << std::endl;
+    // Try every address returned by getaddrinfo(); one unusable first
+    // candidate must not prevent startup when another candidate can bind.
+    int bindError = 0;
+    if (!OblivionNet::CreateBoundListener(result, ListenSocket, bindError)) {
+        std::cerr << "Tidak ada alamat listener yang dapat di-bind; error terakhir: "
+                  << bindError << std::endl;
         freeaddrinfo(result);
-#ifdef _WIN32
-        WSACleanup();
-#endif
-        return 1;
-    }
-
-    int opt = 1;
-#ifdef _WIN32
-    setsockopt(ListenSocket, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
-#else
-    setsockopt(ListenSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-#endif
-
-    iResult = bind(ListenSocket, result->ai_addr, result->ai_addrlen);
-    if (iResult == SOCKET_ERROR_VAL) {
-        std::cerr << "Bind gagal" << std::endl;
-        freeaddrinfo(result);
-        closesocket_impl(ListenSocket);
 #ifdef _WIN32
         WSACleanup();
 #endif
