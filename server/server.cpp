@@ -21,6 +21,7 @@
 #include "server_secret.h"
 #include "include/heartbeat_protocol.h"
 #include "include/socket_framing.h"
+#include "include/listener_socket.h"
 #include "include/protocol_validation.h"
 #include "../common/network_configuration.h"
 #include "../common/server_runtime_config.h"
@@ -1298,21 +1299,13 @@ int main() {
         return 1;
     }
 
-    // Buat socket untuk mendengarkan koneksi client
-    ListenSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-    if (ListenSocket == INVALID_SOCKET) {
-        std::cerr << "Socket gagal dibuat dengan error: " << WSAGetLastError() << std::endl;
+    // Try every address returned by getaddrinfo(); one unusable first
+    // candidate must not prevent startup when another candidate can bind.
+    int bindError = 0;
+    if (!OblivionNet::CreateBoundListener(result, ListenSocket, bindError)) {
+        std::cerr << "Tidak ada alamat listener yang dapat di-bind; error terakhir: "
+                  << bindError << std::endl;
         freeaddrinfo(result);
-        WSACleanup();
-        return 1;
-    }
-
-    // Bind socket ke alamat dan port
-    iResult = bind(ListenSocket, result->ai_addr, (int)result->ai_addrlen);
-    if (iResult == SOCKET_ERROR) {
-        std::cerr << "Bind gagal dengan error: " << WSAGetLastError() << std::endl;
-        freeaddrinfo(result);
-        closesocket(ListenSocket);
         WSACleanup();
         return 1;
     }
