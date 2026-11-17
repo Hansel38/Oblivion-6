@@ -47,6 +47,10 @@ jobs:
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror tests/ban_list_file_test.cpp -o /tmp/ban_list_file_test
           /tmp/ban_list_file_test
+      - name: Test listener address fallback
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror tests/listener_socket_test.cpp -o /tmp/listener_socket_test
+          /tmp/listener_socket_test
       - name: Test explicit server secret provisioning
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -I server/include tests/server_secret_config_test.cpp server/src/server_secret.cpp -o /tmp/server_secret_config_test
