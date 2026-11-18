@@ -65,6 +65,29 @@ int main() {
     Require(!OblivionServer::ValidateServerStorageFiles(storageConfig, storageError),
             "server startup must reject a symbolic-link ban-list path");
 
+    const fs::path logTargetPath = testDirectory / "target.log";
+    const fs::path logSymlinkPath = testDirectory / "linked-violations.log";
+    {
+        std::ofstream logTarget(logTargetPath);
+        Require(logTarget.is_open(), "log symlink target must be created");
+        logTarget << "do not redirect logs";
+        Require(logTarget.good(), "log symlink target must be writable");
+    }
+
+    std::error_code logSymlinkError;
+    fs::create_symlink(logTargetPath, logSymlinkPath, logSymlinkError);
+    Require(!logSymlinkError, "Linux regression fixture must create a log symbolic link");
+    Require(!OblivionServer::IsRegularNonSymlinkFileOrMissing(logSymlinkPath.string()),
+            "an existing symbolic link must not be accepted as a violation-log target");
+    Require(OblivionServer::IsRegularNonSymlinkFileOrMissing(
+                (testDirectory / "new-violations.log").string()),
+            "a missing violation-log path must remain eligible for creation");
+
+    storageConfig.banListPath = regularPath.string();
+    storageConfig.violationLogPath = logSymlinkPath.string();
+    Require(!OblivionServer::ValidateServerStorageFiles(storageConfig, storageError),
+            "server startup must reject a symbolic-link violation-log path");
+
     fs::remove_all(testDirectory);
     return 0;
 }
