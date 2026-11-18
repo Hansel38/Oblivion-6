@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "secret_obf.h"
+#include "client_secret_source_policy.h"
 #include <vector>
 #include <windows.h>
 
@@ -50,11 +51,16 @@ namespace Oblivion {
         }
 
         const DWORD envError = GetLastError();
-        if (envError != ERROR_SUCCESS && envError != ERROR_ENVVAR_NOT_FOUND) {
+        const auto environmentState = ClassifyClientSecretEnvironment(
+            false,
+            envError == ERROR_ENVVAR_NOT_FOUND,
+            envError == ERROR_SUCCESS);
+        if (!ShouldLoadClientSecretFile(environmentState)) {
             return {};
         }
 
-        // 2) Read secret.dat only when the executable directory is resolved.
+        // 2) Read secret.dat only when OBLIVION_SECRET is genuinely absent
+        // and the executable directory can be resolved.
         // XOR is obfuscation, not cryptographic protection.
         std::wstring executableDirectory;
         std::vector<wchar_t> pathBuffer(MAX_PATH);
