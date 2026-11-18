@@ -95,6 +95,11 @@ namespace OblivionServer {
             return false;
         }
 
+        if (!IsRegularNonSymlinkFileOrMissing(config.violationLogPath)) {
+            error = "OBLIVION_VIOLATION_LOG_PATH must be a regular file or a new file path, not a symbolic link";
+            return false;
+        }
+
         std::ofstream violationLog(
             config.violationLogPath, std::ios::out | std::ios::app);
         if (!violationLog.is_open()) {
