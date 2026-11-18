@@ -43,9 +43,15 @@ int main() {
     assert(Oblivion::ApplyHeartbeatIntervalJitter(3500, 200, 200) == 3700);
     assert(Oblivion::ApplyHeartbeatIntervalJitter(3500, 200, -500) == 3300);
     assert(Oblivion::ApplyHeartbeatIntervalJitter(3500, 200, 500) == 3700);
+    // At the negotiated hard limits, symmetric jitter must collapse to zero
+    // rather than move one side outside the client's accepted interval range.
     assert(Oblivion::ApplyHeartbeatIntervalJitter(100, 10000, -10000) == 100);
-    assert(Oblivion::ApplyHeartbeatIntervalJitter(100, 10000, 10000) == 200);
-    assert(Oblivion::ApplyHeartbeatIntervalJitter(60000, 10000, -10000) == 59900);
+    assert(Oblivion::ApplyHeartbeatIntervalJitter(100, 10000, 10000) == 100);
+    assert(Oblivion::ApplyHeartbeatIntervalJitter(150, 10000, -10000) == 100);
+    assert(Oblivion::ApplyHeartbeatIntervalJitter(150, 10000, 10000) == 200);
+    assert(Oblivion::ApplyHeartbeatIntervalJitter(59950, 10000, -10000) == 59900);
+    assert(Oblivion::ApplyHeartbeatIntervalJitter(59950, 10000, 10000) == 60000);
+    assert(Oblivion::ApplyHeartbeatIntervalJitter(60000, 10000, -10000) == 60000);
     assert(Oblivion::ApplyHeartbeatIntervalJitter(60000, 10000, 10000) == 60000);
     assert(Oblivion::GetHeartbeatJitterLimit(100, 10000) == 0);
     assert(Oblivion::GetHeartbeatJitterLimit(60000, 10000) == 0);
