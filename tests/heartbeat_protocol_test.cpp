@@ -35,6 +35,27 @@ int main() {
         assert(!Oblivion::IsValidClientStatus(status));
     }
 
+    // Session jitter is symmetric, bounded, and always produces an interval
+    // that the client accepts through the existing authenticated negotiation.
+    assert(Oblivion::GetHeartbeatJitterLimit(3500, 200) == 200);
+    assert(Oblivion::ApplyHeartbeatIntervalJitter(3500, 200, -200) == 3300);
+    assert(Oblivion::ApplyHeartbeatIntervalJitter(3500, 200, 0) == 3500);
+    assert(Oblivion::ApplyHeartbeatIntervalJitter(3500, 200, 200) == 3700);
+    assert(Oblivion::ApplyHeartbeatIntervalJitter(3500, 200, -500) == 3300);
+    assert(Oblivion::ApplyHeartbeatIntervalJitter(3500, 200, 500) == 3700);
+    assert(Oblivion::ApplyHeartbeatIntervalJitter(100, 10000, -10000) == 100);
+    assert(Oblivion::ApplyHeartbeatIntervalJitter(100, 10000, 10000) == 200);
+    assert(Oblivion::ApplyHeartbeatIntervalJitter(60000, 10000, -10000) == 59900);
+    assert(Oblivion::ApplyHeartbeatIntervalJitter(60000, 10000, 10000) == 60000);
+    assert(Oblivion::GetHeartbeatJitterLimit(100, 10000) == 0);
+    assert(Oblivion::GetHeartbeatJitterLimit(60000, 10000) == 0);
+    assert(Oblivion::GetHeartbeatJitterLimit(50, 10000) == 0);
+    assert(Oblivion::GetHeartbeatJitterLimit(60001, 10000) == 0);
+
+    // Zero jitter preserves the configured interval exactly.
+    assert(Oblivion::ApplyHeartbeatIntervalJitter(3500, 0, -200) == 3500);
+    assert(Oblivion::ApplyHeartbeatIntervalJitter(3500, 0, 200) == 3500);
+
     // Sequence binding rejects duplicate and skipped/reordered exchanges.
     assert(Oblivion::IsExpectedHeartbeatSequence(1, 1));
     assert(!Oblivion::IsExpectedHeartbeatSequence(1, 2));
