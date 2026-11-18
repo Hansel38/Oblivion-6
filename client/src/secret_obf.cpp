@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "secret_obf.h"
 #include "client_secret_source_policy.h"
+#include "../../common/secret_validation.h"
 #include <vector>
 #include <windows.h>
 
@@ -43,6 +44,9 @@ namespace Oblivion {
                 CP_UTF8, WC_ERR_INVALID_CHARS, envBuffer.data(), inputLength,
                 &envSecret[0], sizeNeeded, nullptr, nullptr);
             if (converted != sizeNeeded) {
+                return {};
+            }
+            if (!OblivionSecrets::IsUsableSecretText(envSecret)) {
                 return {};
             }
 
@@ -109,6 +113,9 @@ namespace Oblivion {
                             secret += static_cast<char>(encoded[i] ^ key);
                         }
                         CloseHandle(hFile);
+                        if (!OblivionSecrets::IsUsableSecretText(secret)) {
+                            return {};
+                        }
                         cached = secret;
                         return cached;
                     }
