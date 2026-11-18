@@ -2,6 +2,7 @@
 
 #include "network_configuration.h"
 #include "heartbeat_protocol.h"
+#include "ban_list_file.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -83,9 +84,8 @@ namespace OblivionServer {
     inline bool ValidateServerStorageFiles(
         const ServerRuntimeConfig& config, std::string& error) {
         std::error_code filesystemError;
-        if (!std::filesystem::is_regular_file(
-                config.banListPath, filesystemError) || filesystemError) {
-            error = "OBLIVION_BAN_LIST_PATH must identify an existing regular file";
+        if (!IsBanListFileAvailable(config.banListPath)) {
+            error = "OBLIVION_BAN_LIST_PATH must identify an existing regular file and must not be a symbolic link";
             return false;
         }
 
