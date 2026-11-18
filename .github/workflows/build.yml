@@ -59,6 +59,10 @@ jobs:
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror tests/client_secret_source_policy_test.cpp -o /tmp/client_secret_source_policy_test
           /tmp/client_secret_source_policy_test
+      - name: Test shared secret validation
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror tests/secret_validation_test.cpp -o /tmp/secret_validation_test
+          /tmp/secret_validation_test
       - name: Validate Linux management scripts
         run: |
           bash -n server/oblivion-start
