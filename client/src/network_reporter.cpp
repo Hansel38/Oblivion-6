@@ -2,6 +2,7 @@
 #include "network_reporter.h"
 #include "heartbeat_protocol.h"
 #include "hwid_generator.h"
+#include "../../common/secret_validation.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <thread>
@@ -297,9 +298,9 @@ namespace Oblivion {
 
     NetworkReporter::NetworkReporter(const std::string& serverIP, int serverPort, const std::string& secretKey)
         : m_serverIP(serverIP), m_serverPort(serverPort), m_secretKey(secretKey), m_hbSocket(INVALID_SOCKET) {
-        if (m_secretKey.size() < 32) {
+        if (!OblivionSecrets::IsUsableSecretText(m_secretKey)) {
             throw std::invalid_argument(
-                "Client secret must contain at least 32 bytes of provisioned key material");
+                "Client secret must contain 32-4096 printable ASCII bytes and no placeholder marker");
         }
         // Generate HWID before acquiring Winsock state. These WMI/string operations
         // may allocate or throw; a constructor that fails must not leak a WSAStartup

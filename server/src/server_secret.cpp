@@ -1,4 +1,5 @@
 #include "server_secret.h"
+#include "../../common/secret_validation.h"
 
 #include <algorithm>
 #include <cctype>
@@ -37,41 +38,6 @@ namespace {
         return output;
     }
 
-    bool ContainsPlaceholderMarker(const std::string& value) {
-        std::string normalized;
-        normalized.reserve(value.size());
-        for (const unsigned char character : value) {
-            normalized.push_back(static_cast<char>(std::tolower(character)));
-        }
-
-        constexpr const char* markers[] = {
-            "placeholder",
-            "change-me",
-            "changeme",
-            "your-secret",
-            "example-secret",
-            "development-secret",
-            "replace-this"
-        };
-
-        for (const char* marker : markers) {
-            if (normalized.find(marker) != std::string::npos) return true;
-        }
-        return false;
-    }
-
-    bool IsUsableSecretText(const std::string& value) {
-        if (value.size() < 32 || value.size() > 4096 ||
-            ContainsPlaceholderMarker(value)) {
-            return false;
-        }
-
-        for (const unsigned char character : value) {
-            if (character < 0x21 || character > 0x7E) return false;
-        }
-        return true;
-    }
-
     std::string ReadSecretFile(const std::string& configuredPath) {
         const std::filesystem::path path(configuredPath);
         if (!path.is_absolute()) return {};
@@ -100,7 +66,7 @@ namespace {
             value.pop_back();
         }
 
-        return IsUsableSecretText(value) ? value : std::string();
+        return OblivionSecrets::IsUsableSecretText(value) ? value : std::string();
     }
 }
 
@@ -116,7 +82,7 @@ namespace OblivionServer {
         if (environmentSecret.isSet == configuredSecretFile.isSet) return {};
 
         if (environmentSecret.isSet) {
-            return IsUsableSecretText(environmentSecret.value)
+            return OblivionSecrets::IsUsableSecretText(environmentSecret.value)
                 ? environmentSecret.value : std::string();
         }
 

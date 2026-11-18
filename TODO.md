@@ -27,6 +27,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [x] **P1 — Windows environment secret length:** avoid including the `_dupenv_s` terminating NUL byte in the server authentication key.
 - [x] **P1 — Linux secret file location:** resolve `secret.dat` next to `/proc/self/exe` rather than the service manager's current working directory; cap file size and reject incomplete/error reads.
 - [x] **P1 — Client secret source selection:** use the client-side `secret.dat` fallback only when `OBLIVION_SECRET` is genuinely absent; an explicitly empty variable or environment-query error now fails closed. A portable regression test covers populated, missing, empty, and failed states; Windows API/runtime validation remains required.
+- [x] **P1 — Client/server shared-secret validation parity:** Windows client, Windows server, and Linux server now use one shared validator for 32–4096 printable ASCII bytes and case-insensitive placeholder marker rejection. Regression coverage checks length, whitespace/control bytes, non-ASCII bytes, and every marker; actual Windows environment/file runtime validation remains required.
 
 - [x] **P1 — ProcessWatcher ownership:** use `std::unique_ptr` for scanner components; startup now rolls back cleanly if thread creation fails.
 - [x] **P1 — AntiSuspend lifecycle:** make start/stop idempotent and join worker threads rather than leaving them detached.
