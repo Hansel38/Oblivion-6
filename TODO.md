@@ -26,6 +26,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [x] **P0 — Secret disclosure:** remove logging of expected and received authentication secrets from both server implementations.
 - [x] **P1 — Windows environment secret length:** avoid including the `_dupenv_s` terminating NUL byte in the server authentication key.
 - [x] **P1 — Linux secret file location:** resolve `secret.dat` next to `/proc/self/exe` rather than the service manager's current working directory; cap file size and reject incomplete/error reads.
+- [x] **P1 — Client secret source selection:** use the client-side `secret.dat` fallback only when `OBLIVION_SECRET` is genuinely absent; an explicitly empty variable or environment-query error now fails closed. A portable regression test covers populated, missing, empty, and failed states; Windows API/runtime validation remains required.
 
 - [x] **P1 — ProcessWatcher ownership:** use `std::unique_ptr` for scanner components; startup now rolls back cleanly if thread creation fails.
 - [x] **P1 — AntiSuspend lifecycle:** make start/stop idempotent and join worker threads rather than leaving them detached.
@@ -261,3 +262,5 @@ This checklist tracks findings from a source review. A checked item means the co
 - This branch is a defensive hardening pass, not a claim that the anti-cheat is bypass-proof.
 - Do not automatically ban solely on a single heuristic signal. Prefer server-side evidence, confidence scoring, and human review to reduce false positives.
 - The transport is intentionally plain TCP (no TLS). Any protocol redesign must update Windows client, Windows server, Linux server, and deployment documentation together. MACs provide authenticity/integrity, not confidentiality.
+
+- [ ] Runtime fixture: on Windows, create a valid client-side `secret.dat`, then verify that an absent `OBLIVION_SECRET` loads it, an explicitly empty `OBLIVION_SECRET` rejects it without fallback, and a non-empty value takes precedence.
