@@ -1,4 +1,5 @@
 #include "../common/ban_list_file.h"
+#include "../common/server_runtime_config.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -46,6 +47,23 @@ int main() {
 
     Require(OblivionServer::IsBanListFileAvailable(regularPath.string()),
             "an existing regular ban-list file must be available");
+
+    const fs::path symlinkPath = testDirectory / "linked-bans.txt";
+    std::error_code symlinkError;
+    fs::create_symlink(regularPath, symlinkPath, symlinkError);
+    Require(!symlinkError, "Linux regression fixture must create a symbolic link");
+    Require(!OblivionServer::IsBanListFileAvailable(symlinkPath.string()),
+            "a symbolic link to a regular file must not be accepted as the ban list");
+
+    OblivionServer::ServerRuntimeConfig storageConfig;
+    storageConfig.banListPath = regularPath.string();
+    storageConfig.violationLogPath = (testDirectory / "violations.log").string();
+    std::string storageError;
+    Require(OblivionServer::ValidateServerStorageFiles(storageConfig, storageError),
+            "server startup must accept a real regular ban-list file");
+    storageConfig.banListPath = symlinkPath.string();
+    Require(!OblivionServer::ValidateServerStorageFiles(storageConfig, storageError),
+            "server startup must reject a symbolic-link ban-list path");
 
     fs::remove_all(testDirectory);
     return 0;
