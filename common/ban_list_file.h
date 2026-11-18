@@ -14,8 +14,12 @@ namespace OblivionServer {
         }
 
         std::error_code error;
-        const bool regularFile = std::filesystem::is_regular_file(path, error);
-        return !error && regularFile;
+        // symlink_status inspects the configured path itself instead of
+        // following a symlink to some other file. A ban-list symlink can
+        // otherwise redirect reads to an empty or attacker-controlled file.
+        const std::filesystem::file_status status =
+            std::filesystem::symlink_status(path, error);
+        return !error && std::filesystem::is_regular_file(status);
     }
 
 } // namespace OblivionServer
