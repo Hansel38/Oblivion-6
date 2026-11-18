@@ -37,6 +37,8 @@ The server has no operational defaults for its listener, storage paths, concurre
 | `OBLIVION_HB_MAX_MISS` | Required integer, 1–10 |
 | `OBLIVION_HB_RTT_WARN_MS` | Required integer, 0–60000 |
 
+For each authenticated client session, the server selects one symmetric jitter offset around `OBLIVION_HB_INTERVAL_MS`. The offset is bounded so the negotiated interval remains between 100 and 60000 ms. The exact selected interval is included in the existing authenticated session configuration; the client uses that value for its heartbeat receive deadline. No additional TCP frame or protocol field is introduced.
+
 The listener binds only to the address supplied in `OBLIVION_LISTEN_ADDRESS`; it does not choose a wildcard address automatically. Configure a local address that exists on the host. Clients must use the reachable server address and the same TCP port.
 
 The ban-list file must exist before startup. An empty file represents an empty ban list. The server no longer searches for a fixed `bans.txt` beside its executable. The violation log is opened at the configured absolute path; the server no longer chooses a fixed `violations.log` path.
