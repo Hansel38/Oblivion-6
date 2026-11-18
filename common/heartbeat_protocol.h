@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 
@@ -30,6 +31,40 @@ namespace Oblivion {
         uint32_t max_consecutive_miss;
         uint32_t rtt_warn_ms;
     };
+
+    // Bound per-session jitter so the negotiated interval remains inside the
+    // client/server supported range and never needs a protocol-format change.
+    inline uint32_t GetHeartbeatJitterLimit(
+        uint32_t interval_ms, uint32_t jitter_ms) noexcept {
+        constexpr uint32_t kMinimumIntervalMs = 100;
+        constexpr uint32_t kMaximumIntervalMs = 60000;
+        if (interval_ms < kMinimumIntervalMs ||
+            interval_ms > kMaximumIntervalMs) {
+            return 0;
+        }
+
+        const uint32_t lowerHeadroom = interval_ms - kMinimumIntervalMs;
+        const uint32_t upperHeadroom = kMaximumIntervalMs - interval_ms;
+        return (std::min)(jitter_ms, (std::min)(lowerHeadroom, upperHeadroom));
+    }
+
+    // Apply one symmetric, bounded offset when a session is negotiated. The
+    // server authenticates and sends this exact interval in the existing
+    // SESSION/HB_CONFIG frames; client timeout handling therefore stays aligned.
+    inline uint32_t ApplyHeartbeatIntervalJitter(
+        uint32_t interval_ms, uint32_t jitter_ms,
+        int32_t requestedOffsetMs) noexcept {
+        const uint32_t jitterLimit =
+            GetHeartbeatJitterLimit(interval_ms, jitter_ms);
+        const int64_t lowerOffset = -static_cast<int64_t>(jitterLimit);
+        const int64_t upperOffset = static_cast<int64_t>(jitterLimit);
+        int64_t offset = static_cast<int64_t>(requestedOffsetMs);
+        if (offset < lowerOffset) offset = lowerOffset;
+        if (offset > upperOffset) offset = upperOffset;
+
+        return static_cast<uint32_t>(
+            static_cast<int64_t>(interval_ms) + offset);
+    }
 
     // A heartbeat frame must belong to the next exchange in this session.
     // uint32_t wraparound is intentional and shared by both peers.
