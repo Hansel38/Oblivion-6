@@ -50,6 +50,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [x] **P1 — Heartbeat server configuration:** Linux server validates supported environment values and passes the resulting config into each session.
 - [x] **P1 — Bounded server concurrency:** reserve one of the 256 handler slots atomically in the accept loop before creating a thread; reject excess sockets before allocating handler threads, release reservations on thread-construction failure, and release active slots through `ActiveClientGuard` on handler exit. Runtime burst/stress fixture remains required.
 - [x] **P1 — Listener address fallback:** Windows and Linux now try every address returned by `getaddrinfo()` until socket creation and bind succeed, closing each failed candidate socket. A regression fixture forces the first candidate's bind to fail and verifies the next candidate succeeds; Windows host runtime validation remains required.
+- [x] **P1 — Apply configured heartbeat jitter:** both server variants now derive a symmetric per-session interval offset from the authenticated session nonce, clamp it to the client/server supported interval bounds, and authenticate the exact selected interval through the existing session configuration. Regression tests cover both boundaries, zero jitter, and out-of-range offsets; Windows runtime timing validation remains required.
 - [ ] Runtime fixture: hold 256 TCP client handlers active, then open additional connections; verify excess clients receive `BUSY`, no more than 256 handler threads are started, and slots are released after disconnects and thread-creation failures
 
 - [x] **P2 — Concurrent violation logging:** serialize writes to `violations.log` in Windows and Linux server variants.
@@ -227,6 +228,7 @@ This checklist tracks findings from a source review. A checked item means the co
 - [ ] Runtime test: client handshake and nonce parsing
 - [ ] Runtime test: replay a previously authenticated PING or inject a duplicate/skipped sequence; client must not emit a PONG for the stale frame, and server must reject a PONG whose sequence does not match the active PING
 - [ ] Runtime test: heartbeat fragmentation/coalescing
+- [ ] Runtime fixture: connect multiple clients with nonzero `OBLIVION_HB_JITTER_MS`; verify each receives a MAC-authenticated interval within the configured jitter bounds and the client heartbeat timeout follows the negotiated value without false disconnects.
 - [ ] Runtime test: ban-list missing, unreadable, malformed, duplicate, and concurrent access cases
 - [ ] Runtime test: two server processes concurrently attempt to add the same and different HWIDs; verify no duplicate/lost entries and that readers observe only complete old/new ban-list files
 - [ ] Fault-injection test: terminate a writer before temporary-file publication and immediately after publication; verify the original or complete new list remains parseable, with incomplete/corrupt data failing closed

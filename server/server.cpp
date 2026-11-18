@@ -4,6 +4,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <random>
 #include <fstream>
 #include <iterator>
 #include <filesystem>
@@ -949,14 +950,24 @@ void HandleClient(SOCKET clientSocket, Oblivion::HeartbeatConfig sessionHeartbea
                     std::cout << "[BAN] HWID_ID [" << FormatHwidForLog(hwid) << "] terdeteksi di ban list. Perintah KICK dikirim." << std::endl;
                     std::cout << "[INFO] Untuk unban, hapus HWID dari configured ban-list file dan restart client." << std::endl;
                 } else {
-                    // Negotiate the exact heartbeat timing used by this server session.
-                    const Oblivion::HeartbeatConfig& cfg = sessionHeartbeatConfig;
+                    // Generate one bounded jittered interval for this authenticated
+                    // session. The selected value is MAC-bound in the existing session
+                    // configuration, so the client timeout remains synchronized.
                     uint64_t sessionNonce = 0;
                     if (!OblivionNet::GenerateSecureNonce(sessionNonce)) {
                         LogViolation("RNG_FAILURE", "Unable to generate secure session nonce", hwid);
                         closesocket(clientSocket);
                         return;
                     }
+                    Oblivion::HeartbeatConfig cfg = sessionHeartbeatConfig;
+                    const uint32_t jitterLimit = Oblivion::GetHeartbeatJitterLimit(
+                        cfg.interval_ms, cfg.jitter_ms);
+                    std::mt19937_64 jitterGenerator(sessionNonce);
+                    std::uniform_int_distribution<int32_t> jitterDistribution(
+                        -static_cast<int32_t>(jitterLimit),
+                        static_cast<int32_t>(jitterLimit));
+                    cfg.interval_ms = Oblivion::ApplyHeartbeatIntervalJitter(
+                        cfg.interval_ms, cfg.jitter_ms, jitterDistribution(jitterGenerator));
                     const std::string sessionNonceText = std::to_string(sessionNonce);
                     const std::string sessionAuthData =
                         "SESSION:" + hwid + ":" + challengeNonce + ":" + sessionNonceText + ":" +
